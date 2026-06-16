@@ -1,0 +1,19 @@
+{
+  "name": "codexio",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm --filter @codexio/cli dev",
+    "test": "pnpm -r test",
+    "lint": "pnpm -r lint",
+    "start": "pnpm --filter @codexio/cli start"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.2",
+    "typescript": "^5.9.3",
+    "tsx": "^4.21.0",
+    "vitest": "^4.0.15"
+  }
+}
