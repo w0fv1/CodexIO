@@ -5,10 +5,11 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { describe, expect, it, vi } from 'vitest'
 import { codexHomePath, createAgentEnv } from './agent/AgentEnvironment.js'
+import { AgentManager } from './agent/AgentManager.js'
 import { CodexAgent } from './agent/CodexAgent.js'
 import { EchoAgent } from './agent/EchoAgent.js'
 import { ConfigSchema, ConfigService } from './ConfigService.js'
-import { createAgent } from './index.js'
+import { Result } from './Result.js'
 
 describe('core', () => {
   it('echo agent sends received text', async () => {
@@ -26,7 +27,7 @@ describe('core', () => {
   })
 
   it('selected agent exposes login lifecycle', async () => {
-    const agent = createAgent(ConfigSchema.parse({
+    const manager = new AgentManager(ConfigSchema.parse({
       agents: {
         codex: {
           enabled: false
@@ -38,9 +39,12 @@ describe('core', () => {
           enabled: true
         }
       }
-    }), 'http://127.0.0.1:8787', async () => {})
-    expect(agent).toBeInstanceOf(EchoAgent)
-    await expect(agent.login()).resolves.toBeUndefined()
+    }), 'http://127.0.0.1:8787', {
+      send: async () => Result.success(null),
+      status: async () => Result.success(null)
+    })
+    expect(manager.status().status).toBe('idle')
+    await expect(manager.login()).resolves.toBeUndefined()
   })
 
   it('agents apply proxy env internally', async () => {

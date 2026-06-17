@@ -188,7 +188,7 @@ describe('server', () => {
     await closeTestServer(listener)
   })
 
-  it('rejects ambiguous enabled agents', async () => {
+  it('starts host before reporting agent startup failure', async () => {
     const config = ConfigSchema.parse({
       agents: {
         codex: {
@@ -208,9 +208,39 @@ describe('server', () => {
       }
     })
     const server = createCodexioApp(config)
-    const ready = await server.ready
-    expect(ready.isFailed).toBe(true)
-    expect(ready.message).toBe('only one agent can be enabled')
+    const listener = server.listen(0)
+    await new Promise<void>((resolve) => listener.once('listening', resolve))
+    const address = listener.address()
+    if (!address || typeof address === 'string') {
+      throw new Error('server address not found')
+    }
+    let status: {
+      isFailed: boolean
+      data: {
+        status: string
+        message: string
+      }
+    } | undefined
+    const startedAt = Date.now()
+    while (status?.data.status !== 'failed') {
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/status`)
+      status = await response.json() as {
+        isFailed: boolean
+        data: {
+          status: string
+          message: string
+        }
+      }
+      if (Date.now() - startedAt > 4000) {
+        throw new Error('agent status timeout')
+      }
+      await new Promise((resolve) => {
+        setTimeout(resolve, 5)
+      })
+    }
+    expect(status.isFailed).toBe(false)
+    expect(status.data.message).toBe('only one agent can be enabled')
+    await closeTestServer(listener)
   })
 })
 
@@ -240,10 +270,6 @@ async function startTestServer(): Promise<{
     }
   })
   const server = createCodexioApp(config)
-  const ready = await server.ready
-  if (ready.isFailed) {
-    throw new Error(ready.message)
-  }
   const listener = server.listen(0)
   await new Promise<void>((resolve) => listener.once('listening', resolve))
   const address = listener.address()

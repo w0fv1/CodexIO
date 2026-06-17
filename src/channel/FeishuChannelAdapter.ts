@@ -109,7 +109,10 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     return Result.success(null)
   }
 
-  stop(): void {
+  async stop(): Promise<Result<null>> {
     this.wsClient?.close()
+    this.wsClient = undefined
+    this.client = undefined
+    return Result.success(null)
   }
 }

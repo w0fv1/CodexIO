@@ -93,4 +93,22 @@ export class AdapterManager {
     }
     return Result.success(null)
   }
+
+  async status(_text: string): Promise<Result<null>> {
+    return Result.success(null)
+  }
+
+  async stop(): Promise<Result<null>> {
+    const failures: string[] = []
+    for (const adapter of this.adapters.values()) {
+      const result = await adapter.stop()
+      if (result.isFailed) {
+        failures.push(result.message)
+      }
+    }
+    if (failures.length > 0) {
+      return Result.fail(failures.join('\n'))
+    }
+    return Result.success(null)
+  }
 }

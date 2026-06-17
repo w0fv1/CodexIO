@@ -12,6 +12,7 @@ export class WebChannelAdapter implements ChannelAdapter {
   })
   private input?: ChannelStartInput
   private attached?: HttpServer
+  private stopped = false
 
   start(input: ChannelStartInput): void {
     this.input = input
@@ -113,11 +114,7 @@ export class WebChannelAdapter implements ChannelAdapter {
       }
     })
     server.once('close', () => {
-      for (const socket of this.sockets) {
-        socket.close()
-      }
-      this.sockets.clear()
-      this.server.close()
+      void this.stop()
     })
   }
 
@@ -145,4 +142,15 @@ export class WebChannelAdapter implements ChannelAdapter {
     return Result.success(null)
   }
 
+  async stop(): Promise<Result<null>> {
+    for (const socket of this.sockets) {
+      socket.close()
+    }
+    this.sockets.clear()
+    if (!this.stopped) {
+      this.stopped = true
+      this.server.close()
+    }
+    return Result.success(null)
+  }
 }

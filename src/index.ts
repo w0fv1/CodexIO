@@ -6,20 +6,17 @@ import { pathToFileURL } from 'node:url'
 import express from 'express'
 import cors from 'cors'
 import { Command } from 'commander'
-import { ChannelReceiveResult } from './channel/ChannelAdapter.js'
 import { AdapterManager } from './channel/AdapterManager.js'
-import { Agent } from './agent/Agent.js'
-import { ClaudeAgent } from './agent/ClaudeAgent.js'
-import { CodexAgent } from './agent/CodexAgent.js'
-import { EchoAgent } from './agent/EchoAgent.js'
+import { AgentManager } from './agent/AgentManager.js'
 import { CodexioConfig, ConfigService } from './ConfigService.js'
 import { Result } from './Result.js'
 
 export type CodexioServer = {
   app: express.Express
   adapterManager: AdapterManager
-  ready: Promise<Result<null>>
+  agentManager: AgentManager
   listen: (port?: number, host?: string) => HttpServer
+  stop: () => Promise<Result<null>>
 }
 
 export function createCodexioApp(config: CodexioConfig): CodexioServer {
@@ -31,23 +28,10 @@ export function createCodexioApp(config: CodexioConfig): CodexioServer {
 
   const adapterManager = new AdapterManager(config)
   const toolBaseUrl = `http://${config.server.host}:${config.server.port}`
-  let currentAgent: Agent | undefined
-
-  const startAgent = async (): Promise<Result<null>> => {
-    try {
-      const send = async (value: string) => {
-        const sent = await adapterManager.send(value)
-        if (sent.isFailed) {
-          throw new Error(sent.message)
-        }
-      }
-      currentAgent = createAgent(config, toolBaseUrl, send)
-      await currentAgent.start(config)
-      return Result.success(null)
-    } catch (error) {
-      return Result.fromError(error)
-    }
-  }
+  const agentManager = new AgentManager(config, toolBaseUrl, {
+    send: async (text) => adapterManager.send(text),
+    status: async (text) => adapterManager.status(text)
+  })
 
   app.post('/api/message', async (request, response) => {
     try {
@@ -69,48 +53,16 @@ export function createCodexioApp(config: CodexioConfig): CodexioServer {
     }
   })
 
-  adapterManager.start(app, async (received) => {
-    try {
-      if (received.trim() === '/$ clear') {
-        if (!currentAgent) {
-          const started = await startAgent()
-          if (started.isFailed) {
-            return Result.fail<ChannelReceiveResult>(started.message)
-          }
-        }
-        if (!currentAgent) {
-          return Result.fail<ChannelReceiveResult>('agent not started')
-        }
-        await currentAgent.clear()
-        return Result.success({
-          action: 'clear'
-        })
-      }
-      let text = received
-      if (text.startsWith('/$$')) {
-        text = `/$${text.slice(3)}`
-      }
-      if (!currentAgent) {
-        const started = await startAgent()
-        if (started.isFailed) {
-          return Result.fail<ChannelReceiveResult>(started.message)
-        }
-      }
-      if (!currentAgent) {
-        return Result.fail<ChannelReceiveResult>('agent not started')
-      }
-      await currentAgent.receive(text)
-      return Result.success({})
-    } catch (error) {
-      const failed = Result.fromError(error)
-      return Result.fail<ChannelReceiveResult>(failed.message)
-    }
+  app.get('/api/status', (_request, response) => {
+    response.json(Result.success(agentManager.status()))
   })
+
+  adapterManager.start(app, async (received) => agentManager.receive(received))
 
   return {
     app,
     adapterManager,
-    ready: startAgent(),
+    agentManager,
     listen: (port?: number, host?: string) => {
       let listener: HttpServer
       if (port !== undefined && host) {
@@ -121,41 +73,46 @@ export function createCodexioApp(config: CodexioConfig): CodexioServer {
         listener = app.listen()
       }
       adapterManager.attach(listener)
+      listener.once('listening', () => {
+        void agentManager.start()
+      })
+      const close = listener.close.bind(listener)
+      listener.close = ((callback?: (error?: Error) => void) => {
+        void (async () => {
+          const agentStopped = await agentManager.stop()
+          const adapterStopped = await adapterManager.stop()
+          close((error?: Error) => {
+            if (error) {
+              callback?.(error)
+              return
+            }
+            if (agentStopped.isFailed) {
+              callback?.(new Error(agentStopped.message))
+              return
+            }
+            if (adapterStopped.isFailed) {
+              callback?.(new Error(adapterStopped.message))
+              return
+            }
+            callback?.()
+          })
+        })()
+        return listener
+      }) as typeof listener.close
       return listener
+    },
+    stop: async () => {
+      const agentStopped = await agentManager.stop()
+      const adapterStopped = await adapterManager.stop()
+      if (agentStopped.isFailed) {
+        return agentStopped
+      }
+      if (adapterStopped.isFailed) {
+        return adapterStopped
+      }
+      return Result.success(null)
     }
   }
-}
-
-export function createAgent(config: CodexioConfig, toolBaseUrl: string, send: (text: string) => Promise<void>): Agent {
-  const enabledAgents = Object.entries(config.agents).filter(([, agentConfig]) => agentConfig.enabled)
-  if (enabledAgents.length === 0) {
-    throw new Error('agent not found')
-  }
-  if (enabledAgents.length > 1) {
-    throw new Error('only one agent can be enabled')
-  }
-  const [agentName] = enabledAgents[0]
-  if (agentName === 'echo') {
-    return new EchoAgent({
-      send
-    })
-  }
-  if (agentName === 'codex') {
-    return new CodexAgent({
-      workspacePath: config.workspace.path,
-      config,
-      toolBaseUrl,
-      send
-    })
-  }
-  if (agentName === 'claude') {
-    return new ClaudeAgent({
-      workspacePath: config.workspace.path,
-      config,
-      send
-    })
-  }
-  throw new Error(`agent not supported: ${agentName}`)
 }
 
 const program = new Command()
@@ -198,10 +155,17 @@ program
     const service = new ConfigService()
     const config = await service.init(false)
     const toolBaseUrl = `http://${config.server.host}:${config.server.port}`
-    const agent = createAgent(config, toolBaseUrl, async (text) => {
-      output.write(`${text}\n`)
+    const agentManager = new AgentManager(config, toolBaseUrl, {
+      send: async (text) => {
+        output.write(`${text}\n`)
+        return Result.success(null)
+      },
+      status: async (text) => {
+        output.write(`${text}\n`)
+        return Result.success(null)
+      }
     })
-    await agent.login()
+    await agentManager.login()
   })
 
 if (argv[1] && import.meta.url === pathToFileURL(resolve(argv[1])).href) {
@@ -222,10 +186,6 @@ async function serve(config?: CodexioConfig): Promise<void> {
   const service = new ConfigService()
   const resolvedConfig = config ?? await service.load()
   const server = createCodexioApp(resolvedConfig)
-  const ready = await server.ready
-  if (ready.isFailed) {
-    throw new Error(ready.message)
-  }
   const listener = server.listen(resolvedConfig.server.port, resolvedConfig.server.host)
   await new Promise<void>((resolveListening) => {
     listener.once('listening', resolveListening)
