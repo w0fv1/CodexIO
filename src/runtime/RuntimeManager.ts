@@ -8,6 +8,7 @@ export type RuntimeStartInput = {
   workspacePath: string
   contextText: string
   env: Record<string, string>
+  model?: string
 }
 
 export type RuntimeHandle = {
@@ -32,10 +33,19 @@ export type RuntimeManagerOptions = {
   env: Record<string, string>
 }
 
+export type RuntimeAcceptOptions = {
+  agent?: string
+  model?: string
+  reset?: boolean
+}
+
 export class RuntimeManager {
   constructor(private readonly options: RuntimeManagerOptions) {}
 
-  async accept(message: InboundTextMessage, workspaceName: string): Promise<RuntimeContext> {
+  async accept(message: InboundTextMessage, workspaceName: string, acceptOptions: RuntimeAcceptOptions = {}): Promise<RuntimeContext> {
+    if (acceptOptions.reset) {
+      await this.stopByConversation(message.channel, message.conversationId, workspaceName)
+    }
     const existing = this.options.registry.findByConversation(message.channel, message.conversationId, workspaceName)
     if (existing) {
       await this.send(existing.runtimeId, message.text)
@@ -46,7 +56,7 @@ export class RuntimeManager {
     if (!workspace) {
       throw new Error(`workspace not found: ${workspaceName}`)
     }
-    let agent = workspace.defaultAgent
+    let agent = acceptOptions.agent ?? workspace.defaultAgent
     if (!agent) {
       agent = this.options.config.defaultAgent
     }
@@ -57,6 +67,7 @@ export class RuntimeManager {
     const context: RuntimeContext = {
       runtimeId: `rt_${randomUUID()}`,
       agent,
+      model: acceptOptions.model,
       workspaceName,
       workspacePath: workspace.path,
       channel: message.channel,
@@ -68,13 +79,26 @@ export class RuntimeManager {
       runtimeId: context.runtimeId,
       workspacePath: context.workspacePath,
       contextText: 'You are running inside Codexio.',
-      env: this.options.env
+      env: this.options.env,
+      model: acceptOptions.model
     })
     this.options.registry.save(context)
     await runtime.send({
       runtimeId: context.runtimeId,
       text: message.text
     })
+    return context
+  }
+
+  async stopByConversation(channel: string, conversationId: string, workspaceName: string): Promise<RuntimeContext | undefined> {
+    const context = this.options.registry.removeByConversation(channel, conversationId, workspaceName)
+    if (!context) {
+      return undefined
+    }
+    const runtime = this.options.runtimes.get(context.agent)
+    if (runtime) {
+      await runtime.stop(context.runtimeId)
+    }
     return context
   }
 

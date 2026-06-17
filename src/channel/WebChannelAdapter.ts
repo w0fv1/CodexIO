@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import { ChannelAdapter, InboundTextMessage, SendTextInput } from '@codexio/core'
+import { ChannelAdapter, InboundTextMessage, SendTextInput } from './ChannelAdapter.js'
 
 export type WebOutboundMessage = {
   conversationId: string

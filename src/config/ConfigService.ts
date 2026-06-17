@@ -53,24 +53,22 @@ export class ConfigService {
           '127.0.0.1'
         ]
       },
-      defaultAgent: 'echo',
+      defaultAgent: 'codex',
       agents: {
-        echo: {
-          enabled: true,
-          command: 'echo',
-          args: [],
-          autoLoadSkill: false,
-          env: {}
-        },
         codex: {
           enabled: true,
           command: 'codex',
-          args: [],
+          args: [
+            '--dangerously-bypass-approvals-and-sandbox'
+          ],
           autoLoadSkill: true,
           env: {
             HTTP_PROXY: '${proxy.http}',
             HTTPS_PROXY: '${proxy.https}',
-            ALL_PROXY: '${proxy.socks}'
+            ALL_PROXY: '${proxy.socks}',
+            http_proxy: '${proxy.http}',
+            https_proxy: '${proxy.https}',
+            all_proxy: '${proxy.socks}'
           }
         },
         claude: {
@@ -81,7 +79,10 @@ export class ConfigService {
           env: {
             HTTP_PROXY: '${proxy.http}',
             HTTPS_PROXY: '${proxy.https}',
-            ALL_PROXY: '${proxy.socks}'
+            ALL_PROXY: '${proxy.socks}',
+            http_proxy: '${proxy.http}',
+            https_proxy: '${proxy.https}',
+            all_proxy: '${proxy.socks}'
           }
         }
       },
@@ -96,7 +97,7 @@ export class ConfigService {
       workspaces: {
         default: {
           path: workspacePath,
-          defaultAgent: 'echo',
+          defaultAgent: 'codex',
           allowedChannels: [
             'web',
             'cli'

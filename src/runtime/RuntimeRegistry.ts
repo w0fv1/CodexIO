@@ -1,6 +1,7 @@
 export type RuntimeContext = {
   runtimeId: string
   agent: string
+  model?: string
   workspaceName: string
   workspacePath: string
   channel: string
@@ -26,6 +27,25 @@ export class RuntimeRegistry {
     const key = this.getConversationKey(context.channel, context.conversationId, context.workspaceName)
     this.conversationRuntimeMap.set(key, context)
     this.runtimeMap.set(context.runtimeId, context)
+  }
+
+  remove(runtimeId: string): RuntimeContext | undefined {
+    const context = this.runtimeMap.get(runtimeId)
+    if (!context) {
+      return undefined
+    }
+    const key = this.getConversationKey(context.channel, context.conversationId, context.workspaceName)
+    this.conversationRuntimeMap.delete(key)
+    this.runtimeMap.delete(runtimeId)
+    return context
+  }
+
+  removeByConversation(channel: string, conversationId: string, workspaceName: string): RuntimeContext | undefined {
+    const context = this.findByConversation(channel, conversationId, workspaceName)
+    if (!context) {
+      return undefined
+    }
+    return this.remove(context.runtimeId)
   }
 
   touch(runtimeId: string): void {

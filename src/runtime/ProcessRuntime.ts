@@ -24,8 +24,7 @@ export class ProcessRuntime implements AgentRuntime {
     }
     const binPaths = [
       join(process.cwd(), 'node_modules', '.bin'),
-      resolve(process.cwd(), 'packages', 'cli', 'node_modules', '.bin'),
-      resolve(process.cwd(), 'packages', 'server', 'node_modules', '.bin')
+      resolve(process.cwd(), 'node_modules', '.bin')
     ]
     const pathKey = Object.keys(env).find((key) => key.toLowerCase() === 'path') ?? 'PATH'
     env[pathKey] = `${binPaths.join(delimiter)}${delimiter}${env[pathKey] ?? ''}`

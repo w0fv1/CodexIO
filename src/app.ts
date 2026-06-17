@@ -1,14 +1,38 @@
 import express from 'express'
 import cors from 'cors'
-import { AgentRuntime, ChannelAdapter, CodexExecRuntime, CodexioConfig, EchoRuntime, InboundTextMessage, OutboundPolicy, ProcessRuntime, Result, Router, RuntimeManager, RuntimeRegistry, buildAgentEnv } from '@codexio/core'
+import { randomUUID } from 'node:crypto'
+import { ChannelAdapter, InboundTextMessage } from './channel/ChannelAdapter.js'
 import { CliChannelAdapter } from './channel/CliChannelAdapter.js'
 import { WebChannelAdapter } from './channel/WebChannelAdapter.js'
+import { CodexioConfig } from './config/ConfigSchema.js'
+import { OutboundPolicy } from './policy/OutboundPolicy.js'
+import { buildAgentEnv } from './proxy/buildAgentEnv.js'
+import { Result } from './result/Result.js'
+import { Router } from './routing/Router.js'
+import { AgentRuntime, RuntimeManager } from './runtime/RuntimeManager.js'
+import { CodexExecRuntime } from './runtime/CodexExecRuntime.js'
+import { EchoRuntime } from './runtime/EchoRuntime.js'
+import { ProcessRuntime } from './runtime/ProcessRuntime.js'
+import { RuntimeRegistry } from './runtime/RuntimeRegistry.js'
 
 export type CodexioServer = {
   app: express.Express
   registry: RuntimeRegistry
   web: WebChannelAdapter
   cli: CliChannelAdapter
+}
+
+type WebConversationState = {
+  agent?: string
+  model?: string
+  workspaceName?: string
+  lastUserText?: string
+}
+
+type WebCommandResult = {
+  handled: boolean
+  action?: 'clear' | 'reset'
+  conversationId?: string
 }
 
 export function createCodexioApp(config: CodexioConfig): CodexioServer {
@@ -116,6 +140,7 @@ export function createCodexioApp(config: CodexioConfig): CodexioServer {
     env: buildAgentEnv(config)
   })
   const router = new Router(config)
+  const webStateMap = new Map<string, WebConversationState>()
 
   app.get('/', (_request, response) => {
     response.type('html').send(renderWebPage())
@@ -204,7 +229,34 @@ export function createCodexioApp(config: CodexioConfig): CodexioServer {
         response.json(Result.fail('inbound text not found'))
         return
       }
-      const context = await manager.accept(messages[0], router.selectWorkspace(messages[0]))
+      const message = messages[0]
+      const commandResult = await handleWebCommand({
+        config,
+        manager,
+        registry,
+        web,
+        webStateMap,
+        message
+      })
+      if (commandResult.handled) {
+        response.json(Result.success(commandResult))
+        return
+      }
+      const state = getWebState(webStateMap, message.conversationId)
+      let text = message.text
+      if (text.startsWith('/$$')) {
+        text = `/$${text.slice(3)}`
+      }
+      state.lastUserText = text
+      const routedMessage = {
+        ...message,
+        text
+      }
+      const workspaceName = state.workspaceName ?? router.selectWorkspace(routedMessage)
+      const context = await manager.accept(routedMessage, workspaceName, {
+        agent: state.agent,
+        model: state.model
+      })
       response.json(Result.success({
         runtimeId: context.runtimeId
       }))
@@ -236,6 +288,226 @@ export function createCodexioApp(config: CodexioConfig): CodexioServer {
     web,
     cli
   }
+}
+
+type HandleWebCommandInput = {
+  config: CodexioConfig
+  manager: RuntimeManager
+  registry: RuntimeRegistry
+  web: WebChannelAdapter
+  webStateMap: Map<string, WebConversationState>
+  message: InboundTextMessage
+}
+
+async function handleWebCommand(input: HandleWebCommandInput): Promise<WebCommandResult> {
+  const text = input.message.text.trim()
+  if (!text.startsWith('/$') || text.startsWith('/$$')) {
+    return {
+      handled: false
+    }
+  }
+  const commandText = text.slice(2).trim()
+  const parts = commandText.length > 0 ? commandText.split(/\s+/) : []
+  const command = parts[0] ?? '?'
+  const args = parts.slice(1)
+  const state = getWebState(input.webStateMap, input.message.conversationId)
+  const workspaceName = state.workspaceName ?? input.config.routing.defaultWorkspace
+  if (command === '?' || command === 'help') {
+    await input.web.sendText({
+      conversationId: input.message.conversationId,
+      text: getCommandHelp()
+    })
+    return {
+      handled: true
+    }
+  }
+  if (command === 'clear') {
+    await stopWebRuntime(input.manager, input.message.conversationId, workspaceName)
+    return {
+      handled: true,
+      action: 'clear'
+    }
+  }
+  if (command === 'new') {
+    await stopWebRuntime(input.manager, input.message.conversationId, workspaceName)
+    await input.web.sendText({
+      conversationId: input.message.conversationId,
+      text: '已创建新对话。'
+    })
+    return {
+      handled: true
+    }
+  }
+  if (command === 'reset') {
+    await stopWebRuntime(input.manager, input.message.conversationId, workspaceName)
+    input.webStateMap.delete(input.message.conversationId)
+    return {
+      handled: true,
+      action: 'reset',
+      conversationId: `web_${randomUUID()}`
+    }
+  }
+  if (command === 'status') {
+    await input.web.sendText({
+      conversationId: input.message.conversationId,
+      text: getStatusText(input.config, input.registry, input.message.conversationId, state)
+    })
+    return {
+      handled: true
+    }
+  }
+  if (command === 'agent') {
+    await handleAgentCommand(input, state, args)
+    return {
+      handled: true
+    }
+  }
+  if (command === 'model') {
+    await handleModelCommand(input, state, args)
+    return {
+      handled: true
+    }
+  }
+  if (command === 'workspace') {
+    await handleWorkspaceCommand(input, state, args)
+    return {
+      handled: true
+    }
+  }
+  await input.web.sendText({
+    conversationId: input.message.conversationId,
+    text: `未知命令：/$ ${command}。输入 /$ ? 查看命令。`
+  })
+  return {
+    handled: true
+  }
+}
+
+function getWebState(webStateMap: Map<string, WebConversationState>, conversationId: string): WebConversationState {
+  const existing = webStateMap.get(conversationId)
+  if (existing) {
+    return existing
+  }
+  const state: WebConversationState = {}
+  webStateMap.set(conversationId, state)
+  return state
+}
+
+async function stopWebRuntime(manager: RuntimeManager, conversationId: string, workspaceName: string): Promise<void> {
+  await manager.stopByConversation('web', conversationId, workspaceName)
+}
+
+async function handleAgentCommand(input: HandleWebCommandInput, state: WebConversationState, args: string[]): Promise<void> {
+  if (args.length === 0) {
+    const agent = state.agent ?? input.config.defaultAgent
+    await input.web.sendText({
+      conversationId: input.message.conversationId,
+      text: `当前 agent：${agent}`
+    })
+    return
+  }
+  const agent = args[0]
+  const agentConfig = input.config.agents[agent]
+  if (!agentConfig || !agentConfig.enabled) {
+    await input.web.sendText({
+      conversationId: input.message.conversationId,
+      text: `agent 不可用：${agent}`
+    })
+    return
+  }
+  const workspaceName = state.workspaceName ?? input.config.routing.defaultWorkspace
+  await stopWebRuntime(input.manager, input.message.conversationId, workspaceName)
+  state.agent = agent
+  await input.web.sendText({
+    conversationId: input.message.conversationId,
+    text: `已切换 agent：${agent}。下条普通消息会创建新对话。`
+  })
+}
+
+async function handleModelCommand(input: HandleWebCommandInput, state: WebConversationState, args: string[]): Promise<void> {
+  if (args.length === 0) {
+    await input.web.sendText({
+      conversationId: input.message.conversationId,
+      text: `当前模型：${state.model ?? '默认'}`
+    })
+    return
+  }
+  const workspaceName = state.workspaceName ?? input.config.routing.defaultWorkspace
+  await stopWebRuntime(input.manager, input.message.conversationId, workspaceName)
+  state.model = args[0]
+  await input.web.sendText({
+    conversationId: input.message.conversationId,
+    text: `已设置模型：${state.model}。下条普通消息会创建新对话。`
+  })
+}
+
+async function handleWorkspaceCommand(input: HandleWebCommandInput, state: WebConversationState, args: string[]): Promise<void> {
+  if (args.length === 0) {
+    await input.web.sendText({
+      conversationId: input.message.conversationId,
+      text: `当前 workspace：${state.workspaceName ?? input.config.routing.defaultWorkspace}`
+    })
+    return
+  }
+  if (args[0] === 'list') {
+    await input.web.sendText({
+      conversationId: input.message.conversationId,
+      text: Object.entries(input.config.workspaces).map(([name, workspace]) => `${name}\t${workspace.path}`).join('\n')
+    })
+    return
+  }
+  const workspaceName = args[0]
+  if (!input.config.workspaces[workspaceName]) {
+    await input.web.sendText({
+      conversationId: input.message.conversationId,
+      text: `workspace 不存在：${workspaceName}`
+    })
+    return
+  }
+  const oldWorkspaceName = state.workspaceName ?? input.config.routing.defaultWorkspace
+  await stopWebRuntime(input.manager, input.message.conversationId, oldWorkspaceName)
+  state.workspaceName = workspaceName
+  await input.web.sendText({
+    conversationId: input.message.conversationId,
+    text: `已切换 workspace：${workspaceName}。下条普通消息会创建新对话。`
+  })
+}
+
+function getStatusText(config: CodexioConfig, registry: RuntimeRegistry, conversationId: string, state: WebConversationState): string {
+  const workspaceName = state.workspaceName ?? config.routing.defaultWorkspace
+  const context = registry.findByConversation('web', conversationId, workspaceName)
+  const lines = [
+    `conversationId: ${conversationId}`,
+    `runtimeId: ${context?.runtimeId ?? '无'}`,
+    `agent: ${state.agent ?? context?.agent ?? config.defaultAgent}`,
+    `model: ${state.model ?? context?.model ?? '默认'}`,
+    `workspace: ${workspaceName}`,
+    `proxy: ${config.proxy.enabled ? 'enabled' : 'disabled'}`
+  ]
+  if (context) {
+    lines.push(`startedAt: ${new Date(context.startedAt).toISOString()}`)
+    lines.push(`lastActiveAt: ${new Date(context.lastActiveAt).toISOString()}`)
+  }
+  return lines.join('\n')
+}
+
+function getCommandHelp(): string {
+  return [
+    'Codexio 命令：',
+    '/$ ? 显示帮助',
+    '/$ clear 清空页面并开启新对话',
+    '/$ new 开启新对话并保留页面历史',
+    '/$ reset 重置页面 conversationId、会话覆盖和当前 runtime',
+    '/$ status 查看当前会话状态',
+    '/$ agent 查看当前 agent',
+    '/$ agent codex 切换 agent',
+    '/$ model 查看当前模型',
+    '/$ model gpt-5.5 设置当前会话模型',
+    '/$ workspace 查看当前 workspace',
+    '/$ workspace list 列出 workspace',
+    '/$ workspace default 切换 workspace',
+    '/$$ 文本 按普通消息发送以 /$ 开头的内容'
+  ].join('\n')
 }
 
 async function parseMessages(adapters: Map<string, ChannelAdapter>, headers: Record<string, string | string[] | undefined>, body: unknown): Promise<InboundTextMessage[]> {
@@ -292,13 +564,19 @@ function renderWebPage(): string {
     </form>
   </main>
   <script>
-    const conversationId = 'browser'
+    const conversationKey = 'codexio.conversationId'
+    let conversationId = localStorage.getItem(conversationKey)
+    if (!conversationId) {
+      conversationId = 'web_' + crypto.randomUUID()
+      localStorage.setItem(conversationKey, conversationId)
+    }
     const messages = document.querySelector('#messages')
     const form = document.querySelector('#form')
     const text = document.querySelector('#text')
     const send = document.querySelector('#send')
     const status = document.querySelector('#status')
     let runtimeId = ''
+    let events = null
     function append(className, value) {
       const element = document.createElement('div')
       element.className = 'message ' + className
@@ -306,17 +584,23 @@ function renderWebPage(): string {
       messages.appendChild(element)
       messages.scrollTop = messages.scrollHeight
     }
-    const events = new EventSource('/api/web/events/' + conversationId)
-    events.onmessage = (event) => {
-      const message = JSON.parse(event.data)
-      append('agent', message.text)
+    function connectEvents() {
+      if (events) {
+        events.close()
+      }
+      events = new EventSource('/api/web/events/' + conversationId)
+      events.onmessage = (event) => {
+        const message = JSON.parse(event.data)
+        append('agent', message.text)
+      }
+      events.onopen = () => {
+        status.textContent = conversationId
+      }
+      events.onerror = () => {
+        status.textContent = 'web adapter reconnecting'
+      }
     }
-    events.onopen = () => {
-      status.textContent = 'web adapter connected'
-    }
-    events.onerror = () => {
-      status.textContent = 'web adapter reconnecting'
-    }
+    connectEvents()
     form.addEventListener('submit', async (event) => {
       event.preventDefault()
       const value = text.value.trim()
@@ -339,6 +623,16 @@ function renderWebPage(): string {
       const result = await response.json()
       if (result.data && result.data.runtimeId) {
         runtimeId = result.data.runtimeId
+      }
+      if (result.data && result.data.action === 'clear') {
+        messages.innerHTML = ''
+      }
+      if (result.data && result.data.action === 'reset' && result.data.conversationId) {
+        conversationId = result.data.conversationId
+        localStorage.setItem(conversationKey, conversationId)
+        runtimeId = ''
+        messages.innerHTML = ''
+        connectEvents()
       }
       if (result.isFailed) {
         append('agent', result.message)

@@ -15,6 +15,7 @@ type CodexRuntimeState = {
   workspacePath: string
   env: Record<string, string>
   hasSession: boolean
+  model?: string
 }
 
 export class CodexExecRuntime implements AgentRuntime {
@@ -27,7 +28,8 @@ export class CodexExecRuntime implements AgentRuntime {
     this.states.set(input.runtimeId, {
       workspacePath: input.workspacePath,
       env: input.env,
-      hasSession: false
+      hasSession: false,
+      model: input.model
     })
     return {
       runtimeId: input.runtimeId
@@ -45,7 +47,7 @@ export class CodexExecRuntime implements AgentRuntime {
     })
     const outputPath = join(outputDir, `${input.runtimeId}.last-message.txt`)
     const prompt = this.buildPrompt(input.runtimeId, input.text)
-    const args = this.buildArgs(state.hasSession, outputPath)
+    const args = this.buildArgs(state.hasSession, outputPath, state.model)
     state.hasSession = true
     const child = spawn(this.options.agent.command, args, {
       cwd: state.workspacePath,
@@ -92,13 +94,20 @@ export class CodexExecRuntime implements AgentRuntime {
     this.states.delete(runtimeId)
   }
 
-  private buildArgs(hasSession: boolean, outputPath: string): string[] {
+  private buildArgs(hasSession: boolean, outputPath: string, model?: string): string[] {
+    const modelArgs = model
+      ? [
+          '-m',
+          model
+        ]
+      : []
     if (hasSession) {
       return [
         'exec',
         'resume',
         '--last',
         ...this.options.agent.args,
+        ...modelArgs,
         '--output-last-message',
         outputPath,
         '-'
@@ -107,6 +116,7 @@ export class CodexExecRuntime implements AgentRuntime {
     return [
       'exec',
       ...this.options.agent.args,
+      ...modelArgs,
       '--output-last-message',
       outputPath,
       '-'
@@ -120,8 +130,7 @@ export class CodexExecRuntime implements AgentRuntime {
     }
     const binPaths = [
       join(process.cwd(), 'node_modules', '.bin'),
-      resolve(process.cwd(), 'packages', 'cli', 'node_modules', '.bin'),
-      resolve(process.cwd(), 'packages', 'server', 'node_modules', '.bin')
+      resolve(process.cwd(), 'node_modules', '.bin')
     ]
     const pathKey = Object.keys(nextEnv).find((key) => key.toLowerCase() === 'path') ?? 'PATH'
     nextEnv[pathKey] = `${binPaths.join(delimiter)}${delimiter}${nextEnv[pathKey] ?? ''}`

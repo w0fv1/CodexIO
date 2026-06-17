@@ -1,4 +1,4 @@
-import { ChannelAdapter, InboundTextMessage, SendTextInput } from '@codexio/core'
+import { ChannelAdapter, InboundTextMessage, SendTextInput } from './ChannelAdapter.js'
 
 export class CliChannelAdapter implements ChannelAdapter {
   readonly type = 'cli'

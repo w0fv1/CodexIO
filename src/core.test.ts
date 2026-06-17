@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { ConfigSchema, EchoRuntime, OutboundPolicy, Router, RuntimeManager, RuntimeRegistry } from './index.js'
+import { ConfigSchema } from './config/ConfigSchema.js'
+import { OutboundPolicy } from './policy/OutboundPolicy.js'
+import { Router } from './routing/Router.js'
+import { EchoRuntime } from './runtime/EchoRuntime.js'
+import { RuntimeManager } from './runtime/RuntimeManager.js'
+import { RuntimeRegistry } from './runtime/RuntimeRegistry.js'
 
 describe('core', () => {
   it('routes inbound text to runtime and sends outbound text through echo runtime', async () => {

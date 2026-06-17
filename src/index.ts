@@ -5,8 +5,8 @@ import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline/promises'
 import { stdin as input, stdout as output } from 'node:process'
 import { Command } from 'commander'
-import { ConfigService } from '@codexio/core'
-import { createCodexioApp } from '@codexio/server'
+import { ConfigService } from './config/ConfigService.js'
+import { createCodexioApp } from './app.js'
 
 const program = new Command()
 
@@ -262,7 +262,7 @@ workspaceCommand
 await program.parseAsync()
 
 async function installSkill(): Promise<void> {
-  const root = fileURLToPath(new URL('../../..', import.meta.url))
+  const root = fileURLToPath(new URL('..', import.meta.url))
   const source = join(root, 'skills', 'codexio', 'SKILL.md')
   const target = join(process.env.USERPROFILE ?? process.env.HOME ?? '.', '.codexio', 'skills', 'codexio', 'SKILL.md')
   const text = await readFile(source, 'utf8')
