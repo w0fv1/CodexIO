@@ -1,12 +1,191 @@
 #!/usr/bin/env node
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { resolve } from 'node:path'
 import { createInterface } from 'node:readline/promises'
-import { stdin as input, stdout as output } from 'node:process'
+import { argv, stdin as input, stdout as output, stderr as errorOutput } from 'node:process'
+import { pathToFileURL } from 'node:url'
+import express from 'express'
+import cors from 'cors'
 import { Command } from 'commander'
-import { ConfigService } from './config/ConfigService.js'
-import { createCodexioApp } from './app.js'
+import { ChannelAdapter, ChannelReceiveResult } from './channel/ChannelAdapter.js'
+import { CliChannelAdapter } from './channel/CliChannelAdapter.js'
+import { WebChannelAdapter } from './channel/WebChannelAdapter.js'
+import { Agent } from './agent/Agent.js'
+import { ClaudeAgent } from './agent/ClaudeAgent.js'
+import { CodexAgent } from './agent/CodexAgent.js'
+import { EchoAgent } from './agent/EchoAgent.js'
+import { CodexioConfig, ConfigService } from './ConfigService.js'
+import { Result } from './Result.js'
+
+export type CodexioServer = {
+  app: express.Express
+  web: WebChannelAdapter
+  cli: CliChannelAdapter
+  ready: Promise<Result<null>>
+}
+
+export function createCodexioApp(config: CodexioConfig): CodexioServer {
+  const app = express()
+  app.use(cors())
+  app.use(express.json({
+    limit: '1mb'
+  }))
+
+  const web = new WebChannelAdapter()
+  const cli = new CliChannelAdapter()
+  const adapters = new Map<string, ChannelAdapter>()
+  for (const adapter of [
+    web,
+    cli
+  ]) {
+    const channelConfig = config.channels[adapter.type]
+    if (channelConfig?.enabled) {
+      adapters.set(adapter.type, adapter)
+    }
+  }
+  const toolBaseUrl = `http://${config.server.host}:${config.server.port}`
+  let currentAgent: Agent | undefined
+  let currentChannel = adapters.keys().next().value
+
+  const activeAdapter = (): ChannelAdapter => {
+    if (!currentChannel) {
+      throw new Error('channel adapter not found')
+    }
+    const adapter = adapters.get(currentChannel)
+    if (!adapter) {
+      throw new Error(`channel adapter not found: ${currentChannel}`)
+    }
+    return adapter
+  }
+
+  const startAgent = async (channel?: string): Promise<Result<null>> => {
+    try {
+      if (channel) {
+        currentChannel = channel
+      }
+      if (!currentChannel) {
+        currentChannel = adapters.keys().next().value
+      }
+      if (!currentChannel || !adapters.has(currentChannel)) {
+        return Result.fail('channel adapter not found')
+      }
+      const send = async (value: string) => {
+        const sent = await activeAdapter().send(value)
+        if (sent.isFailed) {
+          throw new Error(sent.message)
+        }
+      }
+      currentAgent = createAgent(config, toolBaseUrl, send)
+      await currentAgent.start(config)
+      return Result.success(null)
+    } catch (error) {
+      return Result.fromError(error)
+    }
+  }
+
+  app.post('/api/message', async (request, response) => {
+    try {
+      const body = request.body as Record<string, unknown>
+      if (typeof body.text !== 'string' || body.text.trim().length === 0) {
+        response.json(Result.fail('text is required'))
+        return
+      }
+      const sent = await activeAdapter().send(body.text)
+      if (sent.isFailed) {
+        response.json(sent)
+        return
+      }
+      response.json(Result.success({
+        sent: true
+      }))
+    } catch (error) {
+      response.json(Result.fromError(error))
+    }
+  })
+
+  for (const adapter of adapters.values()) {
+    adapter.start({
+      app,
+      receive: async (received) => {
+        try {
+          if (received.text.trim() === '/$ clear') {
+            currentChannel = received.channel
+            if (!currentAgent) {
+              const started = await startAgent(received.channel)
+              if (started.isFailed) {
+                return Result.fail<ChannelReceiveResult>(started.message)
+              }
+            }
+            if (!currentAgent) {
+              return Result.fail<ChannelReceiveResult>('agent not started')
+            }
+            await currentAgent.clear()
+            return Result.success({
+              action: 'clear'
+            })
+          }
+          let text = received.text
+          if (text.startsWith('/$$')) {
+            text = `/$${text.slice(3)}`
+          }
+          currentChannel = received.channel
+          if (!currentAgent) {
+            const started = await startAgent(received.channel)
+            if (started.isFailed) {
+              return Result.fail<ChannelReceiveResult>(started.message)
+            }
+          }
+          if (!currentAgent) {
+            return Result.fail<ChannelReceiveResult>('agent not started')
+          }
+          await currentAgent.receive(text)
+          return Result.success({})
+        } catch (error) {
+          const failed = Result.fromError(error)
+          return Result.fail<ChannelReceiveResult>(failed.message)
+        }
+      }
+    })
+  }
+
+  return {
+    app,
+    web,
+    cli,
+    ready: startAgent()
+  }
+}
+
+export function createAgent(config: CodexioConfig, toolBaseUrl: string, send: (text: string) => Promise<void>): Agent {
+  const enabledAgents = Object.entries(config.agents).filter(([, agentConfig]) => agentConfig.enabled)
+  if (enabledAgents.length === 0) {
+    throw new Error('agent not found')
+  }
+  if (enabledAgents.length > 1) {
+    throw new Error('only one agent can be enabled')
+  }
+  const [agentName] = enabledAgents[0]
+  if (agentName === 'echo') {
+    return new EchoAgent({
+      send
+    })
+  }
+  if (agentName === 'codex') {
+    return new CodexAgent({
+      workspacePath: config.workspace.path,
+      config,
+      toolBaseUrl,
+      send
+    })
+  }
+  if (agentName === 'claude') {
+    return new ClaudeAgent({
+      workspacePath: config.workspace.path,
+      config,
+      send
+    })
+  }
+  throw new Error(`agent not supported: ${agentName}`)
+}
 
 const program = new Command()
 
@@ -14,6 +193,9 @@ program
   .name('codexio')
   .description('Codexio text relay')
   .version('0.1.0')
+  .action(async () => {
+    await serve()
+  })
 
 program
   .command('init')
@@ -21,7 +203,6 @@ program
   .action(async (options: { force?: boolean }) => {
     const service = new ConfigService()
     const config = await service.init(Boolean(options.force))
-    await installSkill()
     output.write(`config: ${service.path}\n`)
     output.write(`server: ${config.server.host}:${config.server.port}\n`)
   })
@@ -29,12 +210,26 @@ program
 program
   .command('serve')
   .action(async () => {
+    await serve()
+  })
+
+program
+  .command('dev')
+  .action(async () => {
     const service = new ConfigService()
-    const config = await service.load()
-    const server = createCodexioApp(config)
-    server.app.listen(config.server.port, config.server.host, () => {
-      output.write(`codexio listening on http://${config.server.host}:${config.server.port}\n`)
+    await serve(service.createDefaultConfig(process.cwd()))
+  })
+
+program
+  .command('login')
+  .action(async () => {
+    const service = new ConfigService()
+    const config = await service.init(false)
+    const toolBaseUrl = `http://${config.server.host}:${config.server.port}`
+    const agent = createAgent(config, toolBaseUrl, async (text) => {
+      output.write(`${text}\n`)
     })
+    await agent.login()
   })
 
 program
@@ -42,21 +237,12 @@ program
   .action(async () => {
     const service = new ConfigService()
     const config = await service.load()
-    const server = createCodexioApp(config)
-    const listener = server.app.listen(0, '127.0.0.1')
-    await new Promise<void>((resolve) => {
-      listener.once('listening', resolve)
-    })
-    const address = listener.address()
-    if (!address || typeof address === 'string') {
-      throw new Error('server address not found')
-    }
-    const baseUrl = `http://127.0.0.1:${address.port}`
+    const baseUrl = `http://${config.server.host}:${config.server.port}`
     const readline = createInterface({
       input,
       output
     })
-    output.write('codexio cli adapter ready. type exit to quit.\n')
+    output.write(`codexio cli adapter connected to ${baseUrl}. type exit to quit.\n`)
     if (input.isTTY) {
       output.write('> ')
     }
@@ -75,7 +261,6 @@ program
         },
         body: JSON.stringify({
           channel: 'cli',
-          conversationId: 'terminal',
           text
         })
       })
@@ -90,184 +275,33 @@ program
         output.write('> ')
       }
     }
-    listener.close()
   })
 
-program
-  .command('doctor')
-  .action(async () => {
-    const service = new ConfigService()
-    const config = await service.load()
-    output.write(`config: ${service.path}\n`)
-    output.write(`server: ${config.server.host}:${config.server.port}\n`)
-    output.write(`proxy: ${config.proxy.enabled ? 'enabled' : 'disabled'}\n`)
-    if (config.proxy.http) {
-      output.write(`http: ${config.proxy.http}\n`)
-    }
-    if (config.proxy.https) {
-      output.write(`https: ${config.proxy.https}\n`)
-    }
-    if (config.proxy.socks) {
-      output.write(`socks: ${config.proxy.socks}\n`)
-    }
-    output.write(`workspaces: ${Object.keys(config.workspaces).join(', ')}\n`)
+if (argv[1] && import.meta.url === pathToFileURL(resolve(argv[1])).href) {
+  void main()
+}
+
+async function main(): Promise<void> {
+  try {
+    await program.parseAsync()
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    errorOutput.write(`${message}\n`)
+    process.exitCode = 1
+  }
+}
+
+async function serve(config?: CodexioConfig): Promise<void> {
+  const service = new ConfigService()
+  const resolvedConfig = config ?? await service.load()
+  const server = createCodexioApp(resolvedConfig)
+  const ready = await server.ready
+  if (ready.isFailed) {
+    throw new Error(ready.message)
+  }
+  const listener = server.app.listen(resolvedConfig.server.port, resolvedConfig.server.host)
+  await new Promise<void>((resolveListening) => {
+    listener.once('listening', resolveListening)
   })
-
-const configCommand = program.command('config')
-
-configCommand
-  .command('show')
-  .action(async () => {
-    const service = new ConfigService()
-    const text = await readFile(service.path, 'utf8')
-    output.write(text)
-  })
-
-const proxyCommand = configCommand.command('proxy')
-
-proxyCommand
-  .command('enable')
-  .action(async () => {
-    const service = new ConfigService()
-    const config = await service.load()
-    config.proxy.enabled = true
-    await service.save(config)
-    output.write('proxy enabled\n')
-  })
-
-proxyCommand
-  .command('disable')
-  .action(async () => {
-    const service = new ConfigService()
-    const config = await service.load()
-    config.proxy.enabled = false
-    await service.save(config)
-    output.write('proxy disabled\n')
-  })
-
-proxyCommand
-  .command('set')
-  .option('--http <url>')
-  .option('--https <url>')
-  .option('--socks <url>')
-  .action(async (options: { http?: string; https?: string; socks?: string }) => {
-    const service = new ConfigService()
-    const config = await service.load()
-    if (options.http) {
-      config.proxy.http = options.http
-    }
-    if (options.https) {
-      config.proxy.https = options.https
-    }
-    if (options.socks) {
-      config.proxy.socks = options.socks
-    }
-    config.proxy.enabled = true
-    await service.save(config)
-    output.write('proxy updated\n')
-  })
-
-proxyCommand
-  .command('show')
-  .action(async () => {
-    const service = new ConfigService()
-    const config = await service.load()
-    output.write(`enabled: ${config.proxy.enabled}\n`)
-    output.write(`http: ${config.proxy.http ?? ''}\n`)
-    output.write(`https: ${config.proxy.https ?? ''}\n`)
-    output.write(`socks: ${config.proxy.socks ?? ''}\n`)
-    output.write(`noProxy: ${config.proxy.noProxy.join(',')}\n`)
-  })
-
-const serverCommand = configCommand.command('server')
-
-serverCommand
-  .command('set')
-  .option('--host <host>')
-  .option('--port <port>')
-  .option('--public-url <url>')
-  .action(async (options: { host?: string; port?: string; publicUrl?: string }) => {
-    const service = new ConfigService()
-    const config = await service.load()
-    if (options.host) {
-      config.server.host = options.host
-    }
-    if (options.port) {
-      config.server.port = Number.parseInt(options.port, 10)
-    }
-    if (options.publicUrl) {
-      config.server.publicUrl = options.publicUrl
-    }
-    await service.save(config)
-    output.write('server updated\n')
-  })
-
-const workspaceCommand = program.command('workspace')
-
-workspaceCommand
-  .command('add')
-  .argument('<name>')
-  .argument('<path>')
-  .option('--agent <agent>')
-  .action(async (name: string, path: string, options: { agent?: string }) => {
-    const service = new ConfigService()
-    const config = await service.load()
-    config.workspaces[name] = {
-      path,
-      defaultAgent: options.agent ?? config.defaultAgent,
-      allowedChannels: [
-        'web',
-        'cli'
-      ]
-    }
-    await service.save(config)
-    output.write(`workspace added: ${name}\n`)
-  })
-
-workspaceCommand
-  .command('default')
-  .argument('<name>')
-  .action(async (name: string) => {
-    const service = new ConfigService()
-    const config = await service.load()
-    if (!config.workspaces[name]) {
-      throw new Error(`workspace not found: ${name}`)
-    }
-    config.routing.defaultWorkspace = name
-    await service.save(config)
-    output.write(`default workspace: ${name}\n`)
-  })
-
-workspaceCommand
-  .command('list')
-  .action(async () => {
-    const service = new ConfigService()
-    const config = await service.load()
-    for (const [name, workspace] of Object.entries(config.workspaces)) {
-      output.write(`${name}\t${workspace.path}\t${workspace.defaultAgent ?? config.defaultAgent}\n`)
-    }
-  })
-
-workspaceCommand
-  .command('remove')
-  .argument('<name>')
-  .action(async (name: string) => {
-    const service = new ConfigService()
-    const config = await service.load()
-    delete config.workspaces[name]
-    await service.save(config)
-    output.write(`workspace removed: ${name}\n`)
-  })
-
-await program.parseAsync()
-
-async function installSkill(): Promise<void> {
-  const root = fileURLToPath(new URL('..', import.meta.url))
-  const source = join(root, 'skills', 'codexio', 'SKILL.md')
-  const target = join(process.env.USERPROFILE ?? process.env.HOME ?? '.', '.codexio', 'skills', 'codexio', 'SKILL.md')
-  const text = await readFile(source, 'utf8')
-  await mkdir(dirname(target), {
-    recursive: true
-  })
-  await writeFile(target, text, 'utf8')
+  output.write(`codexio listening on http://${resolvedConfig.server.host}:${resolvedConfig.server.port}\n`)
 }

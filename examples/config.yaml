@@ -1,60 +1,19 @@
 server:
   host: 127.0.0.1
   port: 8787
-  publicUrl: http://127.0.0.1:8787
 proxy:
   enabled: true
-  http: http://127.0.0.1:7890
-  https: http://127.0.0.1:7890
-  socks: socks5://127.0.0.1:7890
-  noProxy:
-    - localhost
-    - 127.0.0.1
-defaultAgent: codex
+  host: 127.0.0.1
+  port: 7890
 agents:
   codex:
     enabled: true
-    command: codex
-    args:
-      - --dangerously-bypass-approvals-and-sandbox
-    autoLoadSkill: true
-    env:
-      HTTP_PROXY: ${proxy.http}
-      HTTPS_PROXY: ${proxy.https}
-      ALL_PROXY: ${proxy.socks}
-      http_proxy: ${proxy.http}
-      https_proxy: ${proxy.https}
-      all_proxy: ${proxy.socks}
   claude:
-    enabled: true
-    command: claude
-    args: []
-    autoLoadSkill: true
-    env:
-      HTTP_PROXY: ${proxy.http}
-      HTTPS_PROXY: ${proxy.https}
-      ALL_PROXY: ${proxy.socks}
-      http_proxy: ${proxy.http}
-      https_proxy: ${proxy.https}
-      all_proxy: ${proxy.socks}
+    enabled: false
 channels:
   web:
     enabled: true
   cli:
     enabled: true
-workspaces:
-  default:
-    path: .
-    defaultAgent: codex
-    allowedChannels:
-      - web
-      - cli
-routing:
-  defaultWorkspace: default
-  repoCommand: /repo
-messaging:
-  maxOutboundChars: 1800
-  maxOutboundPerMinute: 3
-  allowMarkdown: true
-security:
-  blockSecrets: true
+workspace:
+  path: .

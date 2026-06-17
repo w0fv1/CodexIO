@@ -1,8 +1,9 @@
 import { EventEmitter } from 'node:events'
-import { ChannelAdapter, InboundTextMessage, SendTextInput } from './ChannelAdapter.js'
+import { ChannelAdapter, ChannelStartInput } from './ChannelAdapter.js'
+import { webPageHtml } from './WebPage.js'
+import { Result } from '../Result.js'
 
 export type WebOutboundMessage = {
-  conversationId: string
   text: string
   createdAt: number
 }
@@ -10,53 +11,76 @@ export type WebOutboundMessage = {
 export class WebChannelAdapter implements ChannelAdapter {
   readonly type = 'web'
   private readonly emitter = new EventEmitter()
-  private readonly messages = new Map<string, WebOutboundMessage[]>()
+  private messages: WebOutboundMessage[] = []
 
-  async parseInbound(input: {
-    headers: Record<string, string | string[] | undefined>
-    body: unknown
-  }): Promise<InboundTextMessage[]> {
-    if (!input.body || typeof input.body !== 'object') {
-      return []
-    }
-    const body = input.body as Record<string, unknown>
-    if (typeof body.text !== 'string' || body.text.trim().length === 0) {
-      return []
-    }
-    let conversationId = 'browser'
-    if (typeof body.conversationId === 'string' && body.conversationId.trim().length > 0) {
-      conversationId = body.conversationId.trim()
-    }
-    return [
-      {
-        channel: this.type,
-        conversationId,
-        text: body.text,
-        rawMessageId: typeof body.rawMessageId === 'string' ? body.rawMessageId : undefined
+  start(input: ChannelStartInput): void {
+    input.app.get('/', (_request, response) => {
+      response.type('html').send(webPageHtml)
+    })
+    input.app.post('/api/web/messages', async (request, response) => {
+      try {
+        if (!request.body || typeof request.body !== 'object') {
+          response.json(Result.fail('inbound text not found'))
+          return
+        }
+        const body = request.body as Record<string, unknown>
+        if (typeof body.text !== 'string' || body.text.trim().length === 0) {
+          response.json(Result.fail('inbound text not found'))
+          return
+        }
+        const text = body.text
+        const received = await this.receive(text)
+        if (received.isFailed) {
+          response.json(received)
+          return
+        }
+        const result = await input.receive({
+          channel: this.type,
+          text
+        })
+        if (result.data?.action === 'clear') {
+          this.messages = []
+        }
+        response.json(result)
+      } catch (error) {
+        response.json(Result.fromError(error))
       }
-    ]
+    })
+    input.app.get('/api/web/events', (request, response) => {
+      response.setHeader('Content-Type', 'text/event-stream')
+      response.setHeader('Cache-Control', 'no-cache')
+      response.setHeader('Connection', 'keep-alive')
+      for (const message of this.messages) {
+        response.write(`data: ${JSON.stringify(message)}\n\n`)
+      }
+      const listener = (message: WebOutboundMessage) => {
+        response.write(`data: ${JSON.stringify(message)}\n\n`)
+      }
+      this.emitter.on('message', listener)
+      request.on('close', () => {
+        this.emitter.off('message', listener)
+      })
+    })
   }
 
-  async sendText(input: SendTextInput): Promise<void> {
+  async receive(text: string): Promise<Result<null>> {
+    if (text.trim().length === 0) {
+      return Result.fail('text is required')
+    }
+    return Result.success(null)
+  }
+
+  async send(text: string): Promise<Result<null>> {
+    if (text.trim().length === 0) {
+      return Result.fail('text is required')
+    }
     const message = {
-      conversationId: input.conversationId,
-      text: input.text,
+      text,
       createdAt: Date.now()
     }
-    const existing = this.messages.get(input.conversationId) ?? []
-    existing.push(message)
-    this.messages.set(input.conversationId, existing)
-    this.emitter.emit(input.conversationId, message)
+    this.messages.push(message)
+    this.emitter.emit('message', message)
+    return Result.success(null)
   }
 
-  history(conversationId: string): WebOutboundMessage[] {
-    return this.messages.get(conversationId) ?? []
-  }
-
-  subscribe(conversationId: string, listener: (message: WebOutboundMessage) => void): () => void {
-    this.emitter.on(conversationId, listener)
-    return () => {
-      this.emitter.off(conversationId, listener)
-    }
-  }
 }

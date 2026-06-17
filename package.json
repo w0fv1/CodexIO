@@ -10,28 +10,30 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "dev": "tsx src/index.ts",
+    "bundle": "tsup src/index.ts --format esm --platform node --target node22 --out-dir bundle --no-splitting --sourcemap --clean",
+    "dev": "tsx src/index.ts dev",
+    "login": "tsx src/index.ts login",
     "test": "vitest run src",
     "lint": "tsc -p tsconfig.json --noEmit",
     "start": "node dist/index.js"
   },
   "dependencies": {
+    "@anthropic-ai/claude-code": "^2.1.178",
+    "@openai/codex": "^0.140.0",
     "commander": "^14.0.2",
     "cors": "^2.8.5",
+    "execa": "^9.6.1",
     "express": "^5.2.1",
     "yaml": "^2.8.2",
     "zod": "^4.1.13"
-  },
-  "optionalDependencies": {
-    "@anthropic-ai/claude-code": "^2.1.178",
-    "@openai/codex": "^0.140.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^24.10.2",
-    "typescript": "^5.9.3",
+    "tsup": "^8.5.1",
     "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
     "vitest": "^4.0.15"
   }
 }

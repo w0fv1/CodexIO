@@ -1,85 +1,135 @@
 import { describe, expect, it } from 'vitest'
-import { ConfigSchema } from './config/ConfigSchema.js'
-import { createCodexioApp } from './app.js'
+import { ConfigSchema } from './ConfigService.js'
+import { createCodexioApp } from './index.js'
+import { webPageHtml } from './channel/WebPage.js'
 
 describe('server', () => {
-  it('receives web message and exposes outbound message', async () => {
+  it('serves a Codexio introduction page with the web chat', () => {
+    expect(webPageHtml).toContain('无数据库、配置驱动的 coding agent 文本中转器')
+    expect(webPageHtml).toContain('HTTP API')
+    expect(webPageHtml).toContain('id="messages"')
+    expect(webPageHtml).toContain('id="form"')
+  })
+
+  it('receives web text', async () => {
     const { baseUrl, listener } = await startTestServer()
-    const inboundResponse = await fetch(`${baseUrl}/api/web/messages`, {
+    const result = await postWebText(baseUrl, 'hello') as {
+      isFailed: boolean
+    }
+    expect(result.isFailed).toBe(false)
+    await closeTestServer(listener)
+  })
+
+  it('clears the active agent conversation', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    await postWebText(baseUrl, 'first')
+    const clear = await postWebText(baseUrl, '/$ clear') as {
+      data: {
+        action: string
+      }
+    }
+    const second = await postWebText(baseUrl, 'second') as {
+      isFailed: boolean
+    }
+    expect(clear.data.action).toBe('clear')
+    expect(second.isFailed).toBe(false)
+    await closeTestServer(listener)
+  })
+
+  it('does not expose web history as external API', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    const response = await fetch(`${baseUrl}/api/web/messages`)
+    expect(response.status).toBe(404)
+    await closeTestServer(listener)
+  })
+
+  it('accepts agent output through the configured default channel', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    const response = await fetch(`${baseUrl}/api/message`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        conversationId: 'browser',
+        text: 'agent output'
+      })
+    })
+    const result = await response.json() as {
+      isFailed: boolean
+    }
+    expect(result.isFailed).toBe(false)
+    await closeTestServer(listener)
+  })
+
+  it('starts only configured channels', async () => {
+    const config = ConfigSchema.parse({
+      agents: {
+        codex: {
+          enabled: false
+        },
+        claude: {
+          enabled: false
+        },
+        echo: {
+          enabled: true
+        }
+      },
+      channels: {
+        cli: {
+          enabled: true
+        }
+      },
+      workspace: {
+        path: '.'
+      }
+    })
+    const server = createCodexioApp(config)
+    const ready = await server.ready
+    expect(ready.isFailed).toBe(false)
+    const listener = server.app.listen(0)
+    await new Promise<void>((resolve) => {
+      listener.once('listening', resolve)
+    })
+    const address = listener.address()
+    if (!address || typeof address === 'string') {
+      throw new Error('server address not found')
+    }
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/web/messages`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
         text: 'hello'
       })
     })
-    const inbound = await inboundResponse.json() as {
-      data: {
-        runtimeId: string
-      }
-      isFailed: boolean
-    }
-    expect(inbound.isFailed).toBe(false)
-    expect(inbound.data.runtimeId).toMatch(/^rt_/)
-    const messagesResponse = await fetch(`${baseUrl}/api/web/messages/browser`)
-    const messages = await messagesResponse.json() as {
-      data: Array<{
-        text: string
-      }>
-    }
-    expect(messages.data.map((item) => item.text)).toEqual([
-      'echo: hello'
-    ])
+    expect(response.status).toBe(404)
     await closeTestServer(listener)
   })
 
-  it('handles web commands without sending them to runtime', async () => {
-    const { baseUrl, listener } = await startTestServer()
-    const commandResponse = await postWebMessage(baseUrl, 'command-browser', '/$ ?') as {
-      isFailed: boolean
-    }
-    expect(commandResponse.isFailed).toBe(false)
-    const messages = await readWebMessages(baseUrl, 'command-browser')
-    expect(messages.map((item) => item.text)[0]).toContain('/$ clear')
-    expect(messages.some((item) => item.text.includes('echo:'))).toBe(false)
-    await closeTestServer(listener)
-  })
-
-  it('sends escaped command text to runtime', async () => {
-    const { baseUrl, listener } = await startTestServer()
-    await postWebMessage(baseUrl, 'escape-browser', '/$$ clear')
-    const messages = await readWebMessages(baseUrl, 'escape-browser')
-    expect(messages.map((item) => item.text)).toEqual([
-      'echo: /$ clear'
-    ])
-    await closeTestServer(listener)
-  })
-
-  it('clears current runtime and creates a new one on next message', async () => {
-    const { baseUrl, listener } = await startTestServer()
-    const first = await postWebMessage(baseUrl, 'clear-browser', 'first') as {
-      data: {
-        runtimeId: string
+  it('rejects ambiguous enabled agents', async () => {
+    const config = ConfigSchema.parse({
+      agents: {
+        codex: {
+          enabled: true
+        },
+        claude: {
+          enabled: true
+        }
+      },
+      channels: {
+        web: {
+          enabled: true
+        }
+      },
+      workspace: {
+        path: '.'
       }
-      isFailed: boolean
-    }
-    const clear = await postWebMessage(baseUrl, 'clear-browser', '/$ clear') as {
-      data: {
-        action: string
-      }
-      isFailed: boolean
-    }
-    const second = await postWebMessage(baseUrl, 'clear-browser', 'second') as {
-      data: {
-        runtimeId: string
-      }
-      isFailed: boolean
-    }
-    expect(first.data.runtimeId).not.toEqual(second.data.runtimeId)
-    expect(clear.data.action).toBe('clear')
-    await closeTestServer(listener)
+    })
+    const server = createCodexioApp(config)
+    const ready = await server.ready
+    expect(ready.isFailed).toBe(true)
+    expect(ready.message).toBe('only one agent can be enabled')
   })
 })
 
@@ -88,11 +138,15 @@ async function startTestServer(): Promise<{
   listener: ReturnType<ReturnType<typeof createCodexioApp>['app']['listen']>
 }> {
   const config = ConfigSchema.parse({
-    defaultAgent: 'echo',
     agents: {
+      codex: {
+        enabled: false
+      },
+      claude: {
+        enabled: false
+      },
       echo: {
-        enabled: true,
-        command: 'echo'
+        enabled: true
       }
     },
     channels: {
@@ -100,17 +154,15 @@ async function startTestServer(): Promise<{
         enabled: true
       }
     },
-    workspaces: {
-      default: {
-        path: '.',
-        defaultAgent: 'echo',
-        allowedChannels: [
-          'web'
-        ]
-      }
+    workspace: {
+      path: '.'
     }
   })
   const server = createCodexioApp(config)
+  const ready = await server.ready
+  if (ready.isFailed) {
+    throw new Error(ready.message)
+  }
   const listener = server.app.listen(0)
   await new Promise<void>((resolve) => {
     listener.once('listening', resolve)
@@ -125,28 +177,17 @@ async function startTestServer(): Promise<{
   }
 }
 
-async function postWebMessage(baseUrl: string, conversationId: string, text: string): Promise<unknown> {
+async function postWebText(baseUrl: string, text: string): Promise<unknown> {
   const response = await fetch(`${baseUrl}/api/web/messages`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      conversationId,
       text
     })
   })
   return response.json()
-}
-
-async function readWebMessages(baseUrl: string, conversationId: string): Promise<Array<{ text: string }>> {
-  const response = await fetch(`${baseUrl}/api/web/messages/${conversationId}`)
-  const result = await response.json() as {
-    data: Array<{
-      text: string
-    }>
-  }
-  return result.data
 }
 
 async function closeTestServer(listener: ReturnType<ReturnType<typeof createCodexioApp>['app']['listen']>): Promise<void> {
