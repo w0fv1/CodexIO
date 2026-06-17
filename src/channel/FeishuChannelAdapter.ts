@@ -13,7 +13,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   private input?: ChannelStartInput
   private client?: Lark.Client
   private wsClient?: Lark.WSClient
-  private chatId?: string
+  private readonly chatIds = new Set<string>()
 
   constructor(private readonly config?: FeishuChannelConfig) {}
 
@@ -35,7 +35,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
       eventDispatcher: new Lark.EventDispatcher({}).register({
         'im.message.receive_v1': async (data) => {
           try {
-            this.chatId = data.message.chat_id
+            this.chatIds.add(data.message.chat_id)
             if (data.message.message_type !== 'text') {
               await this.send('当前只支持文本消息')
               return
@@ -89,21 +89,23 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     if (text.trim().length === 0) {
       return Result.fail('text is required')
     }
-    if (!this.client || !this.chatId) {
+    if (!this.client || this.chatIds.size === 0) {
       return Result.fail('feishu chat not ready')
     }
-    await this.client.im.v1.message.create({
-      params: {
-        receive_id_type: 'chat_id'
-      },
-      data: {
-        receive_id: this.chatId,
-        msg_type: 'text',
-        content: JSON.stringify({
-          text
-        })
-      }
-    })
+    for (const chatId of this.chatIds) {
+      await this.client.im.v1.message.create({
+        params: {
+          receive_id_type: 'chat_id'
+        },
+        data: {
+          receive_id: chatId,
+          msg_type: 'text',
+          content: JSON.stringify({
+            text
+          })
+        }
+      })
+    }
     return Result.success(null)
   }
 

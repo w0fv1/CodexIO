@@ -11,7 +11,6 @@ export class AdapterManager {
   private readonly feishu: FeishuChannelAdapter
   private readonly adapters = new Map<string, ChannelAdapter>()
   private readonly messages: ChannelMessage[] = []
-  private currentChannel?: string
   private handleReceive?: (text: string) => Promise<Result<ChannelReceiveResult>>
 
   constructor(config: CodexioConfig) {
@@ -25,7 +24,6 @@ export class AdapterManager {
         this.adapters.set(adapter.type, adapter)
       }
     }
-    this.currentChannel = this.adapters.keys().next().value
   }
 
   start(app: Express, receive: (text: string) => Promise<Result<ChannelReceiveResult>>): void {
@@ -35,7 +33,6 @@ export class AdapterManager {
         app,
         history: () => this.messages.slice(-20),
         receive: async (text) => {
-          this.currentChannel = adapter.type
           return this.receive(text)
         }
       })
@@ -71,12 +68,8 @@ export class AdapterManager {
     if (text.trim().length === 0) {
       return Result.fail('text is required')
     }
-    if (!this.currentChannel) {
+    if (this.adapters.size === 0) {
       return Result.fail('channel adapter not found')
-    }
-    const adapter = this.adapters.get(this.currentChannel)
-    if (!adapter) {
-      return Result.fail(`channel adapter not found: ${this.currentChannel}`)
     }
     const message = {
       role: 'agent' as const,
@@ -84,13 +77,19 @@ export class AdapterManager {
       createdAt: Date.now()
     }
     this.messages.push(message)
-    const result = await adapter.send(text)
-    if (result.isFailed) {
+    const failures: string[] = []
+    for (const adapter of this.adapters.values()) {
+      const result = await adapter.send(text)
+      if (result.isFailed) {
+        failures.push(result.message)
+      }
+    }
+    if (failures.length === this.adapters.size) {
       const index = this.messages.indexOf(message)
       if (index >= 0) {
         this.messages.splice(index, 1)
       }
-      return result
+      return Result.fail(failures.join('\n'))
     }
     return Result.success(null)
   }
