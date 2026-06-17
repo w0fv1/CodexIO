@@ -82,38 +82,56 @@ describe('server', () => {
     await closeTestServer(listener)
   })
 
-  it('starts only configured channels', async () => {
-    const config = ConfigSchema.parse({
-      agents: {
-        codex: {
-          enabled: false
-        },
-        claude: {
-          enabled: false
-        },
-        echo: {
-          enabled: true
-        }
-      },
-      channels: {
-        cli: {
-          enabled: true
-        }
-      },
-      workspace: {
-        path: '.'
-      }
-    })
-    const server = createCodexioApp(config)
-    const ready = await server.ready
-    expect(ready.isFailed).toBe(false)
-    const listener = server.listen(0)
-    await new Promise<void>((resolve) => listener.once('listening', resolve))
-    const address = listener.address()
-    if (!address || typeof address === 'string') {
-      throw new Error('server address not found')
+  it('restores latest adapter manager messages in web channel', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    const socket = await openWebSocket(baseUrl)
+    for (let index = 1; index <= 12; index += 1) {
+      socket.send(JSON.stringify({
+        text: `message ${index}`
+      }))
+      await readWebSocketMessage(socket)
     }
-    const response = await fetch(`http://127.0.0.1:${address.port}/`)
+    const restored: Array<Record<string, unknown>> = []
+    const restoredUrl = baseUrl.replace('http://', 'ws://').replace('https://', 'wss://')
+    const restoredSocket = new WebSocket(`${restoredUrl}/ws`)
+    await new Promise<void>((resolve, reject) => {
+      restoredSocket.on('message', (data) => {
+        restored.push(JSON.parse(data.toString()) as Record<string, unknown>)
+        if (restored.length === 20) {
+          resolve()
+        }
+      })
+      restoredSocket.once('error', reject)
+    })
+    expect(restored[0]).toMatchObject({
+      type: 'human',
+      text: 'message 3'
+    })
+    expect(restored[1]).toMatchObject({
+      type: 'agent',
+      text: 'echo: message 3'
+    })
+    expect(restored[19]).toMatchObject({
+      type: 'agent',
+      text: 'echo: message 12'
+    })
+    await closeWebSocket(restoredSocket)
+    await closeWebSocket(socket)
+    await closeTestServer(listener)
+  })
+
+  it('does not expose legacy inbound API', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    const response = await fetch(`${baseUrl}/api/messages/inbound`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        channel: 'cli',
+        text: 'hello'
+      })
+    })
     expect(response.status).toBe(404)
     await closeTestServer(listener)
   })
@@ -198,8 +216,16 @@ async function openWebSocket(baseUrl: string): Promise<WebSocket> {
 
 async function readWebSocketMessage(socket: WebSocket): Promise<Record<string, unknown>> {
   const data = await new Promise<WebSocket.RawData>((resolve, reject) => {
-    socket.once('message', resolve)
-    socket.once('error', reject)
+    const onMessage = (value: WebSocket.RawData) => {
+      socket.off('error', onError)
+      resolve(value)
+    }
+    const onError = (error: Error) => {
+      socket.off('message', onMessage)
+      reject(error)
+    }
+    socket.once('message', onMessage)
+    socket.once('error', onError)
   })
   return JSON.parse(data.toString()) as Record<string, unknown>
 }

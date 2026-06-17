@@ -5,14 +5,16 @@ export type ChannelReceiveResult = {
   action?: 'clear'
 }
 
-export type HumanInput = {
-  channel: string
+export type ChannelMessage = {
+  role: 'human' | 'agent'
   text: string
+  createdAt: number
 }
 
 export type ChannelStartInput = {
   app: Express
-  receive: (input: HumanInput) => Promise<Result<ChannelReceiveResult>>
+  history: () => ChannelMessage[]
+  receive: (text: string) => Promise<Result<ChannelReceiveResult>>
 }
 
 export interface ChannelAdapter {

@@ -1,10 +1,10 @@
-import { readFile, rm } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { mkdtemp, writeFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { describe, expect, it, vi } from 'vitest'
-import { createAgentEnv } from './agent/AgentEnvironment.js'
+import { codexHomePath, createAgentEnv } from './agent/AgentEnvironment.js'
 import { CodexAgent } from './agent/CodexAgent.js'
 import { EchoAgent } from './agent/EchoAgent.js'
 import { ConfigSchema, ConfigService } from './ConfigService.js'
@@ -44,11 +44,6 @@ describe('core', () => {
   })
 
   it('agents apply proxy env internally', async () => {
-    const codexHome = resolve('.codexio', 'codex')
-    await rm(codexHome, {
-      recursive: true,
-      force: true
-    })
     const env = createAgentEnv(ConfigSchema.parse({
       proxy: {
         enabled: true,
@@ -68,7 +63,7 @@ describe('core', () => {
     expect(env.no_proxy).toBe(env.NO_PROXY)
     expect(env.CODEX_HOME).toContain('.codexio')
     expect(env.CODEX_HOME).toContain('codex')
-    expect(existsSync(codexHome)).toBe(true)
+    expect(existsSync(codexHomePath)).toBe(true)
   })
 
   it('codex agent installs an HTTP-only Codexio skill', async () => {
@@ -96,7 +91,7 @@ describe('core', () => {
       }
     })
     await agent.start(ConfigSchema.parse({}))
-    const text = await readFile(resolve('.codexio', 'codex', 'skills', 'codexio', 'SKILL.md'), 'utf8')
+    const text = await readFile(join(codexHomePath, 'skills', 'codexio', 'SKILL.md'), 'utf8')
     expect(text).toContain('/api/message')
     expect(text).not.toContain('send_message({ text })')
     expect(text).not.toContain('communication tool')
@@ -269,5 +264,20 @@ describe('core', () => {
       host: '127.0.0.1',
       port: 7890
     })
+  })
+
+  it('loads feishu channel credentials from config', () => {
+    const config = ConfigSchema.parse({
+      channels: {
+        feishu: {
+          enabled: true,
+          appId: 'cli_test',
+          appSecret: 'secret_test'
+        }
+      }
+    })
+    expect(config.channels.feishu?.enabled).toBe(true)
+    expect(config.channels.feishu?.appId).toBe('cli_test')
+    expect(config.channels.feishu?.appSecret).toBe('secret_test')
   })
 })

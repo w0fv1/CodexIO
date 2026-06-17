@@ -89,6 +89,10 @@ export const webPageHtml = `<!doctype html>
         append('agent', message.message)
         return
       }
+      if (message.type === 'human') {
+        append('user', message.text)
+        return
+      }
       if (message.type === 'agent') {
         append('agent', message.text)
       }

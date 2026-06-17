@@ -24,6 +24,16 @@ const ChannelConfigSchema = z.object({
   enabled: z.boolean().default(true)
 })
 
+const FeishuChannelConfigSchema = ChannelConfigSchema.extend({
+  appId: z.string().default(''),
+  appSecret: z.string().default('')
+})
+
+const ChannelsConfigSchema = z.object({
+  web: ChannelConfigSchema.optional(),
+  feishu: FeishuChannelConfigSchema.optional()
+})
+
 const WorkspaceConfigSchema = z.object({
   path: z.string().min(1)
 })
@@ -49,7 +59,7 @@ export const ConfigSchema = z.object({
       enabled: false
     }
   }),
-  channels: z.record(z.string(), ChannelConfigSchema).default({}),
+  channels: ChannelsConfigSchema.default({}),
   workspace: WorkspaceConfigSchema.default({
     path: '.'
   })
@@ -119,8 +129,10 @@ export class ConfigService {
         web: {
           enabled: true
         },
-        cli: {
-          enabled: true
+        feishu: {
+          enabled: false,
+          appId: '',
+          appSecret: ''
         }
       },
       workspace: {

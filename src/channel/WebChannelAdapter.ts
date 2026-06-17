@@ -4,18 +4,12 @@ import { ChannelAdapter, ChannelStartInput } from './ChannelAdapter.js'
 import { webPageHtml } from './WebPage.js'
 import { Result } from '../Result.js'
 
-export type WebOutboundMessage = {
-  text: string
-  createdAt: number
-}
-
 export class WebChannelAdapter implements ChannelAdapter {
   readonly type = 'web'
   private readonly sockets = new Set<WebSocket>()
   private readonly server = new WebSocketServer({
     noServer: true
   })
-  private messages: WebOutboundMessage[] = []
   private input?: ChannelStartInput
   private attached?: HttpServer
 
@@ -26,13 +20,19 @@ export class WebChannelAdapter implements ChannelAdapter {
     })
     this.server.on('connection', (socket) => {
       this.sockets.add(socket)
-      for (const message of this.messages) {
-        socket.send(JSON.stringify({
-          type: 'agent',
-          text: message.text,
-          createdAt: message.createdAt
-        }))
-      }
+      const history = input.history()
+      setImmediate(() => {
+        if (socket.readyState !== WebSocket.OPEN) {
+          return
+        }
+        for (const message of history) {
+          socket.send(JSON.stringify({
+            type: message.role,
+            text: message.text,
+            createdAt: message.createdAt
+          }))
+        }
+      })
       socket.on('message', async (data) => {
         let body: unknown = data.toString()
         try {
@@ -69,12 +69,8 @@ export class WebChannelAdapter implements ChannelAdapter {
           }))
           return
         }
-        const result = await this.input.receive({
-          channel: this.type,
-          text
-        })
+        const result = await this.input.receive(text)
         if (result.data?.action === 'clear') {
-          this.messages = []
           for (const target of this.sockets) {
             if (target.readyState === WebSocket.OPEN) {
               target.send(JSON.stringify({
@@ -136,17 +132,13 @@ export class WebChannelAdapter implements ChannelAdapter {
     if (text.trim().length === 0) {
       return Result.fail('text is required')
     }
-    const message = {
-      text,
-      createdAt: Date.now()
-    }
-    this.messages.push(message)
+    const createdAt = Date.now()
     for (const socket of this.sockets) {
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({
           type: 'agent',
-          text: message.text,
-          createdAt: message.createdAt
+          text,
+          createdAt
         }))
       }
     }
