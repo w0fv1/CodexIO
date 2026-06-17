@@ -23,9 +23,12 @@ describe('server', () => {
     socket.send(JSON.stringify({
       text: 'hello'
     }))
-    await waitForWebSocketMessages(messages, 1)
-    const message = messages[0]
-    expect(message).toMatchObject({
+    await waitForWebSocketMessages(messages, 2)
+    expect(messages[0]).toMatchObject({
+      type: 'human',
+      text: 'hello'
+    })
+    expect(messages[1]).toMatchObject({
       type: 'agent',
       text: 'echo: hello'
     })
@@ -40,17 +43,17 @@ describe('server', () => {
     socket.send(JSON.stringify({
       text: 'first'
     }))
-    await waitForWebSocketMessages(messages, 1)
+    await waitForWebSocketMessages(messages, 2)
     socket.send(JSON.stringify({
       text: '/$ clear'
     }))
-    await waitForWebSocketMessages(messages, 2)
-    const clear = messages[1]
+    await waitForWebSocketMessages(messages, 3)
+    const clear = messages[2]
     socket.send(JSON.stringify({
       text: 'second'
     }))
-    await waitForWebSocketMessages(messages, 3)
-    const second = messages[2]
+    await waitForWebSocketMessages(messages, 5)
+    const second = messages[4]
     expect(clear).toMatchObject({
       type: 'clear'
     })
@@ -89,12 +92,40 @@ describe('server', () => {
       isFailed: boolean
     }
     await waitForWebSocketMessages(messages, 1)
-    const message = messages[0]
     expect(result.isFailed).toBe(false)
-    expect(message).toMatchObject({
+    expect(messages[0]).toMatchObject({
       type: 'agent',
       text: 'agent output'
     })
+    await closeWebSocket(socket)
+    await closeTestServer(listener)
+  })
+
+  it('sends sanitized markdown html to web channel', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    const socket = await openWebSocket(baseUrl)
+    const messages = recordWebSocket(socket)
+    const response = await fetch(`${baseUrl}/api/message`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${testMessageToken}`
+      },
+      body: JSON.stringify({
+        text: '**done**\n\n<script>alert(1)</script>'
+      })
+    })
+    const result = await response.json() as {
+      isFailed: boolean
+    }
+    await waitForWebSocketMessages(messages, 1)
+    expect(result.isFailed).toBe(false)
+    expect(messages[0]).toMatchObject({
+      type: 'agent',
+      text: '**done**\n\n<script>alert(1)</script>'
+    })
+    expect(messages[0].html).toContain('<strong>done</strong>')
+    expect(messages[0].html).not.toContain('<script>')
     await closeWebSocket(socket)
     await closeTestServer(listener)
   })
@@ -157,7 +188,39 @@ describe('server', () => {
     await closeTestServer(listener)
   })
 
-  it('restores latest adapter manager messages in web channel', async () => {
+  it('broadcasts human input to every web connection', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    const first = await openWebSocket(baseUrl)
+    const second = await openWebSocket(baseUrl)
+    const firstMessages = recordWebSocket(first)
+    const secondMessages = recordWebSocket(second)
+    first.send(JSON.stringify({
+      text: 'shared input'
+    }))
+    await waitForWebSocketMessages(firstMessages, 2)
+    await waitForWebSocketMessages(secondMessages, 2)
+    expect(firstMessages[0]).toMatchObject({
+      type: 'human',
+      text: 'shared input'
+    })
+    expect(secondMessages[0]).toMatchObject({
+      type: 'human',
+      text: 'shared input'
+    })
+    expect(firstMessages[1]).toMatchObject({
+      type: 'agent',
+      text: 'echo: shared input'
+    })
+    expect(secondMessages[1]).toMatchObject({
+      type: 'agent',
+      text: 'echo: shared input'
+    })
+    await closeWebSocket(first)
+    await closeWebSocket(second)
+    await closeTestServer(listener)
+  })
+
+  it('restores latest channel manager messages in web channel', async () => {
     const { baseUrl, listener } = await startTestServer()
     const socket = await openWebSocket(baseUrl)
     const messages = recordWebSocket(socket)
@@ -165,7 +228,7 @@ describe('server', () => {
       socket.send(JSON.stringify({
         text: `message ${index}`
       }))
-      await waitForWebSocketMessages(messages, index)
+      await waitForWebSocketMessages(messages, index * 2)
     }
     const restored: Array<Record<string, unknown>> = []
     const restoredUrl = baseUrl.replace('http://', 'ws://').replace('https://', 'wss://')

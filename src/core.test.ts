@@ -7,6 +7,7 @@ import { codexHomePath, createAgentEnv } from './agent/AgentEnvironment.js'
 import { AgentManager } from './agent/AgentManager.js'
 import { CodexAgent } from './agent/CodexAgent.js'
 import { EchoAgent } from './agent/EchoAgent.js'
+import { renderMarkdownHtml } from './channel/Markdown.js'
 import { ConfigSchema, ConfigService } from './ConfigService.js'
 import { Result } from './Result.js'
 
@@ -290,6 +291,62 @@ describe('core', () => {
     expect(config.server.messageToken.length).toBeGreaterThan(20)
   })
 
+  it('migrates old config selected workspace through typed legacy shape', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-'))
+    const path = join(dir, 'config.yaml')
+    await writeFile(path, [
+      'proxy:',
+      '  enabled: true',
+      '  http: http://proxy.local:8080',
+      'defaultAgent: echo',
+      'workspaces:',
+      '  default:',
+      '    path: C:\\\\default',
+      '  product:',
+      '    path: C:\\\\product',
+      'routing:',
+      '  defaultWorkspace: product'
+    ].join('\n'), 'utf8')
+    const config = await new ConfigService(path).load()
+    expect(config.agents.echo?.enabled).toBe(true)
+    expect(config.agents.codex?.enabled).toBe(false)
+    expect(config.agents.claude?.enabled).toBe(false)
+    expect(config.workspace.path).toBe('C:\\\\product')
+    expect(config.proxy).toEqual({
+      enabled: true,
+      host: 'proxy.local',
+      port: 8080
+    })
+  })
+
+  it('resolves config references before final schema validation', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-'))
+    const path = join(dir, 'config.yaml')
+    const previousToken = process.env.CODEXIO_TEST_TOKEN
+    process.env.CODEXIO_TEST_TOKEN = 'env-token'
+    await writeFile(path, [
+      'server:',
+      '  messageToken: ${CODEXIO_TEST_TOKEN}',
+      'proxy:',
+      '  enabled: true',
+      '  host: proxy.local',
+      '  port: 8080',
+      'workspace:',
+      '  path: ${proxy.host}'
+    ].join('\n'), 'utf8')
+    try {
+      const config = await new ConfigService(path).load()
+      expect(config.server.messageToken).toBe('env-token')
+      expect(config.workspace.path).toBe('proxy.local')
+    } finally {
+      if (previousToken === undefined) {
+        delete process.env.CODEXIO_TEST_TOKEN
+      } else {
+        process.env.CODEXIO_TEST_TOKEN = previousToken
+      }
+    }
+  })
+
   it('loads feishu channel credentials from config', () => {
     const config = ConfigSchema.parse({
       channels: {
@@ -309,5 +366,20 @@ describe('core', () => {
     expect(config.channels.feishu?.chatIds).toEqual([
       'oc_test'
     ])
+  })
+
+  it('renders safe markdown for web channel display', () => {
+    const html = renderMarkdownHtml([
+      '**bold**',
+      '',
+      '```ts',
+      'const value = 1',
+      '```',
+      '',
+      '<script>alert(1)</script>'
+    ].join('\n'))
+    expect(html).toContain('<strong>bold</strong>')
+    expect(html).toContain('<code>const value = 1')
+    expect(html).not.toContain('<script>')
   })
 })

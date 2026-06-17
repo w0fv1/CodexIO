@@ -6,20 +6,21 @@ export type ChannelReceiveResult = {
 }
 
 export type ChannelMessage = {
-  role: 'human' | 'agent'
+  role: 'human' | 'agent' | 'system'
   text: string
   createdAt: number
+  source?: string
 }
 
 export type ChannelStartInput = {
   app: Express
-  history: () => ChannelMessage[]
+  displayHistory: () => ChannelMessage[]
   receive: (text: string) => Promise<Result<ChannelReceiveResult>>
 }
 
 export interface ChannelAdapter {
   type: string
   start(input: ChannelStartInput): void
-  send(text: string): Promise<Result<null>>
+  send(message: ChannelMessage): Promise<Result<null>>
   stop(): Promise<Result<null>>
 }

@@ -1,8 +1,24 @@
 import { Server as HttpServer } from 'node:http'
 import { WebSocket, WebSocketServer } from 'ws'
-import { ChannelAdapter, ChannelStartInput } from './ChannelAdapter.js'
+import { z } from 'zod'
+import { ChannelAdapter, ChannelMessage, ChannelStartInput } from './ChannelAdapter.js'
+import { renderMarkdownHtml, shouldRenderMarkdown } from './Markdown.js'
 import { webPageHtml } from './WebPage.js'
 import { Result } from '../Result.js'
+
+const WebSocketInputSchema = z.union([
+  z.string(),
+  z.object({
+    text: z.string()
+  })
+])
+
+type WebChannelMessage = {
+  type: ChannelMessage['role']
+  text: string
+  createdAt: number
+  html?: string
+}
 
 export class WebChannelAdapter implements ChannelAdapter {
   readonly type = 'web'
@@ -24,34 +40,24 @@ export class WebChannelAdapter implements ChannelAdapter {
       socket.send(JSON.stringify({
         type: 'ready'
       }))
-      const history = input.history()
+      const history = input.displayHistory()
       setImmediate(() => {
         if (socket.readyState !== WebSocket.OPEN) {
           return
         }
         for (const message of history) {
-          socket.send(JSON.stringify({
-            type: message.role,
-            text: message.text,
-            createdAt: message.createdAt
-          }))
+          socket.send(JSON.stringify(this.toWebMessage(message)))
         }
       })
       socket.on('message', async (data) => {
-        let body: unknown = data.toString()
+        const raw = data.toString()
+        let body: unknown = raw
         try {
-          body = JSON.parse(data.toString()) as unknown
+          body = JSON.parse(raw)
         } catch {
-          body = data.toString()
         }
-        let text: string | undefined
-        if (typeof body === 'string') {
-          text = body
-        }
-        if (body && typeof body === 'object' && typeof (body as Record<string, unknown>).text === 'string') {
-          text = (body as Record<string, string>).text
-        }
-        if (typeof text !== 'string') {
+        const parsed = WebSocketInputSchema.safeParse(body)
+        if (!parsed.success) {
           socket.send(JSON.stringify({
             type: 'error',
             message: 'text is required'
@@ -65,17 +71,8 @@ export class WebChannelAdapter implements ChannelAdapter {
           }))
           return
         }
+        const text = typeof parsed.data === 'string' ? parsed.data : parsed.data.text
         const result = await this.input.receive(text)
-        if (result.data?.action === 'clear') {
-          for (const target of this.sockets) {
-            if (target.readyState === WebSocket.OPEN) {
-              target.send(JSON.stringify({
-                type: 'clear'
-              }))
-            }
-          }
-          return
-        }
         if (result.isFailed) {
           socket.send(JSON.stringify({
             type: 'error',
@@ -113,17 +110,24 @@ export class WebChannelAdapter implements ChannelAdapter {
     })
   }
 
-  async send(text: string): Promise<Result<null>> {
-    if (text.trim().length === 0) {
+  async send(message: ChannelMessage): Promise<Result<null>> {
+    if (message.text.trim().length === 0) {
       return Result.fail('text is required')
     }
-    const createdAt = Date.now()
+    if (message.role === 'system' && message.text === 'clear') {
+      for (const socket of this.sockets) {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({
+            type: 'clear'
+          }))
+        }
+      }
+      return Result.success(null)
+    }
     for (const socket of this.sockets) {
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({
-          type: 'agent',
-          text,
-          createdAt
+          ...this.toWebMessage(message)
         }))
       }
     }
@@ -140,5 +144,17 @@ export class WebChannelAdapter implements ChannelAdapter {
       this.server.close()
     }
     return Result.success(null)
+  }
+
+  private toWebMessage(message: ChannelMessage): WebChannelMessage {
+    const data: WebChannelMessage = {
+      type: message.role,
+      text: message.text,
+      createdAt: message.createdAt
+    }
+    if (message.role !== 'human' && shouldRenderMarkdown(message.text)) {
+      data.html = renderMarkdownHtml(message.text)
+    }
+    return data
   }
 }

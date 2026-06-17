@@ -1,6 +1,11 @@
 import * as Lark from '@larksuiteoapi/node-sdk'
-import { ChannelAdapter, ChannelStartInput } from './ChannelAdapter.js'
+import { z } from 'zod'
+import { ChannelAdapter, ChannelMessage, ChannelStartInput } from './ChannelAdapter.js'
 import { Result } from '../Result.js'
+
+const FeishuTextContentSchema = z.object({
+  text: z.string()
+})
 
 export type FeishuChannelConfig = {
   enabled?: boolean
@@ -46,33 +51,54 @@ export class FeishuChannelAdapter implements ChannelAdapter {
               process.stdout.write(`feishu chat connected: ${data.message.chat_id}\n`)
             }
             if (data.message.message_type !== 'text') {
-              await this.send('当前只支持文本消息')
+              await this.send({
+                role: 'system',
+                text: '当前只支持文本消息',
+                createdAt: Date.now(),
+                source: this.type
+              })
               return
             }
-            const content = JSON.parse(data.message.content) as Record<string, unknown>
-            if (typeof content.text !== 'string') {
-              await this.send('消息文本为空')
+            const content = FeishuTextContentSchema.safeParse(JSON.parse(data.message.content))
+            if (!content.success) {
+              await this.send({
+                role: 'system',
+                text: '消息文本为空',
+                createdAt: Date.now(),
+                source: this.type
+              })
               return
             }
-            let text = content.text
+            let text = content.data.text
             for (const mention of data.message.mentions ?? []) {
               text = text.replaceAll(mention.key, '')
             }
             if (!this.input) {
-              await this.send('feishu channel not started')
+              await this.send({
+                role: 'system',
+                text: 'feishu channel not started',
+                createdAt: Date.now(),
+                source: this.type
+              })
               return
             }
             const result = await this.input.receive(text)
-            if (result.data?.action === 'clear') {
-              await this.send('已开始新对话')
-              return
-            }
             if (result.isFailed) {
-              await this.send(result.message)
+              await this.send({
+                role: 'system',
+                text: result.message,
+                createdAt: Date.now(),
+                source: this.type
+              })
             }
           } catch (error) {
             const result = Result.fromError(error)
-            await this.send(result.message)
+            await this.send({
+              role: 'system',
+              text: result.message,
+              createdAt: Date.now(),
+              source: this.type
+            })
           }
         }
       })
@@ -82,8 +108,11 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     })
   }
 
-  async send(text: string): Promise<Result<null>> {
-    if (text.trim().length === 0) {
+  async send(message: ChannelMessage): Promise<Result<null>> {
+    if (message.role === 'human' && message.source === this.type) {
+      return Result.success(null)
+    }
+    if (message.text.trim().length === 0) {
       return Result.fail('text is required')
     }
     if (!this.client) {
@@ -95,16 +124,38 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     const failures: string[] = []
     for (const chatId of this.chatIds) {
       try {
+        let text = message.text
+        if (message.role === 'system' && message.text === 'clear') {
+          text = '已开始新对话'
+        }
+        let msgType = 'post'
+        let content = JSON.stringify({
+          zh_cn: {
+            title: 'Codexio',
+            content: [
+              [
+                {
+                  tag: 'md',
+                  text
+                }
+              ]
+            ]
+          }
+        })
+        if (message.role === 'human') {
+          msgType = 'text'
+          content = JSON.stringify({
+            text
+          })
+        }
         await this.client.im.v1.message.create({
           params: {
             receive_id_type: 'chat_id'
           },
           data: {
             receive_id: chatId,
-            msg_type: 'text',
-            content: JSON.stringify({
-              text
-            })
+            msg_type: msgType,
+            content
           }
         })
       } catch (error) {

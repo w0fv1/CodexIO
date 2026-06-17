@@ -6,14 +6,19 @@ import { pathToFileURL } from 'node:url'
 import express from 'express'
 import cors from 'cors'
 import { Command } from 'commander'
-import { AdapterManager } from './channel/AdapterManager.js'
+import { z } from 'zod'
+import { ChannelManager } from './channel/ChannelManager.js'
 import { AgentManager } from './agent/AgentManager.js'
 import { CodexioConfig, ConfigService } from './ConfigService.js'
 import { Result } from './Result.js'
 
+const AgentMessageBodySchema = z.object({
+  text: z.string().refine((value) => value.trim().length > 0)
+})
+
 export type CodexioServer = {
   app: express.Express
-  adapterManager: AdapterManager
+  channelManager: ChannelManager
   agentManager: AgentManager
   listen: (port?: number, host?: string) => HttpServer
   stop: () => Promise<Result<null>>
@@ -29,11 +34,11 @@ export function createCodexioApp(config: CodexioConfig): CodexioServer {
     limit: '1mb'
   }))
 
-  const adapterManager = new AdapterManager(config)
+  const channelManager = new ChannelManager(config)
   const toolBaseUrl = `http://${config.server.host}:${config.server.port}`
   const agentManager = new AgentManager(config, toolBaseUrl, {
-    send: async (text) => adapterManager.send(text),
-    status: async (text) => adapterManager.status(text)
+    send: async (text) => channelManager.send(text),
+    status: async (text) => channelManager.status(text)
   })
 
   app.post('/api/message', async (request, response) => {
@@ -43,12 +48,12 @@ export function createCodexioApp(config: CodexioConfig): CodexioServer {
         response.status(401).json(Result.fail('unauthorized', '401'))
         return
       }
-      const body = request.body as Record<string, unknown>
-      if (typeof body.text !== 'string' || body.text.trim().length === 0) {
+      const body = AgentMessageBodySchema.safeParse(request.body)
+      if (!body.success) {
         response.json(Result.fail('text is required'))
         return
       }
-      const sent = await adapterManager.send(body.text)
+      const sent = await channelManager.send(body.data.text)
       if (sent.isFailed) {
         response.json(sent)
         return
@@ -65,11 +70,11 @@ export function createCodexioApp(config: CodexioConfig): CodexioServer {
     response.json(Result.success(agentManager.status()))
   })
 
-  adapterManager.start(app, async (received) => agentManager.receive(received))
+  channelManager.start(app, async (received) => agentManager.receive(received))
 
   return {
     app,
-    adapterManager,
+    channelManager,
     agentManager,
     listen: (port?: number, host?: string) => {
       let listener: HttpServer
@@ -80,7 +85,7 @@ export function createCodexioApp(config: CodexioConfig): CodexioServer {
       } else {
         listener = app.listen()
       }
-      adapterManager.attach(listener)
+      channelManager.attach(listener)
       listener.once('listening', () => {
         void agentManager.start()
       })
@@ -88,7 +93,7 @@ export function createCodexioApp(config: CodexioConfig): CodexioServer {
       listener.close = ((callback?: (error?: Error) => void) => {
         void (async () => {
           const agentStopped = await agentManager.stop()
-          const adapterStopped = await adapterManager.stop()
+          const channelStopped = await channelManager.stop()
           close((error?: Error) => {
             if (error) {
               callback?.(error)
@@ -98,8 +103,8 @@ export function createCodexioApp(config: CodexioConfig): CodexioServer {
               callback?.(new Error(agentStopped.message))
               return
             }
-            if (adapterStopped.isFailed) {
-              callback?.(new Error(adapterStopped.message))
+            if (channelStopped.isFailed) {
+              callback?.(new Error(channelStopped.message))
               return
             }
             callback?.()
@@ -111,12 +116,12 @@ export function createCodexioApp(config: CodexioConfig): CodexioServer {
     },
     stop: async () => {
       const agentStopped = await agentManager.stop()
-      const adapterStopped = await adapterManager.stop()
+      const channelStopped = await channelManager.stop()
       if (agentStopped.isFailed) {
         return agentStopped
       }
-      if (adapterStopped.isFailed) {
-        return adapterStopped
+      if (channelStopped.isFailed) {
+        return channelStopped
       }
       return Result.success(null)
     }

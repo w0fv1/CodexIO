@@ -16,6 +16,17 @@ export const webPageHtml = `<!doctype html>
     .panelHeader{padding:18px 22px;border-bottom:1px solid #283244}
     #messages{padding:20px 22px;overflow:auto;display:flex;flex-direction:column;gap:12px;scroll-behavior:smooth}
     .message{max-width:86%;padding:11px 13px;border-radius:8px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:14px;animation:messageIn 160ms ease-out both}
+    .message.markdown{white-space:normal}
+    .message.markdown p{margin:0 0 10px}
+    .message.markdown p:last-child{margin-bottom:0}
+    .message.markdown ul,.message.markdown ol{margin:8px 0;padding-left:22px}
+    .message.markdown blockquote{margin:10px 0;padding-left:12px;border-left:3px solid #6b7280;color:#d1d5db}
+    .message.markdown pre{margin:10px 0;padding:12px;border-radius:8px;background:#0b1220;overflow:auto}
+    .message.markdown code{padding:2px 5px;border-radius:5px;background:#0b1220;font-family:Consolas,Menlo,monospace;font-size:.95em}
+    .message.markdown pre code{padding:0;background:transparent}
+    .message.markdown table{border-collapse:collapse;margin:10px 0;width:100%;display:block;overflow:auto}
+    .message.markdown th,.message.markdown td{border:1px solid #3a4558;padding:6px 8px;text-align:left}
+    .message.markdown a{color:#93c5fd}
     .user{align-self:flex-end;background:#2f6fed;color:#fff}
     .agent{align-self:flex-start;background:#202938;color:#f9fafb}
     form{display:grid;grid-template-columns:1fr auto;gap:10px;padding:16px 22px;border-top:1px solid #283244}
@@ -61,10 +72,15 @@ export const webPageHtml = `<!doctype html>
     const form = document.querySelector('#form')
     const text = document.querySelector('#text')
     const send = document.querySelector('#send')
-    function append(className, value) {
+    function append(className, value, html) {
       const element = document.createElement('div')
       element.className = 'message ' + className
-      element.textContent = value
+      if (html) {
+        element.className += ' markdown'
+        element.innerHTML = html
+      } else {
+        element.textContent = value
+      }
       messages.appendChild(element)
       messages.scrollTop = messages.scrollHeight
     }
@@ -97,7 +113,7 @@ export const webPageHtml = `<!doctype html>
         return
       }
       if (message.type === 'agent') {
-        append('agent', message.text)
+        append('agent', message.text, message.html)
       }
     })
     form.addEventListener('submit', async (event) => {
@@ -110,7 +126,6 @@ export const webPageHtml = `<!doctype html>
         append('agent', 'WebSocket 未连接')
         return
       }
-      append('user', value)
       text.value = ''
       socket.send(JSON.stringify({
         text: value

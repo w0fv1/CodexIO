@@ -48,6 +48,53 @@ const WorkspaceConfigSchema = z.object({
   path: z.string().min(1)
 })
 
+type ConfigReferenceObject = {
+  [key: string]: ConfigReferenceValue | undefined
+}
+type ConfigReferenceValue = string | number | boolean | null | ConfigReferenceValue[] | ConfigReferenceObject
+
+const ConfigReferenceValueSchema: z.ZodType<ConfigReferenceValue> = z.lazy(() => z.union([
+  z.string(),
+  z.number(),
+  z.boolean(),
+  z.null(),
+  z.array(ConfigReferenceValueSchema),
+  z.record(z.string(), ConfigReferenceValueSchema)
+]))
+
+const ConfigDocumentSchema = z.object({
+  server: ConfigReferenceValueSchema.optional(),
+  proxy: ConfigReferenceValueSchema.optional(),
+  agents: ConfigReferenceValueSchema.optional(),
+  channels: ConfigReferenceValueSchema.optional(),
+  workspace: ConfigReferenceValueSchema.optional(),
+  defaultAgent: ConfigReferenceValueSchema.optional(),
+  workspaces: ConfigReferenceValueSchema.optional(),
+  routing: ConfigReferenceValueSchema.optional()
+}).catchall(ConfigReferenceValueSchema)
+
+const LegacyProxyConfigSchema = z.object({
+  enabled: z.boolean().optional(),
+  http: z.string().optional(),
+  host: z.string().optional(),
+  port: z.number().int().positive().optional()
+}).catchall(ConfigReferenceValueSchema)
+
+const LegacyWorkspaceSchema = z.object({
+  path: z.string().optional()
+}).catchall(ConfigReferenceValueSchema)
+
+const LegacyRoutingSchema = z.object({
+  defaultWorkspace: z.string().optional()
+}).catchall(ConfigReferenceValueSchema)
+
+const LegacyConfigSchema = ConfigDocumentSchema.extend({
+  proxy: LegacyProxyConfigSchema.optional(),
+  defaultAgent: z.string().optional(),
+  workspaces: z.record(z.string(), LegacyWorkspaceSchema).optional(),
+  routing: LegacyRoutingSchema.optional()
+})
+
 export const ConfigSchema = z.object({
   server: z.object({
     host: z.string().default('127.0.0.1'),
@@ -78,6 +125,8 @@ export const ConfigSchema = z.object({
 })
 
 export type CodexioConfig = z.infer<typeof ConfigSchema>
+type ConfigDocument = z.infer<typeof ConfigDocumentSchema>
+type LegacyConfigDocument = z.infer<typeof LegacyConfigSchema>
 
 export class ConfigService {
   constructor(private readonly configPath = defaultConfigPath) {}
@@ -89,7 +138,8 @@ export class ConfigService {
   async load(): Promise<CodexioConfig> {
     const text = await readFile(this.configPath, 'utf8')
     const parsed = YAML.parse(text)
-    const resolved = this.resolveReferences(this.migrate(parsed))
+    const document = ConfigDocumentSchema.parse(parsed)
+    const resolved = resolveReferences(migrateConfig(document))
     const config = ConfigSchema.parse(resolved)
     if (config.server.messageToken.trim().length === 0) {
       config.server.messageToken = createMessageToken()
@@ -159,86 +209,106 @@ export class ConfigService {
       }
     })
   }
+}
 
-  private resolveReferences(value: unknown, root = value): unknown {
-    if (typeof value === 'string') {
-      return value.replace(/\$\{([^}]+)\}/g, (_, path: string) => {
-        const resolved = path.split('.').reduce<unknown>((current, key) => {
-          if (current && typeof current === 'object' && key in current) {
-            return (current as Record<string, unknown>)[key]
-          }
-          return undefined
-        }, root)
-        if (typeof resolved === 'string') {
-          return resolved
-        }
-        const envValue = process.env[path]
-        if (envValue) {
-          return envValue
-        }
-        return ''
-      })
-    }
-    if (Array.isArray(value)) {
-      return value.map((item) => this.resolveReferences(item, root))
-    }
-    if (value && typeof value === 'object') {
-      const entries = Object.entries(value).map(([key, item]) => [
-        key,
-        this.resolveReferences(item, root)
-      ])
-      return Object.fromEntries(entries)
-    }
-    return value
+function migrateConfig(document: ConfigDocument): ConfigReferenceObject {
+  const legacy = LegacyConfigSchema.parse(document)
+  const migrated: ConfigReferenceObject = {
+    ...legacy
   }
+  const proxy = migrateProxyConfig(legacy)
+  if (proxy) {
+    migrated.proxy = proxy
+  }
+  const workspace = migrateWorkspaceConfig(legacy)
+  if (workspace) {
+    migrated.workspace = workspace
+  }
+  const agents = migrateAgentsConfig(legacy)
+  if (agents) {
+    migrated.agents = agents
+  }
+  return migrated
+}
 
-  private migrate(value: unknown): unknown {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      return value
-    }
-    const source = value as Record<string, unknown>
-    const migrated = {
-      ...source
-    }
-    const oldProxy = source.proxy
-    if (oldProxy && typeof oldProxy === 'object' && !Array.isArray(oldProxy)) {
-      const proxy = oldProxy as Record<string, unknown>
-      const url = typeof proxy.http === 'string' ? new URL(proxy.http) : undefined
-      migrated.proxy = {
-        enabled: proxy.enabled,
-        host: url?.hostname ?? proxy.host,
-        port: url?.port ? Number.parseInt(url.port, 10) : proxy.port
-      }
-    }
-    const oldWorkspace = source.workspaces
-    if (oldWorkspace && typeof oldWorkspace === 'object' && !Array.isArray(oldWorkspace)) {
-      const workspaces = oldWorkspace as Record<string, unknown>
-      const defaultWorkspace = source.routing && typeof source.routing === 'object' && !Array.isArray(source.routing)
-        ? (source.routing as Record<string, unknown>).defaultWorkspace
-        : undefined
-      const workspaceName = typeof defaultWorkspace === 'string' ? defaultWorkspace : 'default'
-      const workspace = workspaces[workspaceName]
-      if (workspace && typeof workspace === 'object' && !Array.isArray(workspace)) {
-        migrated.workspace = {
-          path: (workspace as Record<string, unknown>).path
-        }
-      }
-    }
-    if (typeof source.defaultAgent === 'string') {
-      migrated.agents = {
-        codex: {
-          enabled: source.defaultAgent === 'codex'
-        },
-        claude: {
-          enabled: source.defaultAgent === 'claude'
-        },
-        echo: {
-          enabled: source.defaultAgent === 'echo'
-        }
-      }
-    }
-    return migrated
+function migrateProxyConfig(config: LegacyConfigDocument): ConfigReferenceObject | undefined {
+  if (!config.proxy) {
+    return undefined
   }
+  const url = config.proxy.http ? new URL(config.proxy.http) : undefined
+  return {
+    enabled: config.proxy.enabled,
+    host: url?.hostname ?? config.proxy.host,
+    port: url?.port ? Number.parseInt(url.port, 10) : config.proxy.port
+  }
+}
+
+function migrateWorkspaceConfig(config: LegacyConfigDocument): ConfigReferenceObject | undefined {
+  if (!config.workspaces) {
+    return undefined
+  }
+  const workspaceName = config.routing?.defaultWorkspace ?? 'default'
+  const workspace = config.workspaces[workspaceName]
+  if (!workspace?.path) {
+    return undefined
+  }
+  return {
+    path: workspace.path
+  }
+}
+
+function migrateAgentsConfig(config: LegacyConfigDocument): ConfigReferenceObject | undefined {
+  if (!config.defaultAgent) {
+    return undefined
+  }
+  return {
+    codex: {
+      enabled: config.defaultAgent === 'codex'
+    },
+    claude: {
+      enabled: config.defaultAgent === 'claude'
+    },
+    echo: {
+      enabled: config.defaultAgent === 'echo'
+    }
+  }
+}
+
+function resolveReferences(value: ConfigReferenceValue, root = value): ConfigReferenceValue {
+  if (typeof value === 'string') {
+    return value.replace(/\$\{([^}]+)\}/g, (_, path: string) => {
+      const resolved = resolveReferencePath(root, path)
+      if (typeof resolved === 'string') {
+        return resolved
+      }
+      const envValue = process.env[path]
+      if (envValue) {
+        return envValue
+      }
+      return ''
+    })
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => resolveReferences(item, root))
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+      key,
+      item === undefined ? undefined : resolveReferences(item, root)
+    ]))
+  }
+  return value
+}
+
+function resolveReferencePath(root: ConfigReferenceValue, path: string): ConfigReferenceValue | undefined {
+  let current: ConfigReferenceValue | undefined = root
+  for (const key of path.split('.')) {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) {
+      return undefined
+    }
+    current = current[key]
+  }
+  return current
 }
 
 function createMessageToken(): string {
