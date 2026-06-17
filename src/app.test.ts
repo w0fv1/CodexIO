@@ -1,45 +1,66 @@
 import { describe, expect, it } from 'vitest'
+import { WebSocket } from 'ws'
+import { Server as HttpServer } from 'node:http'
 import { ConfigSchema } from './ConfigService.js'
 import { createCodexioApp } from './index.js'
 import { webPageHtml } from './channel/WebPage.js'
 
 describe('server', () => {
-  it('serves a Codexio introduction page with the web chat', () => {
-    expect(webPageHtml).toContain('无数据库、配置驱动的 coding agent 文本中转器')
-    expect(webPageHtml).toContain('HTTP API')
+  it('serves a compact Codexio web chat page', () => {
+    expect(webPageHtml).toContain('<span>Codexio</span>')
     expect(webPageHtml).toContain('id="messages"')
     expect(webPageHtml).toContain('id="form"')
+    expect(webPageHtml).not.toContain('让 coding agent 通过统一通道工作')
+    expect(webPageHtml).not.toContain('Codex CLI')
   })
 
   it('receives web text', async () => {
     const { baseUrl, listener } = await startTestServer()
-    const result = await postWebText(baseUrl, 'hello') as {
-      isFailed: boolean
-    }
-    expect(result.isFailed).toBe(false)
+    const socket = await openWebSocket(baseUrl)
+    socket.send(JSON.stringify({
+      text: 'hello'
+    }))
+    const message = await readWebSocketMessage(socket)
+    expect(message).toMatchObject({
+      type: 'agent',
+      text: 'echo: hello'
+    })
+    await closeWebSocket(socket)
     await closeTestServer(listener)
   })
 
   it('clears the active agent conversation', async () => {
     const { baseUrl, listener } = await startTestServer()
-    await postWebText(baseUrl, 'first')
-    const clear = await postWebText(baseUrl, '/$ clear') as {
-      data: {
-        action: string
-      }
-    }
-    const second = await postWebText(baseUrl, 'second') as {
-      isFailed: boolean
-    }
-    expect(clear.data.action).toBe('clear')
-    expect(second.isFailed).toBe(false)
+    const socket = await openWebSocket(baseUrl)
+    socket.send(JSON.stringify({
+      text: 'first'
+    }))
+    await readWebSocketMessage(socket)
+    socket.send(JSON.stringify({
+      text: '/$ clear'
+    }))
+    const clear = await readWebSocketMessage(socket)
+    socket.send(JSON.stringify({
+      text: 'second'
+    }))
+    const second = await readWebSocketMessage(socket)
+    expect(clear).toMatchObject({
+      type: 'clear'
+    })
+    expect(second).toMatchObject({
+      type: 'agent',
+      text: 'echo: second'
+    })
+    await closeWebSocket(socket)
     await closeTestServer(listener)
   })
 
   it('does not expose web history as external API', async () => {
     const { baseUrl, listener } = await startTestServer()
-    const response = await fetch(`${baseUrl}/api/web/messages`)
-    expect(response.status).toBe(404)
+    const messages = await fetch(`${baseUrl}/api/web/messages`)
+    const events = await fetch(`${baseUrl}/api/web/events`)
+    expect(messages.status).toBe(404)
+    expect(events.status).toBe(404)
     await closeTestServer(listener)
   })
 
@@ -86,23 +107,13 @@ describe('server', () => {
     const server = createCodexioApp(config)
     const ready = await server.ready
     expect(ready.isFailed).toBe(false)
-    const listener = server.app.listen(0)
-    await new Promise<void>((resolve) => {
-      listener.once('listening', resolve)
-    })
+    const listener = server.listen(0)
+    await new Promise<void>((resolve) => listener.once('listening', resolve))
     const address = listener.address()
     if (!address || typeof address === 'string') {
       throw new Error('server address not found')
     }
-    const response = await fetch(`http://127.0.0.1:${address.port}/api/web/messages`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        text: 'hello'
-      })
-    })
+    const response = await fetch(`http://127.0.0.1:${address.port}/`)
     expect(response.status).toBe(404)
     await closeTestServer(listener)
   })
@@ -135,7 +146,7 @@ describe('server', () => {
 
 async function startTestServer(): Promise<{
   baseUrl: string
-  listener: ReturnType<ReturnType<typeof createCodexioApp>['app']['listen']>
+  listener: HttpServer
 }> {
   const config = ConfigSchema.parse({
     agents: {
@@ -163,10 +174,8 @@ async function startTestServer(): Promise<{
   if (ready.isFailed) {
     throw new Error(ready.message)
   }
-  const listener = server.app.listen(0)
-  await new Promise<void>((resolve) => {
-    listener.once('listening', resolve)
-  })
+  const listener = server.listen(0)
+  await new Promise<void>((resolve) => listener.once('listening', resolve))
   const address = listener.address()
   if (!address || typeof address === 'string') {
     throw new Error('server address not found')
@@ -177,20 +186,35 @@ async function startTestServer(): Promise<{
   }
 }
 
-async function postWebText(baseUrl: string, text: string): Promise<unknown> {
-  const response = await fetch(`${baseUrl}/api/web/messages`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      text
-    })
+async function openWebSocket(baseUrl: string): Promise<WebSocket> {
+  const url = baseUrl.replace('http://', 'ws://').replace('https://', 'wss://')
+  const socket = new WebSocket(`${url}/ws`)
+  await new Promise<void>((resolve, reject) => {
+    socket.once('open', resolve)
+    socket.once('error', reject)
   })
-  return response.json()
+  return socket
 }
 
-async function closeTestServer(listener: ReturnType<ReturnType<typeof createCodexioApp>['app']['listen']>): Promise<void> {
+async function readWebSocketMessage(socket: WebSocket): Promise<Record<string, unknown>> {
+  const data = await new Promise<WebSocket.RawData>((resolve, reject) => {
+    socket.once('message', resolve)
+    socket.once('error', reject)
+  })
+  return JSON.parse(data.toString()) as Record<string, unknown>
+}
+
+async function closeWebSocket(socket: WebSocket): Promise<void> {
+  if (socket.readyState === WebSocket.CLOSED) {
+    return
+  }
+  await new Promise<void>((resolve) => {
+    socket.once('close', resolve)
+    socket.close()
+  })
+}
+
+async function closeTestServer(listener: HttpServer): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     listener.close((error) => {
       if (error) {

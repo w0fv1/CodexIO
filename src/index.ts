@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { Server as HttpServer } from 'node:http'
 import { resolve } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { argv, stdin as input, stdout as output, stderr as errorOutput } from 'node:process'
@@ -21,6 +22,7 @@ export type CodexioServer = {
   web: WebChannelAdapter
   cli: CliChannelAdapter
   ready: Promise<Result<null>>
+  listen: (port?: number, host?: string) => HttpServer
 }
 
 export function createCodexioApp(config: CodexioConfig): CodexioServer {
@@ -151,7 +153,21 @@ export function createCodexioApp(config: CodexioConfig): CodexioServer {
     app,
     web,
     cli,
-    ready: startAgent()
+    ready: startAgent(),
+    listen: (port?: number, host?: string) => {
+      let listener: HttpServer
+      if (port !== undefined && host) {
+        listener = app.listen(port, host)
+      } else if (port !== undefined) {
+        listener = app.listen(port)
+      } else {
+        listener = app.listen()
+      }
+      if (adapters.has(web.type)) {
+        web.attach(listener)
+      }
+      return listener
+    }
   }
 }
 
@@ -299,7 +315,7 @@ async function serve(config?: CodexioConfig): Promise<void> {
   if (ready.isFailed) {
     throw new Error(ready.message)
   }
-  const listener = server.app.listen(resolvedConfig.server.port, resolvedConfig.server.host)
+  const listener = server.listen(resolvedConfig.server.port, resolvedConfig.server.host)
   await new Promise<void>((resolveListening) => {
     listener.once('listening', resolveListening)
   })

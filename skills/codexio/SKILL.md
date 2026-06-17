@@ -1,3 +1,8 @@
+---
+name: codexio
+description: Send concise plain-text updates from Codex to the external Codexio user through the runtime HTTP callback.
+---
+
 # Codexio Communication
 
 You are running inside Codexio, a headless coding-agent runtime connected to an external chat platform.

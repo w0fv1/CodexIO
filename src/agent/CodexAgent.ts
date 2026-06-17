@@ -1,27 +1,31 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execa } from 'execa'
 import { CodexioConfig } from '../ConfigService.js'
 import { Agent } from './Agent.js'
 import { codexHomePath, codexioRootPath, createAgentEnv } from './AgentEnvironment.js'
+import { CodexAppServer } from './CodexAppServer.js'
 
 const codexEntryPath = createRequire(import.meta.url).resolve('@openai/codex/bin/codex.js')
+
+type CodexAppServerHandle = Pick<CodexAppServer, 'start' | 'request' | 'waitForNotification' | 'stop'>
 
 export type CodexAgentOptions = {
   workspacePath: string
   config: CodexioConfig
   toolBaseUrl: string
   send: (text: string) => Promise<void>
+  appServer?: CodexAppServerHandle
 }
 
 export class CodexAgent implements Agent {
   readonly type = 'codex'
-  private hasSession = false
   private started = false
-  private child?: ReturnType<typeof execa>
-  private generation = 0
+  private threadId?: string
+  private activeTurnId?: string
+  private appServer?: CodexAppServerHandle
+  private readonly messageByItemId = new Map<string, string>()
 
   constructor(private readonly options: CodexAgentOptions) {}
 
@@ -44,124 +48,230 @@ export class CodexAgent implements Agent {
       recursive: true
     })
     await writeFile(target, await readFile(source, 'utf8'), 'utf8')
+    this.appServer = this.options.appServer ?? new CodexAppServer({
+      command: process.execPath,
+      args: [
+        codexEntryPath,
+        'app-server',
+        '--stdio'
+      ],
+      cwd: this.options.workspacePath,
+      env: createAgentEnv(this.options.config),
+      onNotification: (method, params) => {
+        void this.handleNotification(method, params)
+      },
+      onStderr: (data) => {
+        process.stderr.write(data)
+      }
+    })
+    await this.appServer.start()
     this.started = true
-    this.hasSession = false
+    await this.ensureLoggedIn()
+    await this.startThread()
   }
 
   async receive(text: string): Promise<void> {
     if (!this.started) {
       throw new Error('agent not started')
     }
-    const generation = this.generation
-    const outputDir = join(tmpdir(), 'codexio')
-    await mkdir(outputDir, {
-      recursive: true
-    })
-    const outputPath = join(outputDir, 'codexio.last-message.txt')
-    const prompt = [
-      'You are running inside Codexio.',
-      'An external user is connected through Codexio.',
-      'For meaningful progress, blockers, and completion, send concise updates through Codexio HTTP.',
-      `Use this PowerShell command shape: $body = @{ text = "progress text" } | ConvertTo-Json -Compress; Invoke-RestMethod -Method Post -Uri "${this.options.toolBaseUrl}/api/message" -ContentType "application/json" -Body $body`,
-      'Do not send secrets, tokens, credentials, private keys, or sensitive environment values.',
-      'Now handle the user task.',
-      '',
-      text
-    ].join('\n')
-    const args = this.hasSession
-      ? [
-          'exec',
-          'resume',
-          '--last',
-          '--dangerously-bypass-approvals-and-sandbox',
-          '--output-last-message',
-          outputPath,
-          '-'
-        ]
-      : [
-          'exec',
-          '--dangerously-bypass-approvals-and-sandbox',
-          '--output-last-message',
-          outputPath,
-          '-'
-        ]
-    this.hasSession = true
-    const child = execa(process.execPath, [
-      codexEntryPath,
-      ...args
-    ], {
-      cwd: this.options.workspacePath,
-      env: createAgentEnv(this.options.config),
-      stdin: 'pipe',
-      stdout: 'pipe',
-      stderr: 'pipe',
-      reject: false
-    })
-    this.child = child
-    let stdout = ''
-    let stderr = ''
-    child.stdout?.on('data', (data: Buffer) => {
-      stdout += data.toString('utf8')
-    })
-    child.stderr?.on('data', (data: Buffer) => {
-      const value = data.toString('utf8')
-      const visible = value.trim()
-      stderr += value
-      if (generation === this.generation && (visible.includes('stdin is not a terminal') || visible.includes('not authenticated'))) {
-        void this.options.send(visible)
+    if (!this.threadId) {
+      await this.startThread()
+    }
+    if (!this.threadId || !this.appServer) {
+      throw new Error('codex app-server not started')
+    }
+    const input = [
+      {
+        type: 'text',
+        text,
+        text_elements: []
       }
+    ]
+    if (this.activeTurnId) {
+      await this.appServer.request('turn/steer', {
+        threadId: this.threadId,
+        expectedTurnId: this.activeTurnId,
+        input
+      })
+      return
+    }
+    const response = await this.appServer.request('turn/start', {
+      threadId: this.threadId,
+      input
     })
-    child.stdin?.write(prompt)
-    child.stdin?.end()
-    void child.then(async (result) => {
-      try {
-        if (generation !== this.generation) {
-          return
-        }
-        if (this.child === child) {
-          this.child = undefined
-        }
-        const lastMessage = await readFile(outputPath, 'utf8')
-        const message = lastMessage.trim()
-        if (message.length > 0) {
-          await this.options.send(message)
-        }
-        if (result.exitCode !== 0) {
-          await this.options.send(`codex exited with code ${result.exitCode}`)
-        }
-      } catch (error) {
-        if (generation !== this.generation) {
-          return
-        }
-        const visibleOutput = stdout.trim() || stderr.trim()
-        if (visibleOutput.length > 0) {
-          await this.options.send(visibleOutput)
-          return
-        }
-        const message = error instanceof Error ? error.message : String(error)
-        await this.options.send(message)
-      }
-    }).catch(async (error) => {
-      if (generation !== this.generation) {
-        return
-      }
-      const message = error instanceof Error ? error.message : String(error)
-      await this.options.send(message)
-    })
+    if (!response || typeof response !== 'object') {
+      throw new Error('codex turn response not found')
+    }
+    const turn = (response as Record<string, unknown>).turn
+    if (!turn || typeof turn !== 'object' || typeof (turn as Record<string, unknown>).id !== 'string') {
+      throw new Error('codex turn id not found')
+    }
+    this.activeTurnId = (turn as Record<string, string>).id
   }
 
   async clear(): Promise<void> {
-    this.generation += 1
-    if (this.child) {
-      this.child.kill()
-      this.child = undefined
+    if (this.threadId && this.activeTurnId && this.appServer) {
+      await this.appServer.request('turn/interrupt', {
+        threadId: this.threadId,
+        turnId: this.activeTurnId
+      }).catch(() => {})
     }
-    this.hasSession = false
+    this.activeTurnId = undefined
+    this.threadId = undefined
+    this.messageByItemId.clear()
     this.started = true
+    if (this.appServer) {
+      await this.startThread()
+    }
   }
 
   async stop(): Promise<void> {
-    await this.clear()
+    if (this.threadId && this.activeTurnId && this.appServer) {
+      await this.appServer.request('turn/interrupt', {
+        threadId: this.threadId,
+        turnId: this.activeTurnId
+      }).catch(() => {})
+    }
+    await this.appServer?.stop()
+    this.activeTurnId = undefined
+    this.threadId = undefined
+    this.appServer = undefined
+    this.messageByItemId.clear()
     this.started = false
+  }
+
+  private async startThread(): Promise<void> {
+    if (!this.appServer) {
+      throw new Error('codex app-server not started')
+    }
+    const response = await this.appServer.request('thread/start', {
+      cwd: this.options.workspacePath,
+      approvalPolicy: 'never',
+      sandbox: 'danger-full-access',
+      ephemeral: true,
+      developerInstructions: [
+        'You are running inside Codexio.',
+        'An external user is connected through Codexio.',
+        'For meaningful progress, blockers, and completion, send concise updates through Codexio HTTP.',
+        `Use this PowerShell command shape: $body = @{ text = "progress text" } | ConvertTo-Json -Compress; Invoke-RestMethod -Method Post -Uri "${this.options.toolBaseUrl}/api/message" -ContentType "application/json" -Body $body`,
+        'Do not send secrets, tokens, credentials, private keys, or sensitive environment values.'
+      ].join('\n')
+    })
+    if (!response || typeof response !== 'object') {
+      throw new Error('codex thread response not found')
+    }
+    const thread = (response as Record<string, unknown>).thread
+    if (!thread || typeof thread !== 'object' || typeof (thread as Record<string, unknown>).id !== 'string') {
+      throw new Error('codex thread id not found')
+    }
+    this.threadId = (thread as Record<string, string>).id
+    this.activeTurnId = undefined
+    this.messageByItemId.clear()
+  }
+
+  private async ensureLoggedIn(): Promise<void> {
+    if (!this.appServer) {
+      throw new Error('codex app-server not started')
+    }
+    const status = await this.appServer.request('account/read', {
+      refreshToken: true
+    })
+    if (status && typeof status === 'object' && (status as Record<string, unknown>).account) {
+      return
+    }
+    const login = await this.appServer.request('account/login/start', {
+      type: 'chatgptDeviceCode'
+    })
+    if (!login || typeof login !== 'object') {
+      throw new Error('codex login response not found')
+    }
+    const data = login as Record<string, unknown>
+    if (typeof data.verificationUrl !== 'string' || typeof data.userCode !== 'string') {
+      throw new Error('codex login URL not found')
+    }
+    const message = [
+      'Codex login required.',
+      `Open: ${data.verificationUrl}`,
+      `Code: ${data.userCode}`
+    ].join('\n')
+    process.stdout.write(`${message}\n`)
+    await this.options.send(message).catch(() => {})
+    await this.appServer.waitForNotification('account/login/completed')
+  }
+
+  private async handleNotification(method: string, params: unknown): Promise<void> {
+    if (!params || typeof params !== 'object') {
+      return
+    }
+    const data = params as Record<string, unknown>
+    if (method === 'turn/started') {
+      const turn = data.turn
+      if (typeof data.threadId === 'string' && data.threadId === this.threadId && turn && typeof turn === 'object' && typeof (turn as Record<string, unknown>).id === 'string') {
+        this.activeTurnId = (turn as Record<string, string>).id
+      }
+      return
+    }
+    if (method === 'item/agentMessage/delta') {
+      if (typeof data.threadId === 'string' && data.threadId === this.threadId && typeof data.itemId === 'string' && typeof data.delta === 'string') {
+        const current = this.messageByItemId.get(data.itemId) ?? ''
+        this.messageByItemId.set(data.itemId, current + data.delta)
+      }
+      return
+    }
+    if (method === 'item/started') {
+      const item = data.item
+      if (item && typeof item === 'object' && (item as Record<string, unknown>).type === 'commandExecution' && typeof (item as Record<string, unknown>).command === 'string') {
+        process.stdout.write(`\n$ ${(item as Record<string, string>).command}\n`)
+      }
+      return
+    }
+    if (method === 'item/completed') {
+      const item = data.item
+      if (item && typeof item === 'object' && (item as Record<string, unknown>).type === 'commandExecution' && typeof (item as Record<string, unknown>).aggregatedOutput === 'string') {
+        process.stdout.write((item as Record<string, string>).aggregatedOutput)
+      }
+      return
+    }
+    if (method === 'turn/completed') {
+      const turn = data.turn
+      if (typeof data.threadId !== 'string' || data.threadId !== this.threadId || !turn || typeof turn !== 'object') {
+        return
+      }
+      const turnId = (turn as Record<string, unknown>).id
+      if (typeof turnId === 'string' && turnId === this.activeTurnId) {
+        this.activeTurnId = undefined
+      }
+      const items = (turn as Record<string, unknown>).items
+      const messages: string[] = []
+      if (Array.isArray(items)) {
+        for (const item of items) {
+          if (item && typeof item === 'object' && (item as Record<string, unknown>).type === 'agentMessage' && typeof (item as Record<string, unknown>).text === 'string') {
+            const text = (item as Record<string, string>).text.trim()
+            if (text.length > 0) {
+              messages.push(text)
+            }
+          }
+        }
+      }
+      if (messages.length === 0) {
+        for (const value of this.messageByItemId.values()) {
+          const text = value.trim()
+          if (text.length > 0) {
+            messages.push(text)
+          }
+        }
+      }
+      this.messageByItemId.clear()
+      if (messages.length > 0) {
+        await this.options.send(messages.join('\n\n'))
+      }
+      return
+    }
+    if (method === 'error') {
+      const error = data.error
+      if (error && typeof error === 'object' && typeof (error as Record<string, unknown>).message === 'string') {
+        await this.options.send((error as Record<string, string>).message)
+      }
+    }
   }
 }

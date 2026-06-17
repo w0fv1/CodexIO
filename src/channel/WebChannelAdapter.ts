@@ -1,4 +1,5 @@
-import { EventEmitter } from 'node:events'
+import { Server as HttpServer } from 'node:http'
+import { WebSocket, WebSocketServer } from 'ws'
 import { ChannelAdapter, ChannelStartInput } from './ChannelAdapter.js'
 import { webPageHtml } from './WebPage.js'
 import { Result } from '../Result.js'
@@ -10,56 +11,117 @@ export type WebOutboundMessage = {
 
 export class WebChannelAdapter implements ChannelAdapter {
   readonly type = 'web'
-  private readonly emitter = new EventEmitter()
+  private readonly sockets = new Set<WebSocket>()
+  private readonly server = new WebSocketServer({
+    noServer: true
+  })
   private messages: WebOutboundMessage[] = []
+  private input?: ChannelStartInput
+  private attached?: HttpServer
 
   start(input: ChannelStartInput): void {
+    this.input = input
     input.app.get('/', (_request, response) => {
       response.type('html').send(webPageHtml)
     })
-    input.app.post('/api/web/messages', async (request, response) => {
-      try {
-        if (!request.body || typeof request.body !== 'object') {
-          response.json(Result.fail('inbound text not found'))
+    this.server.on('connection', (socket) => {
+      this.sockets.add(socket)
+      for (const message of this.messages) {
+        socket.send(JSON.stringify({
+          type: 'agent',
+          text: message.text,
+          createdAt: message.createdAt
+        }))
+      }
+      socket.on('message', async (data) => {
+        let body: unknown = data.toString()
+        try {
+          body = JSON.parse(data.toString()) as unknown
+        } catch {
+          body = data.toString()
+        }
+        let text: string | undefined
+        if (typeof body === 'string') {
+          text = body
+        }
+        if (body && typeof body === 'object' && typeof (body as Record<string, unknown>).text === 'string') {
+          text = (body as Record<string, string>).text
+        }
+        if (!text || text.trim().length === 0) {
+          socket.send(JSON.stringify({
+            type: 'error',
+            message: 'text is required'
+          }))
           return
         }
-        const body = request.body as Record<string, unknown>
-        if (typeof body.text !== 'string' || body.text.trim().length === 0) {
-          response.json(Result.fail('inbound text not found'))
-          return
-        }
-        const text = body.text
         const received = await this.receive(text)
         if (received.isFailed) {
-          response.json(received)
+          socket.send(JSON.stringify({
+            type: 'error',
+            message: received.message
+          }))
           return
         }
-        const result = await input.receive({
+        if (!this.input) {
+          socket.send(JSON.stringify({
+            type: 'error',
+            message: 'web channel not started'
+          }))
+          return
+        }
+        const result = await this.input.receive({
           channel: this.type,
           text
         })
         if (result.data?.action === 'clear') {
           this.messages = []
+          for (const target of this.sockets) {
+            if (target.readyState === WebSocket.OPEN) {
+              target.send(JSON.stringify({
+                type: 'clear'
+              }))
+            }
+          }
+          return
         }
-        response.json(result)
+        if (result.isFailed) {
+          socket.send(JSON.stringify({
+            type: 'error',
+            message: result.message
+          }))
+        }
+      })
+      socket.on('close', () => {
+        this.sockets.delete(socket)
+      })
+    })
+  }
+
+  attach(server: HttpServer): void {
+    if (this.attached === server) {
+      return
+    }
+    this.attached = server
+    server.on('upgrade', (request, socket, head) => {
+      try {
+        const url = new URL(request.url ?? '/', 'http://localhost')
+        if (url.pathname !== '/ws') {
+          socket.destroy()
+          return
+        }
+        this.server.handleUpgrade(request, socket, head, (webSocket) => {
+          this.server.emit('connection', webSocket, request)
+        })
       } catch (error) {
-        response.json(Result.fromError(error))
+        socket.destroy(error instanceof Error ? error : undefined)
       }
     })
-    input.app.get('/api/web/events', (request, response) => {
-      response.setHeader('Content-Type', 'text/event-stream')
-      response.setHeader('Cache-Control', 'no-cache')
-      response.setHeader('Connection', 'keep-alive')
-      for (const message of this.messages) {
-        response.write(`data: ${JSON.stringify(message)}\n\n`)
+    server.once('close', () => {
+      for (const socket of this.sockets) {
+        socket.close()
       }
-      const listener = (message: WebOutboundMessage) => {
-        response.write(`data: ${JSON.stringify(message)}\n\n`)
-      }
-      this.emitter.on('message', listener)
-      request.on('close', () => {
-        this.emitter.off('message', listener)
-      })
+      this.sockets.clear()
+      this.server.close()
     })
   }
 
@@ -79,7 +141,15 @@ export class WebChannelAdapter implements ChannelAdapter {
       createdAt: Date.now()
     }
     this.messages.push(message)
-    this.emitter.emit('message', message)
+    for (const socket of this.sockets) {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+          type: 'agent',
+          text: message.text,
+          createdAt: message.createdAt
+        }))
+      }
+    }
     return Result.success(null)
   }
 

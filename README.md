@@ -31,6 +31,8 @@ pnpm start
 默认配置写入 `~/.codexio/config.yaml`，默认启用 `web` 和 `cli` 本地通道。
 `codexio` 和 `codexio serve` 是同一个 host 启动入口，`codexio chat` 只连接已有 host。
 `pnpm bundle` 生成未来 exe 使用的单文件 Node bundle，产物不入库。
+每次启动 codexio 后，Codex 的第一条消息都会创建新 session；同一进程内的后续消息会继续当前 session。`/$ clear` 会开启新对话。
+Codex 子进程的 stdout/stderr 会同步输出到启动 codexio 的终端。
 
 网页输入框支持清空命令，命令不会发送给 Codex：
 
