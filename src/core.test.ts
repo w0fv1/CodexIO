@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -70,15 +69,27 @@ describe('core', () => {
     expect(existsSync(codexHomePath)).toBe(true)
   })
 
-  it('codex agent installs an HTTP-only Codexio skill', async () => {
+  it('codex agent injects codexio runtime instruction', async () => {
+    const requests: Array<{
+      method: string
+      params: unknown
+    }> = []
     const agent = new CodexAgent({
       workspacePath: '.',
-      config: ConfigSchema.parse({}),
+      config: ConfigSchema.parse({
+        server: {
+          messageToken: 'test-token'
+        }
+      }),
       toolBaseUrl: 'http://127.0.0.1:8787',
       send: async () => {},
       appServer: {
         async start(): Promise<void> {},
-        async request(method: string): Promise<unknown> {
+        async request(method: string, params: unknown): Promise<unknown> {
+          requests.push({
+            method,
+            params
+          })
           if (method === 'account/read') {
             return {
               account: {}
@@ -95,10 +106,14 @@ describe('core', () => {
       }
     })
     await agent.start(ConfigSchema.parse({}))
-    const text = await readFile(join(codexHomePath, 'skills', 'codexio', 'SKILL.md'), 'utf8')
-    expect(text).toContain('/api/message')
-    expect(text).not.toContain('send_message({ text })')
-    expect(text).not.toContain('communication tool')
+    const threadStart = requests.find((request) => request.method === 'thread/start')
+    expect(threadStart?.params).toMatchObject({
+      developerInstructions: expect.stringContaining('http://127.0.0.1:8787/api/message')
+    })
+    const developerInstructions = (threadStart?.params as Record<string, unknown>).developerInstructions
+    expect(developerInstructions).toContain('Bearer test-token')
+    expect(developerInstructions).not.toContain('${toolBaseUrl}')
+    expect(developerInstructions).not.toContain('${messageToken}')
   })
 
   it('codex agent steers the active app-server turn', async () => {
@@ -163,6 +178,10 @@ describe('core', () => {
       'turn/interrupt',
       'thread/start'
     ])
+    expect(requests[1].params).toMatchObject({
+      approvalPolicy: 'never',
+      sandbox: 'danger-full-access'
+    })
     expect(requests[3].params).toMatchObject({
       threadId: 'thread-1',
       expectedTurnId: 'turn-1'
@@ -268,6 +287,7 @@ describe('core', () => {
       host: '127.0.0.1',
       port: 7890
     })
+    expect(config.server.messageToken.length).toBeGreaterThan(20)
   })
 
   it('loads feishu channel credentials from config', () => {
@@ -276,12 +296,18 @@ describe('core', () => {
         feishu: {
           enabled: true,
           appId: 'cli_test',
-          appSecret: 'secret_test'
+          appSecret: 'secret_test',
+          chatIds: [
+            'oc_test'
+          ]
         }
       }
     })
     expect(config.channels.feishu?.enabled).toBe(true)
     expect(config.channels.feishu?.appId).toBe('cli_test')
     expect(config.channels.feishu?.appSecret).toBe('secret_test')
+    expect(config.channels.feishu?.chatIds).toEqual([
+      'oc_test'
+    ])
   })
 })

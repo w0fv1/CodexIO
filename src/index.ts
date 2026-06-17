@@ -20,6 +20,9 @@ export type CodexioServer = {
 }
 
 export function createCodexioApp(config: CodexioConfig): CodexioServer {
+  if (config.server.messageToken.trim().length === 0) {
+    throw new Error('server.messageToken is required')
+  }
   const app = express()
   app.use(cors())
   app.use(express.json({
@@ -35,6 +38,11 @@ export function createCodexioApp(config: CodexioConfig): CodexioServer {
 
   app.post('/api/message', async (request, response) => {
     try {
+      const authorization = request.header('authorization')
+      if (authorization !== `Bearer ${config.server.messageToken}`) {
+        response.status(401).json(Result.fail('unauthorized', '401'))
+        return
+      }
       const body = request.body as Record<string, unknown>
       if (typeof body.text !== 'string' || body.text.trim().length === 0) {
         response.json(Result.fail('text is required'))
@@ -191,4 +199,19 @@ async function serve(config?: CodexioConfig): Promise<void> {
     listener.once('listening', resolveListening)
   })
   output.write(`codexio listening on http://${resolvedConfig.server.host}:${resolvedConfig.server.port}\n`)
+  let stopping = false
+  const stop = () => {
+    if (stopping) {
+      return
+    }
+    stopping = true
+    listener.close((error) => {
+      if (error) {
+        errorOutput.write(`${error.message}\n`)
+        process.exitCode = 1
+      }
+    })
+  }
+  process.once('SIGINT', stop)
+  process.once('SIGTERM', stop)
 }

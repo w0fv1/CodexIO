@@ -85,6 +85,9 @@ export const webPageHtml = `<!doctype html>
         messages.innerHTML = ''
         return
       }
+      if (message.type === 'ready') {
+        return
+      }
       if (message.type === 'error') {
         append('agent', message.message)
         return

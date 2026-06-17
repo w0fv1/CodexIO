@@ -1,8 +1,17 @@
+import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { randomBytes } from 'node:crypto'
 import { dirname, join } from 'node:path'
-import { homedir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 import YAML from 'yaml'
 import { z } from 'zod'
+
+let codexioRoot = dirname(fileURLToPath(import.meta.url))
+while (!existsSync(join(codexioRoot, 'package.json')) && dirname(codexioRoot) !== codexioRoot) {
+  codexioRoot = dirname(codexioRoot)
+}
+
+export const defaultConfigPath = join(codexioRoot, '.codexio', 'config.yaml')
 
 const ProxyConfigSchema = z.object({
   enabled: z.boolean().default(false),
@@ -26,7 +35,8 @@ const ChannelConfigSchema = z.object({
 
 const FeishuChannelConfigSchema = ChannelConfigSchema.extend({
   appId: z.string().default(''),
-  appSecret: z.string().default('')
+  appSecret: z.string().default(''),
+  chatIds: z.array(z.string()).default([])
 })
 
 const ChannelsConfigSchema = z.object({
@@ -41,10 +51,12 @@ const WorkspaceConfigSchema = z.object({
 export const ConfigSchema = z.object({
   server: z.object({
     host: z.string().default('127.0.0.1'),
-    port: z.number().int().positive().default(8787)
+    port: z.number().int().positive().default(8787),
+    messageToken: z.string().default('')
   }).default({
     host: '127.0.0.1',
-    port: 8787
+    port: 8787,
+    messageToken: ''
   }),
   proxy: ProxyConfigSchema.default({
     enabled: false,
@@ -68,7 +80,7 @@ export const ConfigSchema = z.object({
 export type CodexioConfig = z.infer<typeof ConfigSchema>
 
 export class ConfigService {
-  constructor(private readonly configPath = join(homedir(), '.codexio', 'config.yaml')) {}
+  constructor(private readonly configPath = defaultConfigPath) {}
 
   get path(): string {
     return this.configPath
@@ -78,7 +90,12 @@ export class ConfigService {
     const text = await readFile(this.configPath, 'utf8')
     const parsed = YAML.parse(text)
     const resolved = this.resolveReferences(this.migrate(parsed))
-    return ConfigSchema.parse(resolved)
+    const config = ConfigSchema.parse(resolved)
+    if (config.server.messageToken.trim().length === 0) {
+      config.server.messageToken = createMessageToken()
+      await this.save(config)
+    }
+    return config
   }
 
   async save(config: CodexioConfig): Promise<void> {
@@ -110,7 +127,8 @@ export class ConfigService {
     return ConfigSchema.parse({
       server: {
         host: '127.0.0.1',
-        port: 8787
+        port: 8787,
+        messageToken: createMessageToken()
       },
       proxy: {
         enabled: true,
@@ -132,7 +150,8 @@ export class ConfigService {
         feishu: {
           enabled: false,
           appId: '',
-          appSecret: ''
+          appSecret: '',
+          chatIds: []
         }
       },
       workspace: {
@@ -220,4 +239,8 @@ export class ConfigService {
     }
     return migrated
   }
+}
+
+function createMessageToken(): string {
+  return randomBytes(32).toString('base64url')
 }

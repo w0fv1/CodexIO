@@ -21,6 +21,9 @@ export class WebChannelAdapter implements ChannelAdapter {
     })
     this.server.on('connection', (socket) => {
       this.sockets.add(socket)
+      socket.send(JSON.stringify({
+        type: 'ready'
+      }))
       const history = input.history()
       setImmediate(() => {
         if (socket.readyState !== WebSocket.OPEN) {
@@ -48,18 +51,10 @@ export class WebChannelAdapter implements ChannelAdapter {
         if (body && typeof body === 'object' && typeof (body as Record<string, unknown>).text === 'string') {
           text = (body as Record<string, string>).text
         }
-        if (!text || text.trim().length === 0) {
+        if (typeof text !== 'string') {
           socket.send(JSON.stringify({
             type: 'error',
             message: 'text is required'
-          }))
-          return
-        }
-        const received = await this.receive(text)
-        if (received.isFailed) {
-          socket.send(JSON.stringify({
-            type: 'error',
-            message: received.message
           }))
           return
         }
@@ -116,13 +111,6 @@ export class WebChannelAdapter implements ChannelAdapter {
     server.once('close', () => {
       void this.stop()
     })
-  }
-
-  async receive(text: string): Promise<Result<null>> {
-    if (text.trim().length === 0) {
-      return Result.fail('text is required')
-    }
-    return Result.success(null)
   }
 
   async send(text: string): Promise<Result<null>> {

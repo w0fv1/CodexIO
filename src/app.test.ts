@@ -5,6 +5,8 @@ import { ConfigSchema } from './ConfigService.js'
 import { createCodexioApp } from './index.js'
 import { webPageHtml } from './channel/WebPage.js'
 
+const testMessageToken = 'test-message-token'
+
 describe('server', () => {
   it('serves a compact Codexio web chat page', () => {
     expect(webPageHtml).toContain('<span>Codexio</span>')
@@ -76,7 +78,8 @@ describe('server', () => {
     const response = await fetch(`${baseUrl}/api/message`, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${testMessageToken}`
       },
       body: JSON.stringify({
         text: 'agent output'
@@ -96,6 +99,27 @@ describe('server', () => {
     await closeTestServer(listener)
   })
 
+  it('rejects unauthenticated agent output', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    const response = await fetch(`${baseUrl}/api/message`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        text: 'agent output'
+      })
+    })
+    const result = await response.json() as {
+      isFailed: boolean
+      message: string
+    }
+    expect(response.status).toBe(401)
+    expect(result.isFailed).toBe(true)
+    expect(result.message).toBe('unauthorized')
+    await closeTestServer(listener)
+  })
+
   it('broadcasts agent output to every web connection', async () => {
     const { baseUrl, listener } = await startTestServer()
     const first = await openWebSocket(baseUrl)
@@ -105,7 +129,8 @@ describe('server', () => {
     const response = await fetch(`${baseUrl}/api/message`, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${testMessageToken}`
       },
       body: JSON.stringify({
         text: 'broadcast output'
@@ -148,13 +173,19 @@ describe('server', () => {
     await new Promise<void>((resolve, reject) => {
       restoredSocket.on('message', (data) => {
         const message = JSON.parse(data.toString()) as Record<string, unknown>
-        restored.push(message)
+        if (message.type !== 'ready') {
+          restored.push(message)
+        }
         if (restored.length === 20) {
           resolve()
         }
       })
       restoredSocket.once('error', reject)
     })
+    await new Promise((resolve) => {
+      setTimeout(resolve, 50)
+    })
+    expect(restored).toHaveLength(20)
     expect(restored[0]).toMatchObject({
       type: 'human',
       text: 'message 3'
@@ -190,6 +221,9 @@ describe('server', () => {
 
   it('starts host before reporting agent startup failure', async () => {
     const config = ConfigSchema.parse({
+      server: {
+        messageToken: testMessageToken
+      },
       agents: {
         codex: {
           enabled: true
@@ -249,6 +283,9 @@ async function startTestServer(): Promise<{
   listener: HttpServer
 }> {
   const config = ConfigSchema.parse({
+    server: {
+      messageToken: testMessageToken
+    },
     agents: {
       codex: {
         enabled: false
@@ -286,7 +323,12 @@ async function openWebSocket(baseUrl: string): Promise<WebSocket> {
   const url = baseUrl.replace('http://', 'ws://').replace('https://', 'wss://')
   const socket = new WebSocket(`${url}/ws`)
   await new Promise<void>((resolve, reject) => {
-    socket.once('open', resolve)
+    socket.on('message', (data) => {
+      const message = JSON.parse(data.toString()) as Record<string, unknown>
+      if (message.type === 'ready') {
+        resolve()
+      }
+    })
     socket.once('error', reject)
   })
   return socket
@@ -295,7 +337,10 @@ async function openWebSocket(baseUrl: string): Promise<WebSocket> {
 function recordWebSocket(socket: WebSocket): Array<Record<string, unknown>> {
   const messages: Array<Record<string, unknown>> = []
   socket.on('message', (data) => {
-    messages.push(JSON.parse(data.toString()) as Record<string, unknown>)
+    const message = JSON.parse(data.toString()) as Record<string, unknown>
+    if (message.type !== 'ready') {
+      messages.push(message)
+    }
   })
   return messages
 }

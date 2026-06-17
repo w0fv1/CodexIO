@@ -6,6 +6,8 @@ import { ChannelAdapter, ChannelMessage, ChannelReceiveResult } from './ChannelA
 import { FeishuChannelAdapter } from './FeishuChannelAdapter.js'
 import { WebChannelAdapter } from './WebChannelAdapter.js'
 
+const messageHistoryLimit = 20
+
 export class AdapterManager {
   private readonly web = new WebChannelAdapter()
   private readonly feishu: FeishuChannelAdapter
@@ -31,7 +33,7 @@ export class AdapterManager {
     for (const adapter of this.adapters.values()) {
       adapter.start({
         app,
-        history: () => this.messages.slice(-20),
+        history: () => [...this.messages],
         receive: async (text) => {
           return this.receive(text)
         }
@@ -52,7 +54,7 @@ export class AdapterManager {
     if (!this.handleReceive) {
       return Result.fail('adapter manager not started')
     }
-    this.messages.push({
+    this.addMessage({
       role: 'human',
       text,
       createdAt: Date.now()
@@ -76,12 +78,17 @@ export class AdapterManager {
       text,
       createdAt: Date.now()
     }
-    this.messages.push(message)
+    this.addMessage(message)
     const failures: string[] = []
     for (const adapter of this.adapters.values()) {
-      const result = await adapter.send(text)
-      if (result.isFailed) {
-        failures.push(result.message)
+      try {
+        const result = await adapter.send(text)
+        if (result.isFailed) {
+          failures.push(`${adapter.type}: ${result.message}`)
+        }
+      } catch (error) {
+        const failed = Result.fromError(error)
+        failures.push(`${adapter.type}: ${failed.message}`)
       }
     }
     if (failures.length === this.adapters.size) {
@@ -90,6 +97,9 @@ export class AdapterManager {
         this.messages.splice(index, 1)
       }
       return Result.fail(failures.join('\n'))
+    }
+    if (failures.length > 0) {
+      process.stderr.write(`adapter send partially failed: ${failures.join('\n')}\n`)
     }
     return Result.success(null)
   }
@@ -110,5 +120,12 @@ export class AdapterManager {
       return Result.fail(failures.join('\n'))
     }
     return Result.success(null)
+  }
+
+  private addMessage(message: ChannelMessage): void {
+    this.messages.push(message)
+    if (this.messages.length > messageHistoryLimit) {
+      this.messages.splice(0, this.messages.length - messageHistoryLimit)
+    }
   }
 }

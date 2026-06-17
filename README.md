@@ -28,11 +28,22 @@ pnpm start -- init
 pnpm start
 ```
 
-默认配置写入 `~/.codexio/config.yaml`，默认启用 `web` 通道，可启用 `feishu` 长连接通道。
+默认配置写入项目内 `.codexio/config.yaml`，默认启用 `web` 通道，可启用 `feishu` 长连接通道。配置里的 `server.messageToken` 是 agent 写入 `/api/message` 的内部 token，空值会在启动或初始化配置时自动生成并写回。
 `codexio` 和 `codexio serve` 是同一个 host 启动入口。
 `pnpm bundle` 生成未来 exe 使用的单文件 Node bundle，产物不入库。
 每次启动 codexio 后，Codex 的第一条消息都会创建新 session；同一进程内的后续消息会继续当前 session。`/$ clear` 会开启新对话。
 Codex 子进程的 stdout/stderr 会同步输出到启动 codexio 的终端。
+内置 agent 默认按完全访问模式运行：Codex 使用 `danger-full-access` 和 `never` approval，Claude 使用 `bypassPermissions`。
+
+Feishu 通道会把 agent 输出发给已知会话。启动后，用户先在飞书里给机器人发一条消息，终端会输出 `feishu chat connected: <chat_id>`，该会话会在当前进程内接收后续广播。需要启动后立即同步到固定飞书会话时，把这个值写入配置：
+
+```yaml
+channels:
+  feishu:
+    enabled: true
+    chatIds:
+      - <chat_id>
+```
 
 Host 会先启动 HTTP 和 channel，再异步启动 agent。Codex 未登录时，登录链接会通过已启动的通道发出；新打开的网页会恢复最近 20 条临时消息。
 
@@ -49,6 +60,11 @@ POST /api/message
 ```
 
 `/api/message` 只用于 agent 把文本交给所有前端通道，不用于外部把文本交给 agent。
+调用时需要带内部 token：
+
+```text
+Authorization: Bearer <server.messageToken>
+```
 
 网页输入框支持清空命令，命令不会发送给 Codex：
 

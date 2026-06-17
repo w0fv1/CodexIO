@@ -25,7 +25,10 @@ export class ClaudeAgent implements Agent {
 
   async start(_config: CodexioConfig): Promise<void> {
     const child = execa(process.execPath, [
-      claudeEntryPath
+      claudeEntryPath,
+      '--dangerously-skip-permissions',
+      '--permission-mode',
+      'bypassPermissions'
     ], {
       cwd: this.options.workspacePath,
       env: createAgentEnv(this.options.config),

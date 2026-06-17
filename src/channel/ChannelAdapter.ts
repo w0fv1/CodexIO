@@ -20,7 +20,6 @@ export type ChannelStartInput = {
 export interface ChannelAdapter {
   type: string
   start(input: ChannelStartInput): void
-  receive(text: string): Promise<Result<null>>
   send(text: string): Promise<Result<null>>
   stop(): Promise<Result<null>>
 }

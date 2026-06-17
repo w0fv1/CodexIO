@@ -1,10 +1,10 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { execa } from 'execa'
 import { CodexioConfig } from '../ConfigService.js'
 import { Agent } from './Agent.js'
-import { codexHomePath, codexioRootPath, createAgentEnv } from './AgentEnvironment.js'
+import { codexioRootPath, createAgentEnv } from './AgentEnvironment.js'
 import { CodexAppServer } from './CodexAppServer.js'
 
 const codexEntryPath = createRequire(import.meta.url).resolve('@openai/codex/bin/codex.js')
@@ -42,12 +42,6 @@ export class CodexAgent implements Agent {
   }
 
   async start(_config: CodexioConfig): Promise<void> {
-    const source = join(codexioRootPath, 'skills', 'codexio', 'SKILL.md')
-    const target = join(codexHomePath, 'skills', 'codexio', 'SKILL.md')
-    await mkdir(join(codexHomePath, 'skills', 'codexio'), {
-      recursive: true
-    })
-    await writeFile(target, await readFile(source, 'utf8'), 'utf8')
     this.appServer = this.options.appServer ?? new CodexAppServer({
       command: process.execPath,
       args: [
@@ -149,13 +143,9 @@ export class CodexAgent implements Agent {
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
       ephemeral: true,
-      developerInstructions: [
-        'You are running inside Codexio.',
-        'An external user is connected through Codexio.',
-        'For meaningful progress, blockers, and completion, send concise updates through Codexio HTTP.',
-        `Use this PowerShell command shape: $body = @{ text = "progress text" } | ConvertTo-Json -Compress; Invoke-RestMethod -Method Post -Uri "${this.options.toolBaseUrl}/api/message" -ContentType "application/json" -Body $body`,
-        'Do not send secrets, tokens, credentials, private keys, or sensitive environment values.'
-      ].join('\n')
+      developerInstructions: (await readFile(join(codexioRootPath, 'instruction.md'), 'utf8'))
+        .replaceAll('${toolBaseUrl}', this.options.toolBaseUrl)
+        .replaceAll('${messageToken}', this.options.config.server.messageToken)
     })
     if (!response || typeof response !== 'object') {
       throw new Error('codex thread response not found')

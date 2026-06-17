@@ -1,6 +1,7 @@
 server:
   host: 127.0.0.1
   port: 8787
+  messageToken: ''
 proxy:
   enabled: true
   host: 127.0.0.1
@@ -10,10 +11,15 @@ agents:
     enabled: true
   claude:
     enabled: false
+  echo:
+    enabled: false
 channels:
   web:
     enabled: true
-  cli:
-    enabled: true
+  feishu:
+    enabled: false
+    appId: ''
+    appSecret: ''
+    chatIds: []
 workspace:
   path: .

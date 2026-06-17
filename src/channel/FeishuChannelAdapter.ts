@@ -6,6 +6,7 @@ export type FeishuChannelConfig = {
   enabled?: boolean
   appId?: string
   appSecret?: string
+  chatIds?: string[]
 }
 
 export class FeishuChannelAdapter implements ChannelAdapter {
@@ -26,6 +27,11 @@ export class FeishuChannelAdapter implements ChannelAdapter {
       appId: this.config.appId,
       appSecret: this.config.appSecret
     })
+    for (const chatId of this.config.chatIds ?? []) {
+      if (chatId.trim().length > 0) {
+        this.chatIds.add(chatId)
+      }
+    }
     this.wsClient = new Lark.WSClient({
       appId: this.config.appId,
       appSecret: this.config.appSecret,
@@ -35,24 +41,22 @@ export class FeishuChannelAdapter implements ChannelAdapter {
       eventDispatcher: new Lark.EventDispatcher({}).register({
         'im.message.receive_v1': async (data) => {
           try {
-            this.chatIds.add(data.message.chat_id)
+            if (!this.chatIds.has(data.message.chat_id)) {
+              this.chatIds.add(data.message.chat_id)
+              process.stdout.write(`feishu chat connected: ${data.message.chat_id}\n`)
+            }
             if (data.message.message_type !== 'text') {
               await this.send('当前只支持文本消息')
               return
             }
             const content = JSON.parse(data.message.content) as Record<string, unknown>
-            if (typeof content.text !== 'string' || content.text.trim().length === 0) {
+            if (typeof content.text !== 'string') {
               await this.send('消息文本为空')
               return
             }
             let text = content.text
             for (const mention of data.message.mentions ?? []) {
               text = text.replaceAll(mention.key, '')
-            }
-            const received = await this.receive(text)
-            if (received.isFailed) {
-              await this.send(received.message)
-              return
             }
             if (!this.input) {
               await this.send('feishu channel not started')
@@ -78,33 +82,41 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     })
   }
 
-  async receive(text: string): Promise<Result<null>> {
-    if (text.trim().length === 0) {
-      return Result.fail('text is required')
-    }
-    return Result.success(null)
-  }
-
   async send(text: string): Promise<Result<null>> {
     if (text.trim().length === 0) {
       return Result.fail('text is required')
     }
-    if (!this.client || this.chatIds.size === 0) {
+    if (!this.client) {
+      return Result.fail('feishu client not ready')
+    }
+    if (this.chatIds.size === 0) {
       return Result.fail('feishu chat not ready')
     }
+    const failures: string[] = []
     for (const chatId of this.chatIds) {
-      await this.client.im.v1.message.create({
-        params: {
-          receive_id_type: 'chat_id'
-        },
-        data: {
-          receive_id: chatId,
-          msg_type: 'text',
-          content: JSON.stringify({
-            text
-          })
-        }
-      })
+      try {
+        await this.client.im.v1.message.create({
+          params: {
+            receive_id_type: 'chat_id'
+          },
+          data: {
+            receive_id: chatId,
+            msg_type: 'text',
+            content: JSON.stringify({
+              text
+            })
+          }
+        })
+      } catch (error) {
+        const failed = Result.fromError(error)
+        failures.push(`${chatId}: ${failed.message}`)
+      }
+    }
+    if (failures.length === this.chatIds.size) {
+      return Result.fail(failures.join('\n'))
+    }
+    if (failures.length > 0) {
+      process.stderr.write(`feishu send partially failed: ${failures.join('\n')}\n`)
     }
     return Result.success(null)
   }
