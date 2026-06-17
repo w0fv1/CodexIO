@@ -254,6 +254,7 @@ describe('core', () => {
     })
     expect(outbound[0]).toContain('https://login.example.test/device')
     expect(outbound[0]).toContain('ABCD-EFGH')
+    expect(outbound[1]).toBe('Codex login completed.')
   })
 
   it('migrates old config to one enabled agent', async () => {

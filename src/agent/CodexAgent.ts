@@ -187,6 +187,9 @@ export class CodexAgent implements Agent {
     process.stdout.write(`${message}\n`)
     await this.options.send(message).catch(() => {})
     await this.appServer.waitForNotification('account/login/completed')
+    const completedMessage = 'Codex login completed.'
+    process.stdout.write(`${completedMessage}\n`)
+    await this.options.send(completedMessage).catch(() => {})
   }
 
   private async handleNotification(method: string, params: unknown): Promise<void> {
