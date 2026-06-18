@@ -1,3 +1,7 @@
+param(
+    [string[]] $Platforms = @("windows-x64-standalone", "windows-x64-pnpm")
+)
+
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
@@ -375,12 +379,23 @@ function Invoke-PnpmSmoke {
 }
 Push-Location $ProjectRoot
 try {
+    $supportedPlatforms = @("windows-x64-standalone", "windows-x64-pnpm")
+    $selectedPlatforms = @($supportedPlatforms | Where-Object { $Platforms -contains $_ })
+    if ($selectedPlatforms.Count -ne $Platforms.Count) {
+        throw "Unsupported platform. Supported platforms: $($supportedPlatforms -join ', ')"
+    }
+    $buildStandalone = $selectedPlatforms -contains "windows-x64-standalone"
+    $buildPnpm = $selectedPlatforms -contains "windows-x64-pnpm"
+
     $script:Version = Read-ProjectVersion
-    $nodeRoot = Resolve-NodeRoot
     $standaloneArchive = Join-Path $ReleaseRoot "$PackageName-$script:Version-windows-x64-standalone.zip"
     $pnpmArchive = Join-Path $ReleaseRoot "$PackageName-$script:Version-windows-x64-pnpm.zip"
     Write-Step "version: $script:Version"
-    Write-Step "Node: $nodeRoot"
+    Write-Step "platforms: $($selectedPlatforms -join ', ')"
+    if ($buildStandalone) {
+        $nodeRoot = Resolve-NodeRoot
+        Write-Step "Node: $nodeRoot"
+    }
 
     Write-Step "clean previous build artifacts"
     if (Test-Path -Path $BuildRoot) {
@@ -404,48 +419,56 @@ try {
     Write-Step "build"
     Invoke-CheckedCommand -FilePath "pnpm" -ArgumentList @("build")
 
-    Write-Step "install production dependencies"
-    Copy-Item -Force (Join-Path $ProjectRoot "package.json") $InstallRoot
-    Copy-Item -Force (Join-Path $ProjectRoot "pnpm-lock.yaml") $InstallRoot
-    Invoke-CheckedCommand -FilePath "pnpm" -ArgumentList @("install", "--prod", "--dir", $InstallRoot, "--config.node-linker=hoisted")
+    if ($buildStandalone) {
+        Write-Step "install production dependencies"
+        Copy-Item -Force (Join-Path $ProjectRoot "package.json") $InstallRoot
+        Copy-Item -Force (Join-Path $ProjectRoot "pnpm-lock.yaml") $InstallRoot
+        Invoke-CheckedCommand -FilePath "pnpm" -ArgumentList @("install", "--prod", "--dir", $InstallRoot, "--config.node-linker=hoisted")
 
-    Write-Step "assemble standalone package"
-    New-StandalonePackage -NodeRoot $nodeRoot
+        Write-Step "assemble standalone package"
+        New-StandalonePackage -NodeRoot $nodeRoot
+    }
 
-    Write-Step "assemble pnpm package"
-    New-PnpmPackage
+    if ($buildPnpm) {
+        Write-Step "assemble pnpm package"
+        New-PnpmPackage
+    }
 
-    Write-Step "compress standalone package"
-    Compress-Package -SourceRoot $StandaloneRoot -ArchivePath $standaloneArchive -Entries @(
-        "codexio/runtime/node/node.exe",
-        "codexio/dist/index.js",
-        "codexio/node_modules/@openai/codex/bin/codex.js",
-        "codexio/node_modules/@openai/codex-win32-x64/package.json",
-        "codexio/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs",
-        "codexio/node_modules/@anthropic-ai/claude-code-win32-x64/package.json",
-        "codexio/.codexio/config.yaml",
-        "codexio/start.cmd",
-        "codexio/VERSION"
-    )
+    if ($buildStandalone) {
+        Write-Step "compress standalone package"
+        Compress-Package -SourceRoot $StandaloneRoot -ArchivePath $standaloneArchive -Entries @(
+            "codexio/runtime/node/node.exe",
+            "codexio/dist/index.js",
+            "codexio/node_modules/@openai/codex/bin/codex.js",
+            "codexio/node_modules/@openai/codex-win32-x64/package.json",
+            "codexio/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs",
+            "codexio/node_modules/@anthropic-ai/claude-code-win32-x64/package.json",
+            "codexio/.codexio/config.yaml",
+            "codexio/start.cmd",
+            "codexio/VERSION"
+        )
 
-    Write-Step "compress pnpm package"
-    Compress-Package -SourceRoot $PnpmRoot -ArchivePath $pnpmArchive -Entries @(
-        "codexio/dist/index.js",
-        "codexio/package.json",
-        "codexio/pnpm-lock.yaml",
-        "codexio/.codexio/config.yaml",
-        "codexio/nodew.cmd",
-        "codexio/nodew.ps1",
-        "codexio/install.cmd",
-        "codexio/start.cmd",
-        "codexio/VERSION"
-    )
+        Write-Step "smoke standalone package"
+        Invoke-StandaloneSmoke -ArchivePath $standaloneArchive
+    }
 
-    Write-Step "smoke standalone package"
-    Invoke-StandaloneSmoke -ArchivePath $standaloneArchive
+    if ($buildPnpm) {
+        Write-Step "compress pnpm package"
+        Compress-Package -SourceRoot $PnpmRoot -ArchivePath $pnpmArchive -Entries @(
+            "codexio/dist/index.js",
+            "codexio/package.json",
+            "codexio/pnpm-lock.yaml",
+            "codexio/.codexio/config.yaml",
+            "codexio/nodew.cmd",
+            "codexio/nodew.ps1",
+            "codexio/install.cmd",
+            "codexio/start.cmd",
+            "codexio/VERSION"
+        )
 
-    Write-Step "smoke pnpm package"
-    Invoke-PnpmSmoke -ArchivePath $pnpmArchive
+        Write-Step "smoke pnpm package"
+        Invoke-PnpmSmoke -ArchivePath $pnpmArchive
+    }
 }
 finally {
     Pop-Location

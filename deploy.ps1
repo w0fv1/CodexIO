@@ -68,8 +68,17 @@ Set-Location -Path $scriptRoot
 $version = Read-ProjectVersion
 Write-Step "version: $version"
 
+$supportedPlatforms = @("windows-x64-standalone", "windows-x64-pnpm")
+$selectedPlatforms = @($supportedPlatforms | Where-Object { $Platforms -contains $_ })
+if ($selectedPlatforms.Count -ne $Platforms.Count) {
+    throw "Unsupported platform. Supported platforms: $($supportedPlatforms -join ', ')"
+}
+Write-Step "platforms: $($selectedPlatforms -join ', ')"
+
 Write-Step "build release packages locally"
-& powershell -ExecutionPolicy Bypass -File (Join-Path $scriptRoot "scripts\build_windows_zip.ps1")
+$buildScript = Join-Path $scriptRoot "scripts\build_windows_zip.ps1"
+$buildArgs = @("-ExecutionPolicy", "Bypass", "-File", $buildScript, "-Platforms") + $selectedPlatforms
+& powershell @buildArgs
 if ($LASTEXITCODE -ne 0) {
     throw "codexio build failed with exit code $LASTEXITCODE"
 }
@@ -89,12 +98,7 @@ $packages = @(
     }
 )
 
-$selectedPackages = @($packages | Where-Object { $Platforms -contains [string]$_.Platform })
-if ($selectedPackages.Count -ne $Platforms.Count) {
-    $supportedPlatforms = ($packages | ForEach-Object { [string]$_.Platform }) -join ", "
-    throw "Unsupported platform. Supported platforms: $supportedPlatforms"
-}
-
+$selectedPackages = @($packages | Where-Object { $selectedPlatforms -contains [string]$_.Platform })
 foreach ($package in $selectedPackages) {
     $zipPath = [string]$package.Path
     $platform = [string]$package.Platform
