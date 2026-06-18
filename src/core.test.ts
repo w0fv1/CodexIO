@@ -436,19 +436,19 @@ describe('core', () => {
   })
 
   it('uses smtp user as email address when sender is only a display name', () => {
-    expect(createEmailSender('codexio-w0fv1', 'codexio-w0fv1@laiqi.club')).toEqual({
-      name: 'codexio-w0fv1',
-      address: 'codexio-w0fv1@laiqi.club'
+    expect(createEmailSender('codexio-agent', 'agent@example.test')).toEqual({
+      name: 'codexio-agent',
+      address: 'agent@example.test'
     })
   })
 
   it('filters incoming email by configured user address', () => {
     expect(isAllowedEmailSender([
-      'WOFBI1@OUTLOOK.COM'
-    ], 'wofbi1@outlook.com')).toBe(true)
+      'USER@EXAMPLE.TEST'
+    ], 'user@example.test')).toBe(true)
     expect(isAllowedEmailSender([
       'other@example.test'
-    ], 'wofbi1@outlook.com')).toBe(false)
+    ], 'user@example.test')).toBe(false)
   })
 
   it('formats feishu message without codexio title and labels user at bottom', () => {
