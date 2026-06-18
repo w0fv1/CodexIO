@@ -10,7 +10,7 @@ import { EchoAgent } from './agent/EchoAgent.js'
 import { createEmailMessagePayload, createEmailSender, isAllowedEmailSender } from './channel/EmailChannelAdapter.js'
 import { createFeishuMessagePayload } from './channel/FeishuChannelAdapter.js'
 import { renderMarkdownHtml } from './channel/Markdown.js'
-import { ConfigSchema, ConfigService, normalizeWorkspacePath } from './ConfigService.js'
+import { ConfigSchema, ConfigService, normalizeWorkspacePath, validateCodexioConfig } from './ConfigService.js'
 import { Result } from './Result.js'
 
 describe('core', () => {
@@ -326,8 +326,54 @@ describe('core', () => {
     expect(config.workspace.path).toContain(join('.codexio', 'workspace'))
   })
 
+  it('creates default workspace when initializing new config', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-'))
+    const path = join(dir, 'config.yaml')
+    const service = new ConfigService(path)
+    const config = await service.init()
+    expect(existsSync(config.workspace.path)).toBe(true)
+  })
+
   it('expands home workspace paths', () => {
     expect(normalizeWorkspacePath('~/Desktop')).toBe(join(homedir(), 'Desktop'))
+  })
+
+  it('validates workspace and enabled channel config before startup', () => {
+    const missingWorkspace = join(tmpdir(), 'codexio-missing-workspace')
+    const config = ConfigSchema.parse({
+      server: {
+        token: 'test-token'
+      },
+      agents: {
+        codex: {
+          enabled: false
+        },
+        echo: {
+          enabled: true
+        }
+      },
+      channels: {
+        feishu: {
+          enabled: true,
+          appId: '',
+          appSecret: '',
+          chatId: ''
+        }
+      },
+      workspace: {
+        path: missingWorkspace
+      }
+    })
+    try {
+      validateCodexioConfig(config)
+      throw new Error('validation should fail')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      expect(message).toContain('workspace.path does not exist')
+      expect(message).toContain('channels.feishu.appId is required')
+      expect(message).toContain('channels.feishu.appSecret is required')
+      expect(message).toContain('channels.feishu.chatId is required')
+    }
   })
 
   it('resolves config references before final schema validation', async () => {
@@ -356,6 +402,13 @@ describe('core', () => {
         process.env.CODEXIO_TEST_TOKEN = previousToken
       }
     }
+  })
+
+  it('creates default config without proxy enabled', () => {
+    const config = new ConfigService().createDefaultConfig('C:\\repo')
+    expect(config.proxy.enabled).toBe(false)
+    expect(config.proxy.host).toBe('127.0.0.1')
+    expect(config.proxy.port).toBe(7890)
   })
 
   it('loads channel credentials from config', () => {

@@ -1,3 +1,4 @@
+import { existsSync, statSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
@@ -224,6 +225,9 @@ export class ConfigService {
       }
     }
     const config = this.createDefaultConfig()
+    await mkdir(config.workspace.path, {
+      recursive: true
+    })
     await this.save(config)
     return config
   }
@@ -236,7 +240,7 @@ export class ConfigService {
         token: createToken()
       },
       proxy: {
-        enabled: true,
+        enabled: false,
         host: '127.0.0.1',
         port: 7890
       },
@@ -441,6 +445,73 @@ export function normalizeWorkspacePath(path: string): string {
     return trimmedPath
   }
   return resolve(codexioRootPath, trimmedPath)
+}
+
+export function validateCodexioConfig(config: CodexioConfig): void {
+  const issues: string[] = []
+  if (config.server.token.trim().length === 0) {
+    issues.push('server.token is required')
+  }
+  const enabledAgents = Object.entries(config.agents).filter(([, agentConfig]) => agentConfig.enabled)
+  if (enabledAgents.length === 0) {
+    issues.push('one agent must be enabled')
+  }
+  if (enabledAgents.length > 1) {
+    issues.push('only one agent can be enabled')
+  }
+  if (!existsSync(config.workspace.path)) {
+    issues.push(`workspace.path does not exist: ${config.workspace.path}`)
+  } else if (!statSync(config.workspace.path).isDirectory()) {
+    issues.push(`workspace.path is not a directory: ${config.workspace.path}`)
+  }
+  const enabledChannels = Object.entries(config.channels).filter(([, channelConfig]) => channelConfig?.enabled)
+  if (enabledChannels.length === 0) {
+    issues.push('one channel must be enabled')
+  }
+  if (config.channels.feishu?.enabled) {
+    if (config.channels.feishu.appId.trim().length === 0) {
+      issues.push('channels.feishu.appId is required')
+    }
+    if (config.channels.feishu.appSecret.trim().length === 0) {
+      issues.push('channels.feishu.appSecret is required')
+    }
+    if (config.channels.feishu.chatId.trim().length === 0) {
+      issues.push('channels.feishu.chatId is required')
+    }
+  }
+  if (config.channels.feishuWebhook?.enabled && config.channels.feishuWebhook.url.trim().length === 0) {
+    issues.push('channels.feishuWebhook.url is required')
+  }
+  if (config.channels.email?.enabled) {
+    const email = config.channels.email
+    if (email.user.trim().length === 0) {
+      issues.push('channels.email.user is required')
+    }
+    if (email.agent.imap.host.trim().length === 0) {
+      issues.push('channels.email.agent.imap.host is required')
+    }
+    if (email.agent.imap.user.trim().length === 0) {
+      issues.push('channels.email.agent.imap.user is required')
+    }
+    if (email.agent.imap.password.trim().length === 0) {
+      issues.push('channels.email.agent.imap.password is required')
+    }
+    if (email.agent.smtp.host.trim().length === 0) {
+      issues.push('channels.email.agent.smtp.host is required')
+    }
+    if (email.agent.smtp.user.trim().length === 0) {
+      issues.push('channels.email.agent.smtp.user is required')
+    }
+    if (email.agent.smtp.password.trim().length === 0) {
+      issues.push('channels.email.agent.smtp.password is required')
+    }
+  }
+  if (issues.length > 0) {
+    throw new Error([
+      'Codexio config invalid:',
+      ...issues.map((issue) => `- ${issue}`)
+    ].join('\n'))
+  }
 }
 
 function createToken(): string {

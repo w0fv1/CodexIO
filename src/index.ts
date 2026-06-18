@@ -9,7 +9,7 @@ import { Command } from 'commander'
 import { z } from 'zod'
 import { ChannelManager } from './channel/ChannelManager.js'
 import { AgentManager } from './agent/AgentManager.js'
-import { CodexioConfig, ConfigService } from './ConfigService.js'
+import { CodexioConfig, ConfigService, validateCodexioConfig } from './ConfigService.js'
 import { Result } from './Result.js'
 import { readCodexioVersion } from './AppMetadata.js'
 
@@ -26,9 +26,7 @@ export type CodexioServer = {
 }
 
 export function createCodexioApp(config: CodexioConfig): CodexioServer {
-  if (config.server.token.trim().length === 0) {
-    throw new Error('server.token is required')
-  }
+  validateCodexioConfig(config)
   const app = express()
   app.use(cors())
   app.use(express.json({
@@ -168,6 +166,7 @@ program
   .action(async () => {
     const service = new ConfigService()
     const config = await service.init(false)
+    validateCodexioConfig(config)
     const toolBaseUrl = `http://${config.server.host}:${config.server.port}`
     const agentManager = new AgentManager(config, toolBaseUrl, {
       send: async (text) => {
