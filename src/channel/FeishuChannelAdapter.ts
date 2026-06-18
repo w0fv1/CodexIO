@@ -138,15 +138,24 @@ export class FeishuChannelAdapter implements ChannelAdapter {
               })
               return
             }
-            const result = await this.input.receive(text)
-            if (result.isFailed) {
+            void this.input.receive(text).then(async (result) => {
+              if (result.isFailed) {
+                await this.send({
+                  role: 'system',
+                  text: result.message,
+                  createdAt: Date.now(),
+                  source: this.type
+                })
+              }
+            }).catch(async (error) => {
+              const result = Result.fromError(error)
               await this.send({
                 role: 'system',
                 text: result.message,
                 createdAt: Date.now(),
                 source: this.type
               })
-            }
+            })
           } catch (error) {
             const result = Result.fromError(error)
             await this.send({
