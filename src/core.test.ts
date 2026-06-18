@@ -115,6 +115,8 @@ describe('core', () => {
     })
     const developerInstructions = (threadStart?.params as Record<string, unknown>).developerInstructions
     expect(developerInstructions).toContain('Bearer test-token')
+    expect(developerInstructions).toContain('[System.Text.Encoding]::UTF8.GetBytes')
+    expect(developerInstructions).toContain('application/json; charset=utf-8')
     expect(developerInstructions).not.toContain('${toolBaseUrl}')
     expect(developerInstructions).not.toContain('${token}')
   })

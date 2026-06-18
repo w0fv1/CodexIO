@@ -1,5 +1,6 @@
 param(
-    [string] $AppDomain = "next.firco.cn"
+    [string] $AppDomain = "next.firco.cn",
+    [string[]] $Platforms = @("windows-x64-standalone", "windows-x64-pnpm")
 )
 
 $ErrorActionPreference = "Stop"
@@ -67,7 +68,7 @@ Set-Location -Path $scriptRoot
 $version = Read-ProjectVersion
 Write-Step "version: $version"
 
-Write-Step "build codexio"
+Write-Step "build release packages locally"
 & powershell -ExecutionPolicy Bypass -File (Join-Path $scriptRoot "scripts\build_windows_zip.ps1")
 if ($LASTEXITCODE -ne 0) {
     throw "codexio build failed with exit code $LASTEXITCODE"
@@ -88,9 +89,16 @@ $packages = @(
     }
 )
 
-foreach ($package in $packages) {
+$selectedPackages = @($packages | Where-Object { $Platforms -contains [string]$_.Platform })
+if ($selectedPackages.Count -ne $Platforms.Count) {
+    $supportedPlatforms = ($packages | ForEach-Object { [string]$_.Platform }) -join ", "
+    throw "Unsupported platform. Supported platforms: $supportedPlatforms"
+}
+
+foreach ($package in $selectedPackages) {
     $zipPath = [string]$package.Path
     $platform = [string]$package.Platform
+    Write-Step "prepare package metadata: $platform"
     if (-not (Test-Path -Path $zipPath)) {
         throw "Release zip not found: $zipPath"
     }
@@ -102,7 +110,7 @@ foreach ($package in $packages) {
     Write-Step "platform: $platform"
     Write-Step "size: $($file.Length) bytes"
     Write-Step "SHA256: $sha256"
-    Write-Step "request upload URL"
+    Write-Step "request upload URL: $platform"
 
     $createBody = @{
         platform = $platform
@@ -117,14 +125,15 @@ foreach ($package in $packages) {
         throw "Nfirco API did not return uploadUrl"
     }
 
-    Write-Step "upload to OSS"
+    Write-Step "upload package to OSS: $platform"
     Invoke-WebRequest -Uri $uploadData.uploadUrl -Method Put -InFile $zipPath -ContentType "application/zip" -UseBasicParsing -TimeoutSec 900 | Out-Null
 
-    Write-Step "complete release"
+    Write-Step "complete release record: $platform"
     $completeBody = @{
         platform = $platform
     }
     Invoke-NfircoApi -Uri $completeUri -Body $completeBody | Out-Null
+    Write-Step "package published: $platform"
 }
 
 Write-Step "release page updated: $baseUrl/manage/nfirco/release"
