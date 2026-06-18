@@ -136,15 +136,6 @@ Set-StrictMode -Version Latest
 `$LocalNode = Join-Path `$RuntimeRoot "node.exe"
 `$NodeVersion = "$NodeRuntimeVersion"
 
-function Resolve-SystemCommand {
-    param([Parameter(Mandatory)] [string] `$Name)
-    `$command = Get-Command `$Name -ErrorAction SilentlyContinue
-    if (`$null -eq `$command) {
-        return `$null
-    }
-    return `$command.Source
-}
-
 function Test-ZipArchive {
     param([Parameter(Mandatory)] [string] `$Path)
     try {
@@ -269,42 +260,22 @@ function Install-LocalNode {
 }
 
 function Resolve-Node {
-    if (Test-Path -LiteralPath `$LocalNode) {
-        Write-Host "[codexio nodew] using bundled Node.js"
-        return `$LocalNode
+    if (-not (Test-Path -LiteralPath `$LocalNode)) {
+        Install-LocalNode
     }
-    `$systemNode = Resolve-SystemCommand -Name "node"
-    if (-not [string]::IsNullOrWhiteSpace(`$systemNode)) {
-        Write-Host "[codexio nodew] using system Node.js"
-        return `$systemNode
-    }
-    Install-LocalNode
-    Write-Host "[codexio nodew] using downloaded Node.js"
+    Write-Host "[codexio nodew] using local Node.js"
     return `$LocalNode
 }
 
 function Resolve-Corepack {
-    if (Test-Path -LiteralPath `$LocalNode) {
-        `$localCorepack = Join-Path `$RuntimeRoot "corepack.cmd"
-        if (Test-Path -LiteralPath `$localCorepack) {
-            Write-Host "[codexio nodew] using bundled Corepack"
-            return `$localCorepack
-        }
+    if (-not (Test-Path -LiteralPath `$LocalNode)) {
+        Install-LocalNode
     }
-    `$systemNode = Resolve-SystemCommand -Name "node"
-    if (-not [string]::IsNullOrWhiteSpace(`$systemNode)) {
-        `$systemCorepack = Join-Path (Split-Path -Parent `$systemNode) "corepack.cmd"
-        if (Test-Path -LiteralPath `$systemCorepack) {
-            Write-Host "[codexio nodew] using system Corepack"
-            return `$systemCorepack
-        }
-    }
-    Install-LocalNode
     `$corepack = Join-Path `$RuntimeRoot "corepack.cmd"
     if (-not (Test-Path -LiteralPath `$corepack)) {
         throw "corepack not found"
     }
-    Write-Host "[codexio nodew] using downloaded Corepack"
+    Write-Host "[codexio nodew] using local Corepack"
     return `$corepack
 }
 

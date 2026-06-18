@@ -22,9 +22,9 @@ describe('update checker', () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       isf: false,
       data: {
-        version: '0.2.3',
+        version: '0.2.4',
         platform: 'windows-x64-pnpm',
-        fileName: 'codexio-0.2.3-windows-x64-pnpm.zip',
+        fileName: 'codexio-0.2.4-windows-x64-pnpm.zip',
         fileSizeBytes: 111580,
         sha256: 'hash',
         managePath: '/manage/nfirco/release'
@@ -40,7 +40,7 @@ describe('update checker', () => {
     }))
 
     expect(fetchMock).toHaveBeenCalledWith(new URL('https://next.firco.cn/api/download/release/codexio/latest?platform=windows-x64-pnpm'))
-    expect(message).toContain('0.2.3')
+    expect(message).toContain('0.2.4')
     expect(message).toContain('https://next.firco.cn/manage/nfirco/release')
     expect(message).not.toContain('fileUrl')
   })
