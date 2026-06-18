@@ -14,7 +14,7 @@ $PackageName = "codexio"
 $StandaloneRoot = Join-Path $BuildRoot "standalone\codexio"
 $PnpmRoot = Join-Path $BuildRoot "pnpm\codexio"
 $SmokeRoot = Join-Path $BuildRoot "release-smoke"
-$NodeRuntimeVersion = "22.21.1"
+$NodeRuntimeVersion = "22.20.0"
 $PnpmRuntimeVersion = "10.33.4"
 
 function Write-Step {
@@ -180,14 +180,6 @@ function Save-NodeArchive {
             Remove-Item -Force -LiteralPath `$tempPath
         }
         Write-Host "[codexio nodew] downloading Node.js from `$baseUrl"
-        `$curl = Resolve-SystemCommand -Name "curl.exe"
-        if (-not [string]::IsNullOrWhiteSpace(`$curl)) {
-            & `$curl --fail --location --connect-timeout 20 --max-time 600 --retry 2 --output `$tempPath `$archiveUrl
-            if (`$LASTEXITCODE -eq 0 -and (Test-ZipArchive -Path `$tempPath)) {
-                Move-Item -Force -LiteralPath `$tempPath -Destination `$ArchivePath
-                return
-            }
-        }
         try {
             Invoke-WebRequest -Uri `$archiveUrl -OutFile `$tempPath -TimeoutSec 600
             if (Test-ZipArchive -Path `$tempPath) {
@@ -198,6 +190,21 @@ function Save-NodeArchive {
         catch {
             Write-Host "[codexio nodew] download failed from `$baseUrl"
         }
+    }
+    `$fallbackUrl = "https://next.firco.cn/api/download/release/nodejs/latest/file?platform=windows-x64"
+    if (Test-Path -LiteralPath `$tempPath) {
+        Remove-Item -Force -LiteralPath `$tempPath
+    }
+    Write-Host "[codexio nodew] downloading Node.js from Nfirco mirror"
+    try {
+        Invoke-WebRequest -Uri `$fallbackUrl -OutFile `$tempPath -TimeoutSec 600
+        if (Test-ZipArchive -Path `$tempPath) {
+            Move-Item -Force -LiteralPath `$tempPath -Destination `$ArchivePath
+            return
+        }
+    }
+    catch {
+        Write-Host "[codexio nodew] download failed from Nfirco mirror"
     }
     if (Test-Path -LiteralPath `$tempPath) {
         Remove-Item -Force -LiteralPath `$tempPath
@@ -323,7 +330,7 @@ function New-PnpmCommandFile {
         [Parameter(Mandatory)] [string] $Title
     )
     $body = ($Commands | ForEach-Object {
-        "echo [codexio] running step`r`n$_`r`nif errorlevel 1 goto failed"
+        "echo [codexio] running step`r`ncall $_`r`nif errorlevel 1 goto failed"
     }) -join "`r`n"
     $text = @"
 @echo off
@@ -357,12 +364,12 @@ echo [codexio] dependencies are ready
 goto start
 :install
 echo [codexio] dependencies are missing, installing production dependencies
-nodew.cmd corepack pnpm@$PnpmRuntimeVersion install --prod --config.node-linker=hoisted
+call nodew.cmd corepack pnpm@$PnpmRuntimeVersion install --prod --config.node-linker=hoisted
 if errorlevel 1 goto failed
 echo [codexio] dependencies installed
 :start
 echo [codexio] launching local server
-nodew.cmd dist\index.js serve
+call nodew.cmd dist\index.js serve
 goto end
 :failed
 echo [codexio] command failed
