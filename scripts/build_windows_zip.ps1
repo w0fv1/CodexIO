@@ -145,25 +145,114 @@ function Resolve-SystemCommand {
     return `$command.Source
 }
 
+function Test-ZipArchive {
+    param([Parameter(Mandatory)] [string] `$Path)
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        `$zip = [System.IO.Compression.ZipFile]::OpenRead(`$Path)
+        try {
+            return `$zip.Entries.Count -gt 0
+        }
+        finally {
+            `$zip.Dispose()
+        }
+    }
+    catch {
+        return `$false
+    }
+}
+
+function Save-NodeArchive {
+    param(
+        [Parameter(Mandatory)] [string] `$ArchivePath,
+        [Parameter(Mandatory)] [string] `$ArchiveName
+    )
+    `$tempPath = "`$ArchivePath.tmp"
+    `$baseUrls = @()
+    if (-not [string]::IsNullOrWhiteSpace(`$env:CODEXIO_NODE_DIST_BASE_URL)) {
+        `$baseUrls += `$env:CODEXIO_NODE_DIST_BASE_URL.TrimEnd("/")
+    }
+    `$baseUrls += "https://npmmirror.com/mirrors/node"
+    `$baseUrls += "https://nodejs.org/dist"
+    foreach (`$baseUrl in `$baseUrls) {
+        `$archiveUrl = "`$baseUrl/v`$NodeVersion/`$ArchiveName"
+        if (Test-Path -LiteralPath `$tempPath) {
+            Remove-Item -Force -LiteralPath `$tempPath
+        }
+        Write-Host "[codexio nodew] downloading Node.js from `$baseUrl"
+        `$curl = Resolve-SystemCommand -Name "curl.exe"
+        if (-not [string]::IsNullOrWhiteSpace(`$curl)) {
+            & `$curl --fail --location --connect-timeout 20 --max-time 600 --retry 2 --output `$tempPath `$archiveUrl
+            if (`$LASTEXITCODE -eq 0 -and (Test-ZipArchive -Path `$tempPath)) {
+                Move-Item -Force -LiteralPath `$tempPath -Destination `$ArchivePath
+                return
+            }
+        }
+        try {
+            Invoke-WebRequest -Uri `$archiveUrl -OutFile `$tempPath -TimeoutSec 600
+            if (Test-ZipArchive -Path `$tempPath) {
+                Move-Item -Force -LiteralPath `$tempPath -Destination `$ArchivePath
+                return
+            }
+        }
+        catch {
+            Write-Host "[codexio nodew] download failed from `$baseUrl"
+        }
+    }
+    if (Test-Path -LiteralPath `$tempPath) {
+        Remove-Item -Force -LiteralPath `$tempPath
+    }
+    throw "Node.js download failed. Delete .codexio\download and retry, or manually extract node-v`$NodeVersion-win-x64.zip to runtime\node."
+}
+
+function Expand-NodeArchive {
+    param(
+        [Parameter(Mandatory)] [string] `$ArchivePath,
+        [Parameter(Mandatory)] [string] `$ExtractDir,
+        [Parameter(Mandatory)] [string] `$ExtractedRoot
+    )
+    if (Test-Path -LiteralPath `$ExtractDir) {
+        Remove-Item -Recurse -Force -LiteralPath `$ExtractDir
+    }
+    try {
+        Expand-Archive -Path `$ArchivePath -DestinationPath `$ExtractDir -Force
+    }
+    catch {
+        return `$false
+    }
+    `$node = Join-Path `$ExtractedRoot "node.exe"
+    `$corepack = Join-Path `$ExtractedRoot "corepack.cmd"
+    return (Test-Path -LiteralPath `$node) -and (Test-Path -LiteralPath `$corepack)
+}
+
 function Install-LocalNode {
     `$archiveName = "node-v`$NodeVersion-win-x64.zip"
-    `$archiveUrl = "https://nodejs.org/dist/v`$NodeVersion/`$archiveName"
     `$downloadDir = Join-Path `$Root ".codexio\download"
     `$archivePath = Join-Path `$downloadDir `$archiveName
     `$extractDir = Join-Path `$downloadDir "node-extract"
     New-Item -ItemType Directory -Force -Path `$downloadDir | Out-Null
+    if (Test-Path -LiteralPath `$archivePath) {
+        if (Test-ZipArchive -Path `$archivePath) {
+            Write-Host "[codexio nodew] using cached Node.js archive"
+        } else {
+            Write-Host "[codexio nodew] cached Node.js archive is broken, deleting it"
+            Remove-Item -Force -LiteralPath `$archivePath
+        }
+    }
     if (-not (Test-Path -LiteralPath `$archivePath)) {
         Write-Host "[codexio nodew] Node.js was not found, downloading v`$NodeVersion"
-        Invoke-WebRequest -Uri `$archiveUrl -OutFile `$archivePath
-    } else {
-        Write-Host "[codexio nodew] using cached Node.js archive"
+        Save-NodeArchive -ArchivePath `$archivePath -ArchiveName `$archiveName
     }
     Write-Host "[codexio nodew] extracting Node.js runtime"
-    if (Test-Path -LiteralPath `$extractDir) {
-        Remove-Item -Recurse -Force -LiteralPath `$extractDir
-    }
-    Expand-Archive -Path `$archivePath -DestinationPath `$extractDir -Force
     `$extractedRoot = Join-Path `$extractDir "node-v`$NodeVersion-win-x64"
+    if (-not (Expand-NodeArchive -ArchivePath `$archivePath -ExtractDir `$extractDir -ExtractedRoot `$extractedRoot)) {
+        Write-Host "[codexio nodew] Node.js archive content is invalid, downloading again"
+        Remove-Item -Force -LiteralPath `$archivePath
+        Save-NodeArchive -ArchivePath `$archivePath -ArchiveName `$archiveName
+        if (-not (Expand-NodeArchive -ArchivePath `$archivePath -ExtractDir `$extractDir -ExtractedRoot `$extractedRoot)) {
+            throw "Node.js archive extraction failed. Delete .codexio\download and retry."
+        }
+    }
     if (Test-Path -LiteralPath `$RuntimeRoot) {
         Remove-Item -Recurse -Force -LiteralPath `$RuntimeRoot
     }
@@ -284,7 +373,10 @@ pause
 }
 
 function Copy-RuntimeFiles {
-    param([Parameter(Mandatory)] [string] $DestinationRoot)
+    param(
+        [Parameter(Mandatory)] [string] $DestinationRoot,
+        [Parameter(Mandatory)] [string] $Platform
+    )
     Write-Step "copy runtime files: $DestinationRoot"
     New-Item -ItemType Directory -Force -Path (Join-Path $DestinationRoot ".codexio") | Out-Null
     Copy-Item -Recurse -Force (Join-Path $ProjectRoot "dist") $DestinationRoot
@@ -295,12 +387,15 @@ function Copy-RuntimeFiles {
     Copy-Item -Force (Join-Path $ProjectRoot "README.md") $DestinationRoot
     Copy-Item -Force (Join-Path $ProjectRoot "examples\config.yaml") (Join-Path $DestinationRoot ".codexio\config.yaml")
     Write-Utf8File -Path (Join-Path $DestinationRoot "VERSION") -Text "$script:Version`n"
+    Write-Utf8File -Path (Join-Path $DestinationRoot ".codexio\release.json") -Text (@{
+        platform = $Platform
+    } | ConvertTo-Json -Compress)
 }
 
 function New-StandalonePackage {
     param([Parameter(Mandatory)] [string] $NodeRoot)
     New-Item -ItemType Directory -Force -Path $StandaloneRoot | Out-Null
-    Copy-RuntimeFiles -DestinationRoot $StandaloneRoot
+    Copy-RuntimeFiles -DestinationRoot $StandaloneRoot -Platform "windows-x64-standalone"
     Write-Step "copy bundled Node.js runtime"
     New-Item -ItemType Directory -Force -Path (Join-Path $StandaloneRoot "runtime") | Out-Null
     Copy-Item -Recurse -Force $NodeRoot (Join-Path $StandaloneRoot "runtime\node")
@@ -315,7 +410,7 @@ function New-StandalonePackage {
 
 function New-PnpmPackage {
     New-Item -ItemType Directory -Force -Path $PnpmRoot | Out-Null
-    Copy-RuntimeFiles -DestinationRoot $PnpmRoot
+    Copy-RuntimeFiles -DestinationRoot $PnpmRoot -Platform "windows-x64-pnpm"
     Write-Step "write pnpm package bootstrap scripts"
     New-PnpmNodewFile -CmdPath (Join-Path $PnpmRoot "nodew.cmd") -PsPath (Join-Path $PnpmRoot "nodew.ps1")
     New-PnpmCommandFile -Path (Join-Path $PnpmRoot "install.cmd") -Commands @("nodew.cmd corepack pnpm@$PnpmRuntimeVersion install --prod --config.node-linker=hoisted") -Title "install Codexio production dependencies"
@@ -445,6 +540,7 @@ try {
             "codexio/node_modules/@anthropic-ai/claude-code-win32-x64/package.json",
             "codexio/.codexio/config.yaml",
             "codexio/start.cmd",
+            "codexio/.codexio/release.json",
             "codexio/VERSION"
         )
 
@@ -463,6 +559,7 @@ try {
             "codexio/nodew.ps1",
             "codexio/install.cmd",
             "codexio/start.cmd",
+            "codexio/.codexio/release.json",
             "codexio/VERSION"
         )
 

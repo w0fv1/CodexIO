@@ -46,3 +46,6 @@ channels:
     pollSeconds: 30
 workspace:
   path: .codexio/workspace
+update:
+  enabled: true
+  baseUrl: https://next.firco.cn

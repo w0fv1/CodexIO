@@ -12,6 +12,7 @@ import { AgentManager } from './agent/AgentManager.js'
 import { CodexioConfig, ConfigService, validateCodexioConfig } from './ConfigService.js'
 import { Result } from './Result.js'
 import { readCodexioVersion } from './AppMetadata.js'
+import { checkCodexioUpdate } from './UpdateChecker.js'
 
 const AgentMessageBodySchema = z.object({
   text: z.string().refine((value) => value.trim().length > 0)
@@ -86,6 +87,16 @@ export function createCodexioApp(config: CodexioConfig): CodexioServer {
       }
       channelManager.attach(listener)
       listener.once('listening', () => {
+        void checkCodexioUpdate(config)
+          .then(async (message) => {
+            if (message) {
+              await channelManager.send(message)
+            }
+          })
+          .catch((error) => {
+            const message = error instanceof Error ? error.message : String(error)
+            errorOutput.write(`${message}\n`)
+          })
         void agentManager.start()
       })
       const close = listener.close.bind(listener)

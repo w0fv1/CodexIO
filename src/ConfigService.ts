@@ -103,6 +103,11 @@ const WorkspaceConfigSchema = z.object({
   path: z.string().min(1)
 })
 
+const UpdateConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  baseUrl: z.string().default('https://next.firco.cn')
+})
+
 type ConfigReferenceObject = {
   [key: string]: ConfigReferenceValue | undefined
 }
@@ -123,6 +128,7 @@ const ConfigDocumentSchema = z.object({
   agents: ConfigReferenceValueSchema.optional(),
   channels: ConfigReferenceValueSchema.optional(),
   workspace: ConfigReferenceValueSchema.optional(),
+  update: ConfigReferenceValueSchema.optional(),
   defaultAgent: ConfigReferenceValueSchema.optional(),
   workspaces: ConfigReferenceValueSchema.optional(),
   routing: ConfigReferenceValueSchema.optional()
@@ -176,6 +182,10 @@ export const ConfigSchema = z.object({
   channels: ChannelsConfigSchema.default({}),
   workspace: WorkspaceConfigSchema.default({
     path: '.'
+  }),
+  update: UpdateConfigSchema.default({
+    enabled: true,
+    baseUrl: 'https://next.firco.cn'
   })
 })
 
@@ -293,6 +303,10 @@ export class ConfigService {
       },
       workspace: {
         path: normalizeWorkspacePath(workspacePath)
+      },
+      update: {
+        enabled: true,
+        baseUrl: 'https://next.firco.cn'
       }
     })
   }

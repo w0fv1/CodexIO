@@ -15,6 +15,27 @@ export function readCodexioVersion(): string {
   return packageJson.version
 }
 
+export type CodexioReleaseMetadata = {
+  platform?: string
+}
+
+export function readCodexioReleaseMetadata(): CodexioReleaseMetadata {
+  const path = join(codexioRootPath, '.codexio', 'release.json')
+  if (!existsSync(path)) {
+    return {}
+  }
+  const text = readFileSync(path, 'utf8')
+  const metadata = JSON.parse(text) as {
+    platform?: unknown
+  }
+  if (typeof metadata.platform !== 'string' || metadata.platform.trim().length === 0) {
+    return {}
+  }
+  return {
+    platform: metadata.platform.trim()
+  }
+}
+
 function findCodexioRoot(): string {
   let root = dirname(fileURLToPath(import.meta.url))
   while (!existsSync(join(root, 'package.json')) && dirname(root) !== root) {

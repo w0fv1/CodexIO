@@ -86,6 +86,8 @@ channels:
 
 Host 会先启动 HTTP 和 channel，再异步启动 agent。Codex 未登录时，登录链接会通过已启动的通道发出；新打开的网页会恢复最近 20 条临时消息。
 
+正式安装包启动时会自动检查 Codexio 最新版本。检查只读取公开版本元数据，不下载文件、不自动安装；发现新版本时，会提示到 `https://next.firco.cn/manage/nfirco/release` 后台发布页面下载。
+
 当前 agent 状态接口：
 
 ```text
