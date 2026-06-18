@@ -46,7 +46,20 @@ function Invoke-NfircoApi {
 
 function Get-ZipSha256 {
     param([Parameter(Mandatory)] [string] $Path)
-    return (Get-FileHash -Path $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    $stream = [System.IO.File]::OpenRead((Resolve-Path -Path $Path).Path)
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hash = $sha256.ComputeHash($stream)
+            return -join ($hash | ForEach-Object { $_.ToString("x2") })
+        }
+        finally {
+            $sha256.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
 }
 
 Set-Location -Path $scriptRoot
