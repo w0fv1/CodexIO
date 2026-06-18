@@ -401,12 +401,12 @@ echo [codexio] dependencies are ready
 goto start
 :install
 echo [codexio] dependencies are missing, installing production dependencies
-call nodew.cmd pnpm install --prod --config.node-linker=hoisted
+call "%~dp0nodew.cmd" pnpm install --prod --config.node-linker=hoisted
 if errorlevel 1 goto failed
 echo [codexio] dependencies installed
 :start
 echo [codexio] launching local server
-call nodew.cmd dist\index.js serve
+call "%~dp0nodew.cmd" dist\index.js serve
 goto end
 :failed
 echo [codexio] command failed
@@ -462,9 +462,9 @@ function New-PnpmPackage {
     Assert-PathExists (Join-Path $PnpmRoot "runtime\pnpm\bin\pnpm.cjs")
     Write-Step "write pnpm package bootstrap scripts"
     New-PnpmNodewFile -CmdPath (Join-Path $PnpmRoot "nodew.cmd") -PsPath (Join-Path $PnpmRoot "nodew.ps1")
-    New-PnpmCommandFile -Path (Join-Path $PnpmRoot "install.cmd") -Commands @("nodew.cmd pnpm install --prod --config.node-linker=hoisted") -Title "install Codexio production dependencies"
+    New-PnpmCommandFile -Path (Join-Path $PnpmRoot "install.cmd") -Commands @('"%~dp0nodew.cmd" pnpm install --prod --config.node-linker=hoisted') -Title "install Codexio production dependencies"
     New-PnpmStartFile -Path (Join-Path $PnpmRoot "start.cmd")
-    New-PnpmCommandFile -Path (Join-Path $PnpmRoot "login.cmd") -Commands @("nodew.cmd dist\index.js login") -Title "start Codex login"
+    New-PnpmCommandFile -Path (Join-Path $PnpmRoot "login.cmd") -Commands @('"%~dp0nodew.cmd" dist\index.js login') -Title "start Codex login"
 }
 
 function Compress-Package {
@@ -510,16 +510,22 @@ function Invoke-PnpmSmoke {
     $root = Join-Path $extractRoot "codexio"
     Assert-PathExists (Join-Path $root "nodew.cmd")
     Assert-PathExists (Join-Path $root "nodew.ps1")
+    $startText = Get-Content -Raw -Path (Join-Path $root "start.cmd")
+    $installText = Get-Content -Raw -Path (Join-Path $root "install.cmd")
+    $loginText = Get-Content -Raw -Path (Join-Path $root "login.cmd")
+    if (-not $startText.Contains('"%~dp0nodew.cmd"') -or -not $installText.Contains('"%~dp0nodew.cmd"') -or -not $loginText.Contains('"%~dp0nodew.cmd"')) {
+        throw "pnpm command files must call nodew.cmd from script directory"
+    }
     Write-Step "check nodew bootstrap"
-    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", "nodew.cmd", "--version") -WorkingDirectory $root
+    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", ".\nodew.cmd", "--version") -WorkingDirectory $root
     Write-Step "install pnpm package dependencies"
-    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", "nodew.cmd", "pnpm", "install", "--prod", "--config.node-linker=hoisted") -WorkingDirectory $root
+    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", ".\nodew.cmd", "pnpm", "install", "--prod", "--config.node-linker=hoisted") -WorkingDirectory $root
     Write-Step "check Codexio CLI version"
-    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", "nodew.cmd", "dist\index.js", "--version") -WorkingDirectory $root
+    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", ".\nodew.cmd", "dist\index.js", "--version") -WorkingDirectory $root
     Write-Step "check Codex CLI version"
-    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", "nodew.cmd", "node_modules\@openai\codex\bin\codex.js", "--version") -WorkingDirectory $root
+    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", ".\nodew.cmd", "node_modules\@openai\codex\bin\codex.js", "--version") -WorkingDirectory $root
     Write-Step "check Claude CLI version"
-    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", "nodew.cmd", "node_modules\@anthropic-ai\claude-code\cli-wrapper.cjs", "--version") -WorkingDirectory $root
+    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", ".\nodew.cmd", "node_modules\@anthropic-ai\claude-code\cli-wrapper.cjs", "--version") -WorkingDirectory $root
 }
 Push-Location $ProjectRoot
 try {
