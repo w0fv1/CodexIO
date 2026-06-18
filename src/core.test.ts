@@ -1,9 +1,9 @@
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { codexHomePath, createAgentEnv } from './agent/AgentEnvironment.js'
+import { codexConfigPath, codexHomePath, createAgentEnv } from './agent/AgentEnvironment.js'
 import { AgentManager } from './agent/AgentManager.js'
 import { CodexAgent } from './agent/CodexAgent.js'
 import { EchoAgent } from './agent/EchoAgent.js'
@@ -63,13 +63,17 @@ describe('core', () => {
     }))
     expect(env.HTTP_PROXY).toBe('http://proxy.local:8080')
     expect(env.HTTPS_PROXY).toBe('http://proxy.local:8080')
-    expect(env.ALL_PROXY).toBe('socks5://proxy.local:8080')
+    expect(env.ALL_PROXY).toBe('http://proxy.local:8080')
     expect(env.NO_PROXY).toContain('127.0.0.1')
     expect(env.NO_PROXY).toContain('localhost')
     expect(env.no_proxy).toBe(env.NO_PROXY)
     expect(env.CODEX_HOME).toContain('.codexio')
     expect(env.CODEX_HOME).toContain('codex')
     expect(existsSync(codexHomePath)).toBe(true)
+    const codexConfig = readFileSync(codexConfigPath, 'utf8')
+    expect(codexConfig).toContain('[shell_environment_policy]')
+    expect(codexConfig).toContain('"HTTPS_PROXY" = "http://proxy.local:8080"')
+    expect(codexConfig).toContain('"NO_PROXY" = "localhost,127.0.0.1,::1"')
   })
 
   it('codex agent injects codexio runtime instruction', async () => {

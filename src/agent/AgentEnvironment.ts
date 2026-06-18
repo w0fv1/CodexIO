@@ -1,9 +1,15 @@
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { delimiter, join, resolve } from 'node:path'
 import { CodexioConfig } from '../ConfigService.js'
 import { codexioRootPath } from '../AppMetadata.js'
 
 export const codexHomePath = join(codexioRootPath, '.codexio', 'codex')
+export const codexConfigPath = join(codexHomePath, 'config.toml')
+
+type ProxyEnv = {
+  httpProxy: string
+  noProxy: string
+}
 
 export function createAgentEnv(config: CodexioConfig): NodeJS.ProcessEnv {
   mkdirSync(codexHomePath, {
@@ -14,22 +20,26 @@ export function createAgentEnv(config: CodexioConfig): NodeJS.ProcessEnv {
   }
   env.CODEX_HOME = codexHomePath
   if (config.proxy.enabled) {
-    const httpProxy = `http://${config.proxy.host}:${config.proxy.port}`
-    const socksProxy = `socks5://${config.proxy.host}:${config.proxy.port}`
-    env.HTTP_PROXY = httpProxy
-    env.http_proxy = httpProxy
-    env.HTTPS_PROXY = httpProxy
-    env.https_proxy = httpProxy
-    env.ALL_PROXY = socksProxy
-    env.all_proxy = socksProxy
-    const noProxy = [
-      'localhost',
-      '127.0.0.1',
-      '::1',
-      config.server.host
-    ].filter((value, index, values) => values.indexOf(value) === index).join(',')
-    env.NO_PROXY = noProxy
-    env.no_proxy = noProxy
+    const proxyEnv = {
+      httpProxy: `http://${config.proxy.host}:${config.proxy.port}`,
+      noProxy: [
+        'localhost',
+        '127.0.0.1',
+        '::1',
+        config.server.host
+      ].filter((value, index, values) => values.indexOf(value) === index).join(',')
+    }
+    env.HTTP_PROXY = proxyEnv.httpProxy
+    env.http_proxy = proxyEnv.httpProxy
+    env.HTTPS_PROXY = proxyEnv.httpProxy
+    env.https_proxy = proxyEnv.httpProxy
+    env.ALL_PROXY = proxyEnv.httpProxy
+    env.all_proxy = proxyEnv.httpProxy
+    env.NO_PROXY = proxyEnv.noProxy
+    env.no_proxy = proxyEnv.noProxy
+    syncCodexConfig(proxyEnv)
+  } else {
+    syncCodexConfig(undefined)
   }
   const binPaths = [
     join(process.cwd(), 'node_modules', '.bin'),
@@ -38,4 +48,25 @@ export function createAgentEnv(config: CodexioConfig): NodeJS.ProcessEnv {
   const pathKey = Object.keys(env).find((key) => key.toLowerCase() === 'path') ?? 'PATH'
   env[pathKey] = `${binPaths.join(delimiter)}${delimiter}${env[pathKey] ?? ''}`
   return env
+}
+
+export function syncCodexConfig(proxyEnv: ProxyEnv | undefined): void {
+  const set = proxyEnv ? {
+    HTTP_PROXY: proxyEnv.httpProxy,
+    http_proxy: proxyEnv.httpProxy,
+    HTTPS_PROXY: proxyEnv.httpProxy,
+    https_proxy: proxyEnv.httpProxy,
+    ALL_PROXY: proxyEnv.httpProxy,
+    all_proxy: proxyEnv.httpProxy,
+    NO_PROXY: proxyEnv.noProxy,
+    no_proxy: proxyEnv.noProxy
+  } : {}
+  const entries = Object.entries(set).map(([key, value]) => `${JSON.stringify(key)} = ${JSON.stringify(value)}`)
+  const text = [
+    '[shell_environment_policy]',
+    'inherit = "all"',
+    `set = { ${entries.join(', ')} }`,
+    ''
+  ].join('\n')
+  writeFileSync(codexConfigPath, text, 'utf8')
 }

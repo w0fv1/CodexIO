@@ -47,6 +47,24 @@ function Resolve-NodeRoot {
     return Split-Path -Parent $nodeCommand.Source
 }
 
+function Resolve-PnpmRoot {
+    if (-not [string]::IsNullOrWhiteSpace($env:PACKAGE_PNPM_ROOT)) {
+        Assert-PathExists $env:PACKAGE_PNPM_ROOT
+        return (Resolve-Path -Path $env:PACKAGE_PNPM_ROOT).Path
+    }
+    $corepackPnpmRoot = Join-Path $env:LOCALAPPDATA "node\corepack\v1\pnpm\$PnpmRuntimeVersion"
+    if (Test-Path -Path (Join-Path $corepackPnpmRoot "bin\pnpm.cjs")) {
+        return (Resolve-Path -Path $corepackPnpmRoot).Path
+    }
+    $pnpmCommand = Get-Command pnpm -ErrorAction Stop
+    $pnpmPath = (Resolve-Path -Path $pnpmCommand.Source).Path
+    $pnpmRoot = Split-Path -Parent $pnpmPath
+    if (Test-Path -Path (Join-Path $pnpmRoot "package.json")) {
+        return $pnpmRoot
+    }
+    throw "pnpm runtime $PnpmRuntimeVersion not found. Run corepack pnpm@$PnpmRuntimeVersion --version first or set PACKAGE_PNPM_ROOT."
+}
+
 function Write-Utf8File {
     param(
         [Parameter(Mandatory)] [string] $Path,
@@ -134,6 +152,8 @@ Set-StrictMode -Version Latest
 `$Root = Split-Path -Parent `$MyInvocation.MyCommand.Path
 `$RuntimeRoot = Join-Path `$Root "runtime\node"
 `$LocalNode = Join-Path `$RuntimeRoot "node.exe"
+`$PnpmRoot = Join-Path `$Root "runtime\pnpm"
+`$LocalPnpm = Join-Path `$PnpmRoot "bin\pnpm.cjs"
 `$NodeVersion = "$NodeRuntimeVersion"
 
 function Test-ZipArchive {
@@ -259,10 +279,35 @@ function Install-LocalNode {
     Write-Host "[codexio nodew] Node.js installed locally"
 }
 
+function Use-LocalNodeEnvironment {
+    `$localPath = [System.IO.Path]::GetFullPath(`$RuntimeRoot)
+    `$pathItems = @(`$localPath)
+    if (-not [string]::IsNullOrWhiteSpace(`$env:Path)) {
+        foreach (`$pathItem in `$env:Path.Split([System.IO.Path]::PathSeparator)) {
+            if ([string]::IsNullOrWhiteSpace(`$pathItem)) {
+                continue
+            }
+            `$normalizedPathItem = `$pathItem.Trim('"')
+            try {
+                if ([System.IO.Path]::GetFullPath(`$normalizedPathItem) -eq `$localPath) {
+                    continue
+                }
+            }
+            catch {}
+            `$pathItems += `$pathItem
+        }
+    }
+    `$env:Path = (`$pathItems | Select-Object -Unique) -join [System.IO.Path]::PathSeparator
+    Remove-Item -LiteralPath "Env:\NODE_OPTIONS" -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "Env:\NODE_PATH" -ErrorAction SilentlyContinue
+    `$env:COREPACK_ENABLE_DOWNLOAD_PROMPT = "0"
+}
+
 function Resolve-Node {
     if (-not (Test-Path -LiteralPath `$LocalNode)) {
         Install-LocalNode
     }
+    Use-LocalNodeEnvironment
     Write-Host "[codexio nodew] using local Node.js"
     return `$LocalNode
 }
@@ -271,6 +316,7 @@ function Resolve-Corepack {
     if (-not (Test-Path -LiteralPath `$LocalNode)) {
         Install-LocalNode
     }
+    Use-LocalNodeEnvironment
     `$corepack = Join-Path `$RuntimeRoot "corepack.cmd"
     if (-not (Test-Path -LiteralPath `$corepack)) {
         throw "corepack not found"
@@ -279,10 +325,30 @@ function Resolve-Corepack {
     return `$corepack
 }
 
+function Resolve-Pnpm {
+    if (-not (Test-Path -LiteralPath `$LocalNode)) {
+        Install-LocalNode
+    }
+    Use-LocalNodeEnvironment
+    if (-not (Test-Path -LiteralPath `$LocalPnpm)) {
+        throw "bundled pnpm not found"
+    }
+    Write-Host "[codexio nodew] using bundled pnpm"
+    return `$LocalPnpm
+}
+
 if (`$args.Count -gt 0 -and `$args[0] -eq "corepack") {
     Write-Host "[codexio nodew] launching Corepack"
     `$command = Resolve-Corepack
     & `$command @(`$args | Select-Object -Skip 1)
+    exit `$LASTEXITCODE
+}
+
+if (`$args.Count -gt 0 -and `$args[0] -eq "pnpm") {
+    Write-Host "[codexio nodew] launching pnpm"
+    `$pnpm = Resolve-Pnpm
+    `$node = Resolve-Node
+    & `$node `$pnpm @(`$args | Select-Object -Skip 1)
     exit `$LASTEXITCODE
 }
 
@@ -335,7 +401,7 @@ echo [codexio] dependencies are ready
 goto start
 :install
 echo [codexio] dependencies are missing, installing production dependencies
-call nodew.cmd corepack pnpm@$PnpmRuntimeVersion install --prod --config.node-linker=hoisted
+call nodew.cmd pnpm install --prod --config.node-linker=hoisted
 if errorlevel 1 goto failed
 echo [codexio] dependencies installed
 :start
@@ -387,11 +453,16 @@ function New-StandalonePackage {
 }
 
 function New-PnpmPackage {
+    param([Parameter(Mandatory)] [string] $PnpmRuntimeRoot)
     New-Item -ItemType Directory -Force -Path $PnpmRoot | Out-Null
     Copy-RuntimeFiles -DestinationRoot $PnpmRoot -Platform "windows-x64-pnpm"
+    Write-Step "copy bundled pnpm runtime"
+    New-Item -ItemType Directory -Force -Path (Join-Path $PnpmRoot "runtime") | Out-Null
+    Copy-Item -Recurse -Force $PnpmRuntimeRoot (Join-Path $PnpmRoot "runtime\pnpm")
+    Assert-PathExists (Join-Path $PnpmRoot "runtime\pnpm\bin\pnpm.cjs")
     Write-Step "write pnpm package bootstrap scripts"
     New-PnpmNodewFile -CmdPath (Join-Path $PnpmRoot "nodew.cmd") -PsPath (Join-Path $PnpmRoot "nodew.ps1")
-    New-PnpmCommandFile -Path (Join-Path $PnpmRoot "install.cmd") -Commands @("nodew.cmd corepack pnpm@$PnpmRuntimeVersion install --prod --config.node-linker=hoisted") -Title "install Codexio production dependencies"
+    New-PnpmCommandFile -Path (Join-Path $PnpmRoot "install.cmd") -Commands @("nodew.cmd pnpm install --prod --config.node-linker=hoisted") -Title "install Codexio production dependencies"
     New-PnpmStartFile -Path (Join-Path $PnpmRoot "start.cmd")
     New-PnpmCommandFile -Path (Join-Path $PnpmRoot "login.cmd") -Commands @("nodew.cmd dist\index.js login") -Title "start Codex login"
 }
@@ -442,7 +513,7 @@ function Invoke-PnpmSmoke {
     Write-Step "check nodew bootstrap"
     Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", "nodew.cmd", "--version") -WorkingDirectory $root
     Write-Step "install pnpm package dependencies"
-    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", "nodew.cmd", "corepack", "pnpm@$PnpmRuntimeVersion", "install", "--prod", "--config.node-linker=hoisted") -WorkingDirectory $root
+    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", "nodew.cmd", "pnpm", "install", "--prod", "--config.node-linker=hoisted") -WorkingDirectory $root
     Write-Step "check Codexio CLI version"
     Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", "nodew.cmd", "dist\index.js", "--version") -WorkingDirectory $root
     Write-Step "check Codex CLI version"
@@ -468,6 +539,10 @@ try {
     if ($buildStandalone) {
         $nodeRoot = Resolve-NodeRoot
         Write-Step "Node: $nodeRoot"
+    }
+    if ($buildPnpm) {
+        $pnpmRuntimeRoot = Resolve-PnpmRoot
+        Write-Step "pnpm runtime: $pnpmRuntimeRoot"
     }
 
     Write-Step "clean previous build artifacts"
@@ -504,7 +579,7 @@ try {
 
     if ($buildPnpm) {
         Write-Step "assemble pnpm package"
-        New-PnpmPackage
+        New-PnpmPackage -PnpmRuntimeRoot $pnpmRuntimeRoot
     }
 
     if ($buildStandalone) {
@@ -535,6 +610,7 @@ try {
             "codexio/.codexio/config.yaml",
             "codexio/nodew.cmd",
             "codexio/nodew.ps1",
+            "codexio/runtime/pnpm/bin/pnpm.cjs",
             "codexio/install.cmd",
             "codexio/start.cmd",
             "codexio/.codexio/release.json",
