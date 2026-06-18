@@ -456,7 +456,8 @@ describe('core', () => {
           enabled: true,
           appId: 'cli_test',
           appSecret: 'secret_test',
-          chatId: 'oc_test'
+          chatId: 'oc_test',
+          ws: 'wss://next.firco.cn/ws/proxy/test'
         },
         feishuWebhook: {
           enabled: true,
@@ -490,10 +491,16 @@ describe('core', () => {
     expect(config.channels.feishu?.appId).toBe('cli_test')
     expect(config.channels.feishu?.appSecret).toBe('secret_test')
     expect(config.channels.feishu?.chatId).toBe('oc_test')
+    expect(config.channels.feishu?.ws).toBe('wss://next.firco.cn/ws/proxy/test')
     expect(config.channels.feishuWebhook?.url).toBe('https://open.feishu.cn/webhook/test')
     expect(config.channels.email?.user).toBe('target@example.test')
     expect(config.channels.email?.agent.imap.host).toBe('imap.example.test')
     expect(config.channels.email?.agent.smtp.host).toBe('smtp.example.test')
+  })
+
+  it('uses empty feishu ws by default', () => {
+    const config = new ConfigService().createDefaultConfig('C:\\repo')
+    expect(config.channels.feishu?.ws).toBe('')
   })
 
   it('migrates legacy email config to user and agent mailbox', async () => {

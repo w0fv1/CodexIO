@@ -32,7 +32,8 @@ const ChannelConfigSchema = z.object({
 const FeishuChannelConfigSchema = ChannelConfigSchema.extend({
   appId: z.string().default(''),
   appSecret: z.string().default(''),
-  chatId: z.string().default('')
+  chatId: z.string().default(''),
+  ws: z.string().default('')
 })
 
 const FeishuWebhookChannelConfigSchema = ChannelConfigSchema.extend({
@@ -270,7 +271,8 @@ export class ConfigService {
           enabled: false,
           appId: '',
           appSecret: '',
-          chatId: ''
+          chatId: '',
+          ws: ''
         },
         feishuWebhook: {
           enabled: false,

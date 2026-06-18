@@ -17,6 +17,7 @@ export type FeishuChannelConfig = {
   appId?: string
   appSecret?: string
   chatId?: string
+  ws?: string
 }
 
 export function createFeishuMessagePayload(message: ChannelMessage): FeishuMessagePayload {
@@ -74,6 +75,25 @@ export class FeishuChannelAdapter implements ChannelAdapter {
       appSecret: this.config.appSecret,
       loggerLevel: Lark.LoggerLevel.warn
     })
+    const ws = this.config.ws?.trim()
+    if (ws && ws.length > 0) {
+      const wsClient = this.wsClient as unknown as {
+        pullConnectConfig: () => Promise<{ ok: boolean }>
+        wsConfig: {
+          updateWs: (config: { connectUrl: string }) => void
+        }
+      }
+      const pullConnectConfig = wsClient.pullConnectConfig.bind(wsClient)
+      wsClient.pullConnectConfig = async () => {
+        const result = await pullConnectConfig()
+        if (result.ok) {
+          wsClient.wsConfig.updateWs({
+            connectUrl: ws
+          })
+        }
+        return result
+      }
+    }
     void this.wsClient.start({
       eventDispatcher: new Lark.EventDispatcher({}).register({
         'im.message.receive_v1': async (data) => {
