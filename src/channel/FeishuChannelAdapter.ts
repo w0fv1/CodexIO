@@ -7,11 +7,47 @@ const FeishuTextContentSchema = z.object({
   text: z.string()
 })
 
+type FeishuMessagePayload = {
+  msgType: string
+  content: string
+}
+
 export type FeishuChannelConfig = {
   enabled?: boolean
   appId?: string
   appSecret?: string
-  chatIds?: string[]
+  chatId?: string
+}
+
+export function createFeishuMessagePayload(message: ChannelMessage): FeishuMessagePayload {
+  let text = message.text
+  if (message.role === 'system' && message.text === 'clear') {
+    text = '已开始新对话'
+  }
+  const content: Array<Array<Record<string, string>>> = [
+    [
+      {
+        tag: 'md',
+        text
+      }
+    ]
+  ]
+  if (message.role === 'user') {
+    content.push([
+      {
+        tag: 'text',
+        text: 'User'
+      }
+    ])
+  }
+  return {
+    msgType: 'post',
+    content: JSON.stringify({
+      zh_cn: {
+        content
+      }
+    })
+  }
 }
 
 export class FeishuChannelAdapter implements ChannelAdapter {
@@ -19,7 +55,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   private input?: ChannelStartInput
   private client?: Lark.Client
   private wsClient?: Lark.WSClient
-  private readonly chatIds = new Set<string>()
+  private chatId = ''
 
   constructor(private readonly config?: FeishuChannelConfig) {}
 
@@ -32,11 +68,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
       appId: this.config.appId,
       appSecret: this.config.appSecret
     })
-    for (const chatId of this.config.chatIds ?? []) {
-      if (chatId.trim().length > 0) {
-        this.chatIds.add(chatId)
-      }
-    }
+    this.chatId = this.config.chatId?.trim() ?? ''
     this.wsClient = new Lark.WSClient({
       appId: this.config.appId,
       appSecret: this.config.appSecret,
@@ -46,9 +78,13 @@ export class FeishuChannelAdapter implements ChannelAdapter {
       eventDispatcher: new Lark.EventDispatcher({}).register({
         'im.message.receive_v1': async (data) => {
           try {
-            if (!this.chatIds.has(data.message.chat_id)) {
-              this.chatIds.add(data.message.chat_id)
+            if (this.chatId.length === 0) {
+              this.chatId = data.message.chat_id
               process.stdout.write(`feishu chat connected: ${data.message.chat_id}\n`)
+            }
+            if (data.message.chat_id !== this.chatId) {
+              process.stdout.write(`feishu chat ignored: ${data.message.chat_id}\n`)
+              return
             }
             if (data.message.message_type !== 'text') {
               await this.send({
@@ -109,7 +145,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   }
 
   async send(message: ChannelMessage): Promise<Result<null>> {
-    if (message.role === 'human' && message.source === this.type) {
+    if (message.role === 'user' && message.source === this.type) {
       return Result.success(null)
     }
     if (message.text.trim().length === 0) {
@@ -118,56 +154,23 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     if (!this.client) {
       return Result.fail('feishu client not ready')
     }
-    if (this.chatIds.size === 0) {
+    if (this.chatId.length === 0) {
       return Result.fail('feishu chat not ready')
     }
-    const failures: string[] = []
-    for (const chatId of this.chatIds) {
-      try {
-        let text = message.text
-        if (message.role === 'system' && message.text === 'clear') {
-          text = '已开始新对话'
+    try {
+      const payload = createFeishuMessagePayload(message)
+      await this.client.im.v1.message.create({
+        params: {
+          receive_id_type: 'chat_id'
+        },
+        data: {
+          receive_id: this.chatId,
+          msg_type: payload.msgType,
+          content: payload.content
         }
-        let msgType = 'post'
-        let content = JSON.stringify({
-          zh_cn: {
-            title: 'Codexio',
-            content: [
-              [
-                {
-                  tag: 'md',
-                  text
-                }
-              ]
-            ]
-          }
-        })
-        if (message.role === 'human') {
-          msgType = 'text'
-          content = JSON.stringify({
-            text
-          })
-        }
-        await this.client.im.v1.message.create({
-          params: {
-            receive_id_type: 'chat_id'
-          },
-          data: {
-            receive_id: chatId,
-            msg_type: msgType,
-            content
-          }
-        })
-      } catch (error) {
-        const failed = Result.fromError(error)
-        failures.push(`${chatId}: ${failed.message}`)
-      }
-    }
-    if (failures.length === this.chatIds.size) {
-      return Result.fail(failures.join('\n'))
-    }
-    if (failures.length > 0) {
-      process.stderr.write(`feishu send partially failed: ${failures.join('\n')}\n`)
+      })
+    } catch (error) {
+      return Result.fromError(error)
     }
     return Result.success(null)
   }

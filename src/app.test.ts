@@ -5,7 +5,7 @@ import { ConfigSchema } from './ConfigService.js'
 import { createCodexioApp } from './index.js'
 import { webPageHtml } from './channel/WebPage.js'
 
-const testMessageToken = 'test-message-token'
+const testToken = 'test-message-token'
 
 describe('server', () => {
   it('serves a compact Codexio web chat page', () => {
@@ -25,7 +25,7 @@ describe('server', () => {
     }))
     await waitForWebSocketMessages(messages, 2)
     expect(messages[0]).toMatchObject({
-      type: 'human',
+      type: 'user',
       text: 'hello'
     })
     expect(messages[1]).toMatchObject({
@@ -82,7 +82,7 @@ describe('server', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${testMessageToken}`
+        Authorization: `Bearer ${testToken}`
       },
       body: JSON.stringify({
         text: 'agent output'
@@ -109,7 +109,7 @@ describe('server', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${testMessageToken}`
+        Authorization: `Bearer ${testToken}`
       },
       body: JSON.stringify({
         text: '**done**\n\n<script>alert(1)</script>'
@@ -161,7 +161,7 @@ describe('server', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${testMessageToken}`
+        Authorization: `Bearer ${testToken}`
       },
       body: JSON.stringify({
         text: 'broadcast output'
@@ -188,7 +188,7 @@ describe('server', () => {
     await closeTestServer(listener)
   })
 
-  it('broadcasts human input to every web connection', async () => {
+  it('broadcasts user input to every web connection', async () => {
     const { baseUrl, listener } = await startTestServer()
     const first = await openWebSocket(baseUrl)
     const second = await openWebSocket(baseUrl)
@@ -200,11 +200,11 @@ describe('server', () => {
     await waitForWebSocketMessages(firstMessages, 2)
     await waitForWebSocketMessages(secondMessages, 2)
     expect(firstMessages[0]).toMatchObject({
-      type: 'human',
+      type: 'user',
       text: 'shared input'
     })
     expect(secondMessages[0]).toMatchObject({
-      type: 'human',
+      type: 'user',
       text: 'shared input'
     })
     expect(firstMessages[1]).toMatchObject({
@@ -250,7 +250,7 @@ describe('server', () => {
     })
     expect(restored).toHaveLength(20)
     expect(restored[0]).toMatchObject({
-      type: 'human',
+      type: 'user',
       text: 'message 3'
     })
     expect(restored[1]).toMatchObject({
@@ -285,7 +285,7 @@ describe('server', () => {
   it('starts host before reporting agent startup failure', async () => {
     const config = ConfigSchema.parse({
       server: {
-        messageToken: testMessageToken
+        token: testToken
       },
       agents: {
         codex: {
@@ -347,7 +347,7 @@ async function startTestServer(): Promise<{
 }> {
   const config = ConfigSchema.parse({
     server: {
-      messageToken: testMessageToken
+      token: testToken
     },
     agents: {
       codex: {

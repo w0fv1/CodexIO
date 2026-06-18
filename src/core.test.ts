@@ -1,14 +1,16 @@
 import { existsSync } from 'node:fs'
 import { mkdtemp, writeFile } from 'node:fs/promises'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 import { describe, expect, it, vi } from 'vitest'
 import { codexHomePath, createAgentEnv } from './agent/AgentEnvironment.js'
 import { AgentManager } from './agent/AgentManager.js'
 import { CodexAgent } from './agent/CodexAgent.js'
 import { EchoAgent } from './agent/EchoAgent.js'
+import { createEmailMessagePayload, createEmailSender, isAllowedEmailSender } from './channel/EmailChannelAdapter.js'
+import { createFeishuMessagePayload } from './channel/FeishuChannelAdapter.js'
 import { renderMarkdownHtml } from './channel/Markdown.js'
-import { ConfigSchema, ConfigService } from './ConfigService.js'
+import { ConfigSchema, ConfigService, normalizeWorkspacePath } from './ConfigService.js'
 import { Result } from './Result.js'
 
 describe('core', () => {
@@ -79,7 +81,7 @@ describe('core', () => {
       workspacePath: '.',
       config: ConfigSchema.parse({
         server: {
-          messageToken: 'test-token'
+          token: 'test-token'
         }
       }),
       toolBaseUrl: 'http://127.0.0.1:8787',
@@ -114,7 +116,7 @@ describe('core', () => {
     const developerInstructions = (threadStart?.params as Record<string, unknown>).developerInstructions
     expect(developerInstructions).toContain('Bearer test-token')
     expect(developerInstructions).not.toContain('${toolBaseUrl}')
-    expect(developerInstructions).not.toContain('${messageToken}')
+    expect(developerInstructions).not.toContain('${token}')
   })
 
   it('codex agent steers the active app-server turn', async () => {
@@ -289,7 +291,6 @@ describe('core', () => {
       host: '127.0.0.1',
       port: 7890
     })
-    expect(config.server.messageToken.length).toBeGreaterThan(20)
   })
 
   it('migrates old config selected workspace through typed legacy shape', async () => {
@@ -320,6 +321,15 @@ describe('core', () => {
     })
   })
 
+  it('defaults workspace to codexio local workspace directory', () => {
+    const config = new ConfigService().createDefaultConfig()
+    expect(config.workspace.path).toContain(join('.codexio', 'workspace'))
+  })
+
+  it('expands home workspace paths', () => {
+    expect(normalizeWorkspacePath('~/Desktop')).toBe(join(homedir(), 'Desktop'))
+  })
+
   it('resolves config references before final schema validation', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'codexio-'))
     const path = join(dir, 'config.yaml')
@@ -327,7 +337,7 @@ describe('core', () => {
     process.env.CODEXIO_TEST_TOKEN = 'env-token'
     await writeFile(path, [
       'server:',
-      '  messageToken: ${CODEXIO_TEST_TOKEN}',
+      '  token: ${CODEXIO_TEST_TOKEN}',
       'proxy:',
       '  enabled: true',
       '  host: proxy.local',
@@ -337,8 +347,8 @@ describe('core', () => {
     ].join('\n'), 'utf8')
     try {
       const config = await new ConfigService(path).load()
-      expect(config.server.messageToken).toBe('env-token')
-      expect(config.workspace.path).toBe('proxy.local')
+      expect(config.server.token).toBe('env-token')
+      expect(config.workspace.path).toBe(normalizeWorkspacePath('proxy.local'))
     } finally {
       if (previousToken === undefined) {
         delete process.env.CODEXIO_TEST_TOKEN
@@ -348,25 +358,159 @@ describe('core', () => {
     }
   })
 
-  it('loads feishu channel credentials from config', () => {
+  it('loads channel credentials from config', () => {
     const config = ConfigSchema.parse({
       channels: {
         feishu: {
           enabled: true,
           appId: 'cli_test',
           appSecret: 'secret_test',
-          chatIds: [
-            'oc_test'
-          ]
+          chatId: 'oc_test'
+        },
+        feishuWebhook: {
+          enabled: true,
+          url: 'https://open.feishu.cn/webhook/test'
+        },
+        email: {
+          enabled: true,
+          user: 'target@example.test',
+          agent: {
+            imap: {
+              host: 'imap.example.test',
+              port: 993,
+              secure: true,
+              user: 'agent@example.test',
+              password: 'imap-password',
+              mailbox: 'INBOX'
+            },
+            smtp: {
+              host: 'smtp.example.test',
+              port: 465,
+              secure: true,
+              user: 'agent@example.test',
+              password: 'smtp-password',
+              from: 'agent@example.test'
+            }
+          }
         }
       }
     })
     expect(config.channels.feishu?.enabled).toBe(true)
     expect(config.channels.feishu?.appId).toBe('cli_test')
     expect(config.channels.feishu?.appSecret).toBe('secret_test')
-    expect(config.channels.feishu?.chatIds).toEqual([
-      'oc_test'
+    expect(config.channels.feishu?.chatId).toBe('oc_test')
+    expect(config.channels.feishuWebhook?.url).toBe('https://open.feishu.cn/webhook/test')
+    expect(config.channels.email?.user).toBe('target@example.test')
+    expect(config.channels.email?.agent.imap.host).toBe('imap.example.test')
+    expect(config.channels.email?.agent.smtp.host).toBe('smtp.example.test')
+  })
+
+  it('migrates legacy email config to user and agent mailbox', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-'))
+    const path = join(dir, 'config.yaml')
+    await writeFile(path, [
+      'channels:',
+      '  email:',
+      '    enabled: true',
+      '    imap:',
+      '      host: imap.example.test',
+      '      port: 993',
+      '      secure: true',
+      '      user: agent@example.test',
+      '      password: imap-password',
+      '      mailbox: INBOX',
+      '    smtp:',
+      '      host: smtp.example.test',
+      '      port: 465',
+      '      secure: true',
+      '      user: agent@example.test',
+      '      password: smtp-password',
+      '      from: agent@example.test',
+      '    to:',
+      '      - target@example.test'
+    ].join('\n'), 'utf8')
+    const config = await new ConfigService(path).load()
+    expect(config.channels.email?.user).toBe('target@example.test')
+    expect(config.channels.email?.agent.imap.user).toBe('agent@example.test')
+    expect(config.channels.email?.agent.smtp.user).toBe('agent@example.test')
+  })
+
+  it('uses smtp user as email address when sender is only a display name', () => {
+    expect(createEmailSender('codexio-w0fv1', 'codexio-w0fv1@laiqi.club')).toEqual({
+      name: 'codexio-w0fv1',
+      address: 'codexio-w0fv1@laiqi.club'
+    })
+  })
+
+  it('filters incoming email by configured user address', () => {
+    expect(isAllowedEmailSender([
+      'WOFBI1@OUTLOOK.COM'
+    ], 'wofbi1@outlook.com')).toBe(true)
+    expect(isAllowedEmailSender([
+      'other@example.test'
+    ], 'wofbi1@outlook.com')).toBe(false)
+  })
+
+  it('formats feishu message without codexio title and labels user at bottom', () => {
+    const agentPayload = createFeishuMessagePayload({
+      role: 'agent',
+      text: 'agent output',
+      createdAt: Date.now()
+    })
+    const agentContent = JSON.parse(agentPayload.content) as {
+      zh_cn: {
+        title?: string
+        content: Array<Array<{ tag: string, text: string }>>
+      }
+    }
+    expect(agentContent.zh_cn.title).toBeUndefined()
+    expect(agentContent.zh_cn.content).toEqual([
+      [
+        {
+          tag: 'md',
+          text: 'agent output'
+        }
+      ]
     ])
+
+    const userPayload = createFeishuMessagePayload({
+      role: 'user',
+      text: 'user input',
+      createdAt: Date.now()
+    })
+    const userContent = JSON.parse(userPayload.content) as {
+      zh_cn: {
+        content: Array<Array<{ tag: string, text: string }>>
+      }
+    }
+    expect(userContent.zh_cn.content.at(-1)).toEqual([
+      {
+        tag: 'text',
+        text: 'User'
+      }
+    ])
+  })
+
+  it('formats email message without codexio title and labels user at bottom', () => {
+    const agentPayload = createEmailMessagePayload({
+      role: 'agent',
+      text: 'agent output',
+      createdAt: Date.now()
+    })
+    expect(agentPayload).toEqual({
+      subject: 'Agent',
+      text: 'agent output'
+    })
+
+    const userPayload = createEmailMessagePayload({
+      role: 'user',
+      text: 'user input',
+      createdAt: Date.now()
+    })
+    expect(userPayload).toEqual({
+      subject: 'User',
+      text: 'user input\n\nUser'
+    })
   })
 
   it('renders safe markdown for web channel display', () => {

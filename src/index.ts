@@ -11,6 +11,7 @@ import { ChannelManager } from './channel/ChannelManager.js'
 import { AgentManager } from './agent/AgentManager.js'
 import { CodexioConfig, ConfigService } from './ConfigService.js'
 import { Result } from './Result.js'
+import { readCodexioVersion } from './AppMetadata.js'
 
 const AgentMessageBodySchema = z.object({
   text: z.string().refine((value) => value.trim().length > 0)
@@ -25,8 +26,8 @@ export type CodexioServer = {
 }
 
 export function createCodexioApp(config: CodexioConfig): CodexioServer {
-  if (config.server.messageToken.trim().length === 0) {
-    throw new Error('server.messageToken is required')
+  if (config.server.token.trim().length === 0) {
+    throw new Error('server.token is required')
   }
   const app = express()
   app.use(cors())
@@ -44,7 +45,7 @@ export function createCodexioApp(config: CodexioConfig): CodexioServer {
   app.post('/api/message', async (request, response) => {
     try {
       const authorization = request.header('authorization')
-      if (authorization !== `Bearer ${config.server.messageToken}`) {
+      if (authorization !== `Bearer ${config.server.token}`) {
         response.status(401).json(Result.fail('unauthorized', '401'))
         return
       }
@@ -133,7 +134,7 @@ const program = new Command()
 program
   .name('codexio')
   .description('Codexio text relay')
-  .version('0.1.0')
+  .version(readCodexioVersion())
   .action(async () => {
     await serve()
   })

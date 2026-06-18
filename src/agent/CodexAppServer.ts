@@ -1,5 +1,6 @@
 import { createInterface } from 'node:readline'
 import { execa } from 'execa'
+import { readCodexioVersion } from '../AppMetadata.js'
 
 type RpcError = {
   code: number
@@ -101,7 +102,7 @@ export class CodexAppServer {
       clientInfo: {
         name: 'codexio',
         title: 'Codexio',
-        version: '0.1.0'
+        version: readCodexioVersion()
       },
       capabilities: {
         experimentalApi: true,

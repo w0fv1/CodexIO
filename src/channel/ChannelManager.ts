@@ -3,7 +3,9 @@ import { Express } from 'express'
 import { CodexioConfig } from '../ConfigService.js'
 import { Result } from '../Result.js'
 import { ChannelAdapter, ChannelMessage, ChannelReceiveResult } from './ChannelAdapter.js'
+import { EmailChannelAdapter } from './EmailChannelAdapter.js'
 import { FeishuChannelAdapter } from './FeishuChannelAdapter.js'
+import { FeishuWebhookChannelAdapter } from './FeishuWebhookChannelAdapter.js'
 import { WebChannelAdapter } from './WebChannelAdapter.js'
 
 const messageHistoryLimit = 20
@@ -11,15 +13,21 @@ const messageHistoryLimit = 20
 export class ChannelManager {
   private readonly web = new WebChannelAdapter()
   private readonly feishu: FeishuChannelAdapter
+  private readonly feishuWebhook: FeishuWebhookChannelAdapter
+  private readonly email: EmailChannelAdapter
   private readonly channels = new Map<string, ChannelAdapter>()
   private readonly messages: ChannelMessage[] = []
   private handleReceive?: (text: string) => Promise<Result<ChannelReceiveResult>>
 
   constructor(config: CodexioConfig) {
     this.feishu = new FeishuChannelAdapter(config.channels.feishu)
+    this.feishuWebhook = new FeishuWebhookChannelAdapter(config.channels.feishuWebhook)
+    this.email = new EmailChannelAdapter(config.channels.email)
     for (const adapter of [
       this.web,
-      this.feishu
+      this.feishu,
+      this.feishuWebhook,
+      this.email
     ]) {
       const channelConfig = config.channels[adapter.type]
       if (channelConfig?.enabled) {
@@ -68,7 +76,7 @@ export class ChannelManager {
       return result
     }
     await this.display({
-      role: 'human',
+      role: 'user',
       text,
       createdAt: Date.now(),
       source

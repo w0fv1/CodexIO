@@ -152,7 +152,7 @@ export class WebChannelAdapter implements ChannelAdapter {
       text: message.text,
       createdAt: message.createdAt
     }
-    if (message.role !== 'human' && shouldRenderMarkdown(message.text)) {
+    if (message.role !== 'user' && shouldRenderMarkdown(message.text)) {
       data.html = renderMarkdownHtml(message.text)
     }
     return data

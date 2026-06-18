@@ -4,8 +4,9 @@ import { join } from 'node:path'
 import { execa } from 'execa'
 import { CodexioConfig } from '../ConfigService.js'
 import { Agent } from './Agent.js'
-import { codexioRootPath, createAgentEnv } from './AgentEnvironment.js'
+import { createAgentEnv } from './AgentEnvironment.js'
 import { CodexAppServer } from './CodexAppServer.js'
+import { codexioRootPath } from '../AppMetadata.js'
 
 const codexEntryPath = createRequire(import.meta.url).resolve('@openai/codex/bin/codex.js')
 
@@ -145,7 +146,7 @@ export class CodexAgent implements Agent {
       ephemeral: true,
       developerInstructions: (await readFile(join(codexioRootPath, 'instruction.md'), 'utf8'))
         .replaceAll('${toolBaseUrl}', this.options.toolBaseUrl)
-        .replaceAll('${messageToken}', this.options.config.server.messageToken)
+        .replaceAll('${token}', this.options.config.server.token)
     })
     if (!response || typeof response !== 'object') {
       throw new Error('codex thread response not found')

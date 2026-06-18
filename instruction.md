@@ -17,7 +17,7 @@ To send a Markdown-capable text message to the external user, post JSON to Codex
 
 ```powershell
 $body = @{ text = "message text" } | ConvertTo-Json -Compress
-$headers = @{ Authorization = "Bearer ${messageToken}" }
+$headers = @{ Authorization = "Bearer ${token}" }
 Invoke-RestMethod -Method Post -Uri "${toolBaseUrl}/api/message" -ContentType "application/json" -Headers $headers -Body $body
 ```
 

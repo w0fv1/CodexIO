@@ -1,15 +1,9 @@
-import { existsSync, mkdirSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { delimiter, dirname, join, resolve } from 'node:path'
+import { mkdirSync } from 'node:fs'
+import { delimiter, join, resolve } from 'node:path'
 import { CodexioConfig } from '../ConfigService.js'
+import { codexioRootPath } from '../AppMetadata.js'
 
-let codexioRoot = dirname(fileURLToPath(import.meta.url))
-while (!existsSync(join(codexioRoot, 'package.json')) && dirname(codexioRoot) !== codexioRoot) {
-  codexioRoot = dirname(codexioRoot)
-}
-
-export const codexHomePath = join(codexioRoot, '.codexio', 'codex')
-export const codexioRootPath = codexioRoot
+export const codexHomePath = join(codexioRootPath, '.codexio', 'codex')
 
 export function createAgentEnv(config: CodexioConfig): NodeJS.ProcessEnv {
   mkdirSync(codexHomePath, {

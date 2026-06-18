@@ -1,17 +1,12 @@
-import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { homedir } from 'node:os'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import YAML from 'yaml'
 import { z } from 'zod'
+import { codexioRootPath } from './AppMetadata.js'
 
-let codexioRoot = dirname(fileURLToPath(import.meta.url))
-while (!existsSync(join(codexioRoot, 'package.json')) && dirname(codexioRoot) !== codexioRoot) {
-  codexioRoot = dirname(codexioRoot)
-}
-
-export const defaultConfigPath = join(codexioRoot, '.codexio', 'config.yaml')
+export const defaultConfigPath = join(codexioRootPath, '.codexio', 'config.yaml')
 
 const ProxyConfigSchema = z.object({
   enabled: z.boolean().default(false),
@@ -36,12 +31,71 @@ const ChannelConfigSchema = z.object({
 const FeishuChannelConfigSchema = ChannelConfigSchema.extend({
   appId: z.string().default(''),
   appSecret: z.string().default(''),
-  chatIds: z.array(z.string()).default([])
+  chatId: z.string().default('')
+})
+
+const FeishuWebhookChannelConfigSchema = ChannelConfigSchema.extend({
+  url: z.string().default('')
+})
+
+const EmailServerConfigSchema = z.object({
+  host: z.string().default(''),
+  port: z.number().int().positive().default(993),
+  secure: z.boolean().default(true),
+  user: z.string().default(''),
+  password: z.string().default('')
+})
+
+const EmailChannelConfigSchema = ChannelConfigSchema.extend({
+  user: z.string().default(''),
+  agent: z.object({
+    imap: EmailServerConfigSchema.extend({
+      mailbox: z.string().default('INBOX')
+    }).default({
+      host: '',
+      port: 993,
+      secure: true,
+      user: '',
+      password: '',
+      mailbox: 'INBOX'
+    }),
+    smtp: EmailServerConfigSchema.extend({
+      from: z.string().default('')
+    }).default({
+      host: '',
+      port: 465,
+      secure: true,
+      user: '',
+      password: '',
+      from: ''
+    })
+  }).default({
+    imap: {
+      host: '',
+      port: 993,
+      secure: true,
+      user: '',
+      password: '',
+      mailbox: 'INBOX'
+    },
+    smtp: {
+      host: '',
+      port: 465,
+      secure: true,
+      user: '',
+      password: '',
+      from: ''
+    }
+  }),
+  idle: z.boolean().default(true),
+  pollSeconds: z.number().int().positive().default(30)
 })
 
 const ChannelsConfigSchema = z.object({
   web: ChannelConfigSchema.optional(),
-  feishu: FeishuChannelConfigSchema.optional()
+  feishu: FeishuChannelConfigSchema.optional(),
+  feishuWebhook: FeishuWebhookChannelConfigSchema.optional(),
+  email: EmailChannelConfigSchema.optional()
 })
 
 const WorkspaceConfigSchema = z.object({
@@ -99,11 +153,11 @@ export const ConfigSchema = z.object({
   server: z.object({
     host: z.string().default('127.0.0.1'),
     port: z.number().int().positive().default(8787),
-    messageToken: z.string().default('')
+    token: z.string().default('')
   }).default({
     host: '127.0.0.1',
     port: 8787,
-    messageToken: ''
+    token: ''
   }),
   proxy: ProxyConfigSchema.default({
     enabled: false,
@@ -141,8 +195,9 @@ export class ConfigService {
     const document = ConfigDocumentSchema.parse(parsed)
     const resolved = resolveReferences(migrateConfig(document))
     const config = ConfigSchema.parse(resolved)
-    if (config.server.messageToken.trim().length === 0) {
-      config.server.messageToken = createMessageToken()
+    config.workspace.path = normalizeWorkspacePath(config.workspace.path)
+    if (config.server.token.trim().length === 0) {
+      config.server.token = createToken()
       await this.save(config)
     }
     return config
@@ -168,17 +223,17 @@ export class ConfigService {
         }
       }
     }
-    const config = this.createDefaultConfig(process.env.INIT_CWD ?? process.cwd())
+    const config = this.createDefaultConfig()
     await this.save(config)
     return config
   }
 
-  createDefaultConfig(workspacePath = process.cwd()): CodexioConfig {
+  createDefaultConfig(workspacePath = join(codexioRootPath, '.codexio', 'workspace')): CodexioConfig {
     return ConfigSchema.parse({
       server: {
         host: '127.0.0.1',
         port: 8787,
-        messageToken: createMessageToken()
+        token: createToken()
       },
       proxy: {
         enabled: true,
@@ -201,11 +256,39 @@ export class ConfigService {
           enabled: false,
           appId: '',
           appSecret: '',
-          chatIds: []
+          chatId: ''
+        },
+        feishuWebhook: {
+          enabled: false,
+          url: ''
+        },
+        email: {
+          enabled: false,
+          user: '',
+          agent: {
+            imap: {
+              host: '',
+              port: 993,
+              secure: true,
+              user: '',
+              password: '',
+              mailbox: 'INBOX'
+            },
+            smtp: {
+              host: '',
+              port: 465,
+              secure: true,
+              user: '',
+              password: '',
+              from: ''
+            }
+          },
+          idle: true,
+          pollSeconds: 30
         }
       },
       workspace: {
-        path: workspacePath
+        path: normalizeWorkspacePath(workspacePath)
       }
     })
   }
@@ -227,6 +310,10 @@ function migrateConfig(document: ConfigDocument): ConfigReferenceObject {
   const agents = migrateAgentsConfig(legacy)
   if (agents) {
     migrated.agents = agents
+  }
+  const channels = migrateChannelsConfig(legacy)
+  if (channels) {
+    migrated.channels = channels
   }
   return migrated
 }
@@ -274,6 +361,37 @@ function migrateAgentsConfig(config: LegacyConfigDocument): ConfigReferenceObjec
   }
 }
 
+function migrateChannelsConfig(config: LegacyConfigDocument): ConfigReferenceObject | undefined {
+  if (!config.channels || typeof config.channels !== 'object' || Array.isArray(config.channels)) {
+    return undefined
+  }
+  const channels = config.channels as ConfigReferenceObject
+  const email = channels.email
+  if (!email || typeof email !== 'object' || Array.isArray(email)) {
+    return undefined
+  }
+  const emailConfig = email as ConfigReferenceObject
+  if (emailConfig.agent) {
+    return undefined
+  }
+  const to = emailConfig.to
+  const user = Array.isArray(to) ? to.find((item) => typeof item === 'string' && item.trim().length > 0) : undefined
+  return {
+    ...channels,
+    email: {
+      ...emailConfig,
+      user,
+      agent: {
+        imap: emailConfig.imap,
+        smtp: emailConfig.smtp
+      },
+      imap: undefined,
+      smtp: undefined,
+      to: undefined
+    }
+  }
+}
+
 function resolveReferences(value: ConfigReferenceValue, root = value): ConfigReferenceValue {
   if (typeof value === 'string') {
     return value.replace(/\$\{([^}]+)\}/g, (_, path: string) => {
@@ -311,6 +429,20 @@ function resolveReferencePath(root: ConfigReferenceValue, path: string): ConfigR
   return current
 }
 
-function createMessageToken(): string {
+export function normalizeWorkspacePath(path: string): string {
+  const trimmedPath = path.trim()
+  if (trimmedPath === '~') {
+    return homedir()
+  }
+  if (trimmedPath.startsWith('~/') || trimmedPath.startsWith('~\\')) {
+    return join(homedir(), trimmedPath.slice(2))
+  }
+  if (isAbsolute(trimmedPath)) {
+    return trimmedPath
+  }
+  return resolve(codexioRootPath, trimmedPath)
+}
+
+function createToken(): string {
   return randomBytes(32).toString('base64url')
 }

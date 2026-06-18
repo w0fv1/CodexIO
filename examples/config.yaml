@@ -1,7 +1,7 @@
 server:
   host: 127.0.0.1
   port: 8787
-  messageToken: ''
+  token: ''
 proxy:
   enabled: true
   host: 127.0.0.1
@@ -20,6 +20,29 @@ channels:
     enabled: false
     appId: ''
     appSecret: ''
-    chatIds: []
+    chatId: ''
+  feishuWebhook:
+    enabled: false
+    url: ''
+  email:
+    enabled: false
+    user: ''
+    agent:
+      imap:
+        host: ''
+        port: 993
+        secure: true
+        user: ''
+        password: ''
+        mailbox: INBOX
+      smtp:
+        host: ''
+        port: 465
+        secure: true
+        user: ''
+        password: ''
+        from: ''
+    idle: true
+    pollSeconds: 30
 workspace:
-  path: .
+  path: .codexio/workspace

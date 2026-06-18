@@ -6,7 +6,7 @@ export type ChannelReceiveResult = {
 }
 
 export type ChannelMessage = {
-  role: 'human' | 'agent' | 'system'
+  role: 'user' | 'agent' | 'system'
   text: string
   createdAt: number
   source?: string
