@@ -75,6 +75,7 @@ export class ChannelManager {
       }
       return result
     }
+    process.stdout.write(`user message received source=${source} text=${text}\n`)
     await this.display({
       role: 'user',
       text,
