@@ -165,7 +165,7 @@ export class CodexAgent implements Agent {
       throw new Error('codex app-server not started')
     }
     const status = await this.appServer.request('account/read', {
-      refreshToken: true
+      refreshToken: false
     })
     if (status && typeof status === 'object' && (status as Record<string, unknown>).account) {
       return

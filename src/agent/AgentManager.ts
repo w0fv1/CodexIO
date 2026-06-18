@@ -110,6 +110,10 @@ export class AgentManager {
     if (input.startsWith('/$$')) {
       input = `/$${input.slice(3)}`
     }
+    const received = await this.callbacks.send('收到，我会马上处理这条消息。')
+    if (received.isFailed) {
+      return Result.fail<AgentReceiveResult>(received.message)
+    }
     const started = await this.start()
     if (started.isFailed) {
       return Result.fail<AgentReceiveResult>(started.message)

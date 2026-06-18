@@ -23,12 +23,16 @@ describe('server', () => {
     socket.send(JSON.stringify({
       text: 'hello'
     }))
-    await waitForWebSocketMessages(messages, 2)
+    await waitForWebSocketMessages(messages, 3)
     expect(messages[0]).toMatchObject({
       type: 'user',
       text: 'hello'
     })
     expect(messages[1]).toMatchObject({
+      type: 'agent',
+      text: '收到，我会马上处理这条消息。'
+    })
+    expect(messages[2]).toMatchObject({
       type: 'agent',
       text: 'echo: hello'
     })
@@ -43,17 +47,17 @@ describe('server', () => {
     socket.send(JSON.stringify({
       text: 'first'
     }))
-    await waitForWebSocketMessages(messages, 2)
+    await waitForWebSocketMessages(messages, 3)
     socket.send(JSON.stringify({
       text: '/$ clear'
     }))
-    await waitForWebSocketMessages(messages, 3)
-    const clear = messages[2]
+    await waitForWebSocketMessages(messages, 4)
+    const clear = messages[3]
     socket.send(JSON.stringify({
       text: 'second'
     }))
-    await waitForWebSocketMessages(messages, 5)
-    const second = messages[4]
+    await waitForWebSocketMessages(messages, 7)
+    const second = messages[6]
     expect(clear).toMatchObject({
       type: 'clear'
     })
@@ -197,8 +201,8 @@ describe('server', () => {
     first.send(JSON.stringify({
       text: 'shared input'
     }))
-    await waitForWebSocketMessages(firstMessages, 2)
-    await waitForWebSocketMessages(secondMessages, 2)
+    await waitForWebSocketMessages(firstMessages, 3)
+    await waitForWebSocketMessages(secondMessages, 3)
     expect(firstMessages[0]).toMatchObject({
       type: 'user',
       text: 'shared input'
@@ -209,9 +213,17 @@ describe('server', () => {
     })
     expect(firstMessages[1]).toMatchObject({
       type: 'agent',
-      text: 'echo: shared input'
+      text: '收到，我会马上处理这条消息。'
     })
     expect(secondMessages[1]).toMatchObject({
+      type: 'agent',
+      text: '收到，我会马上处理这条消息。'
+    })
+    expect(firstMessages[2]).toMatchObject({
+      type: 'agent',
+      text: 'echo: shared input'
+    })
+    expect(secondMessages[2]).toMatchObject({
       type: 'agent',
       text: 'echo: shared input'
     })
@@ -228,7 +240,7 @@ describe('server', () => {
       socket.send(JSON.stringify({
         text: `message ${index}`
       }))
-      await waitForWebSocketMessages(messages, index * 2)
+      await waitForWebSocketMessages(messages, index * 3)
     }
     const restored: Array<Record<string, unknown>> = []
     const restoredUrl = baseUrl.replace('http://', 'ws://').replace('https://', 'wss://')
@@ -250,12 +262,16 @@ describe('server', () => {
     })
     expect(restored).toHaveLength(20)
     expect(restored[0]).toMatchObject({
-      type: 'user',
-      text: 'message 3'
+      type: 'agent',
+      text: '收到，我会马上处理这条消息。'
     })
     expect(restored[1]).toMatchObject({
       type: 'agent',
-      text: 'echo: message 3'
+      text: 'echo: message 6'
+    })
+    expect(restored[2]).toMatchObject({
+      type: 'user',
+      text: 'message 7'
     })
     expect(restored[19]).toMatchObject({
       type: 'agent',

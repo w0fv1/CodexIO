@@ -49,6 +49,35 @@ describe('core', () => {
     await expect(manager.login()).resolves.toBeUndefined()
   })
 
+  it('agent manager acknowledges user message before agent work', async () => {
+    const outbound: string[] = []
+    const manager = new AgentManager(ConfigSchema.parse({
+      agents: {
+        codex: {
+          enabled: false
+        },
+        claude: {
+          enabled: false
+        },
+        echo: {
+          enabled: true
+        }
+      }
+    }), 'http://127.0.0.1:8787', {
+      send: async (text) => {
+        outbound.push(text)
+        return Result.success(null)
+      },
+      status: async () => Result.success(null)
+    })
+    const result = await manager.receive('hello')
+    expect(result.isFailed).toBe(false)
+    expect(outbound).toEqual([
+      '收到，我会马上处理这条消息。',
+      'echo: hello'
+    ])
+  })
+
   it('agents apply proxy env internally', async () => {
     const env = createAgentEnv(ConfigSchema.parse({
       proxy: {
@@ -257,6 +286,9 @@ describe('core', () => {
       'account/login/start',
       'thread/start'
     ])
+    expect(requests[0].params).toEqual({
+      refreshToken: false
+    })
     expect(requests[1].params).toEqual({
       type: 'chatgptDeviceCode'
     })
