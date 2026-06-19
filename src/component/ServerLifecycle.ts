@@ -11,8 +11,6 @@ import { CodexioConfig, ConfigService, validateCodexioConfig } from '../ConfigSe
 
 const execFileAsync = promisify(execFile)
 const require = createRequire(import.meta.url)
-const tsxPackagePath = require.resolve('tsx/package.json')
-const tsxCliPath = join(dirname(tsxPackagePath), 'dist', 'cli.mjs')
 
 const RuntimeServerStateSchema = z.object({
   pid: z.number().int().positive(),
@@ -181,6 +179,8 @@ export function createServeProcessSpec(configPath: string, entryPath = argv[1], 
     serveArgs.push('--auto-port')
   }
   if (entryPath?.endsWith('.ts')) {
+    const tsxPackagePath = require.resolve('tsx/package.json')
+    const tsxCliPath = join(dirname(tsxPackagePath), 'dist', 'cli.mjs')
     return {
       command: execPath,
       args: [
