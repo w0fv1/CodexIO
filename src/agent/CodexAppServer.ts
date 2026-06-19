@@ -1,6 +1,7 @@
 import { createInterface } from 'node:readline'
 import { execa } from 'execa'
 import { readCodexioVersion } from '../AppMetadata.js'
+import { Logger } from '../component/Logger.js'
 
 type RpcError = {
   code: number
@@ -44,6 +45,9 @@ export class CodexAppServer {
     if (this.child) {
       return
     }
+    Logger.info('codex app-server starting', {
+      cwd: this.options.cwd
+    })
     const child = execa(this.options.command, this.options.args, {
       cwd: this.options.cwd,
       env: this.options.env,
@@ -64,6 +68,9 @@ export class CodexAppServer {
         message = JSON.parse(line) as RpcMessage
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error)
+        Logger.warn('codex app-server invalid JSON', {
+          reason
+        })
         this.options.onStderr(Buffer.from(`codex app-server sent invalid JSON: ${reason}\n`))
         return
       }
@@ -94,6 +101,9 @@ export class CodexAppServer {
     })
     child.stderr?.on('data', this.options.onStderr)
     child.then((result) => {
+      Logger.info('codex app-server exited', {
+        exitCode: result.exitCode
+      })
       if (this.child === child) {
         this.child = undefined
       }
@@ -103,6 +113,7 @@ export class CodexAppServer {
       }
       this.pending.clear()
     }).catch((error) => {
+      Logger.error('codex app-server failed', error)
       if (this.child === child) {
         this.child = undefined
       }
@@ -125,6 +136,7 @@ export class CodexAppServer {
       }
     })
     this.notify('initialized', {})
+    Logger.info('codex app-server ready')
   }
 
   async request(method: string, params: unknown): Promise<unknown> {
@@ -136,6 +148,9 @@ export class CodexAppServer {
     const result = new Promise<unknown>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(id)
+        Logger.warn('codex app-server request timed out', {
+          method
+        })
         reject(new Error(`codex app-server request timed out: ${method}`))
       }, this.requestTimeoutMs)
       this.pending.set(id, {
@@ -174,6 +189,7 @@ export class CodexAppServer {
     if (!this.child) {
       return
     }
+    Logger.info('codex app-server stopping')
     const child = this.child
     this.child = undefined
     child.kill()

@@ -384,7 +384,7 @@ if errorlevel 1 goto failed
 echo [codexio] dependencies installed
 :start
 echo [codexio] launching local server
-call "%~dp0codexio\nodew.cmd" codexio\dist\index.js serve --config "%~dp0config.yaml"
+call "%~dp0codexio\nodew.cmd" codexio\dist\index.js start --config "%~dp0config.yaml"
 goto end
 :failed
 echo [codexio] command failed
@@ -429,7 +429,7 @@ function New-StandalonePackage {
     Copy-Item -Recurse -Force $NodeRoot (Join-Path $appRoot "runtime\node")
     Write-Step "copy production dependencies"
     Copy-Item -Recurse -Force (Join-Path $InstallRoot "node_modules") $appRoot
-    New-CommandFile -Path (Join-Path $StandaloneRoot "start.cmd") -Command "codexio\runtime\node\node.exe codexio\dist\index.js serve --config ""%~dp0config.yaml""" -Title "start Codexio with bundled Node.js"
+    New-CommandFile -Path (Join-Path $StandaloneRoot "start.cmd") -Command "codexio\runtime\node\node.exe codexio\dist\index.js start --config ""%~dp0config.yaml""" -Title "start Codexio with bundled Node.js"
     Assert-PathExists (Join-Path $appRoot "runtime\node\node.exe")
     Assert-PathExists (Join-Path $appRoot "node_modules\@openai\codex-win32-x64\package.json")
     Assert-PathExists (Join-Path $appRoot "node_modules\@anthropic-ai\claude-code-win32-x64\package.json")

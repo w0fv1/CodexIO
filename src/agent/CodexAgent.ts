@@ -7,10 +7,13 @@ import { Agent } from './Agent.js'
 import { createAgentEnv } from './AgentEnvironment.js'
 import { CodexAppServer } from './CodexAppServer.js'
 import { codexioRootPath } from '../AppMetadata.js'
+import { CodexSessionStore } from './CodexSessionStore.js'
+import { Logger } from '../component/Logger.js'
 
 const codexEntryPath = createRequire(import.meta.url).resolve('@openai/codex/bin/codex.js')
 
 type CodexAppServerHandle = Pick<CodexAppServer, 'start' | 'request' | 'waitForNotification' | 'stop'>
+type CodexSessionStoreHandle = Pick<CodexSessionStore, 'read' | 'write' | 'clear'>
 
 export type CodexAgentOptions = {
   workspacePath: string
@@ -18,6 +21,7 @@ export type CodexAgentOptions = {
   toolBaseUrl: string
   send: (text: string) => Promise<void>
   appServer?: CodexAppServerHandle
+  sessionStore?: CodexSessionStoreHandle
 }
 
 export class CodexAgent implements Agent {
@@ -26,11 +30,17 @@ export class CodexAgent implements Agent {
   private threadId?: string
   private activeTurnId?: string
   private appServer?: CodexAppServerHandle
+  private readonly sessionStore: CodexSessionStoreHandle
   private readonly messageByItemId = new Map<string, string>()
 
-  constructor(private readonly options: CodexAgentOptions) {}
+  constructor(private readonly options: CodexAgentOptions) {
+    this.sessionStore = options.sessionStore ?? new CodexSessionStore()
+  }
 
   async login(): Promise<void> {
+    Logger.info('codex login started', {
+      cwd: this.options.workspacePath
+    })
     await execa(process.execPath, [
       codexEntryPath,
       'login',
@@ -40,10 +50,25 @@ export class CodexAgent implements Agent {
       env: createAgentEnv(this.options.config),
       stdio: 'inherit'
     })
+    Logger.info('codex login completed')
   }
 
   async start(_config: CodexioConfig): Promise<void> {
-    this.appServer = this.options.appServer ?? new CodexAppServer({
+    Logger.info('codex agent starting', {
+      cwd: this.options.workspacePath
+    })
+    this.appServer = this.createAppServer()
+    await this.appServer.start()
+    this.started = true
+    await this.ensureLoggedIn()
+    await this.resumeOrStartThread()
+    Logger.info('codex agent ready', {
+      threadId: this.threadId
+    })
+  }
+
+  private createAppServer(): CodexAppServerHandle {
+    return this.options.appServer ?? new CodexAppServer({
       command: process.execPath,
       args: [
         codexEntryPath,
@@ -56,13 +81,12 @@ export class CodexAgent implements Agent {
         void this.handleNotification(method, params)
       },
       onStderr: (data) => {
+        Logger.warn('codex app-server stderr', {
+          text: data.toString('utf8')
+        })
         process.stderr.write(data)
       }
     })
-    await this.appServer.start()
-    this.started = true
-    await this.ensureLoggedIn()
-    await this.startThread()
   }
 
   async receive(text: string): Promise<void> {
@@ -83,6 +107,11 @@ export class CodexAgent implements Agent {
       }
     ]
     if (this.activeTurnId) {
+      Logger.info('codex turn steered', {
+        threadId: this.threadId,
+        turnId: this.activeTurnId,
+        length: text.length
+      })
       await this.appServer.request('turn/steer', {
         threadId: this.threadId,
         expectedTurnId: this.activeTurnId,
@@ -102,15 +131,19 @@ export class CodexAgent implements Agent {
       throw new Error('codex turn id not found')
     }
     this.activeTurnId = (turn as Record<string, string>).id
+    Logger.info('codex turn started', {
+      threadId: this.threadId,
+      turnId: this.activeTurnId,
+      length: text.length
+    })
   }
 
   async clear(): Promise<void> {
-    if (this.threadId && this.activeTurnId && this.appServer) {
-      await this.appServer.request('turn/interrupt', {
-        threadId: this.threadId,
-        turnId: this.activeTurnId
-      }).catch(() => {})
-    }
+    Logger.info('codex agent clearing', {
+      threadId: this.threadId,
+      turnId: this.activeTurnId
+    })
+    await this.interruptActiveTurn()
     this.activeTurnId = undefined
     this.threadId = undefined
     this.messageByItemId.clear()
@@ -120,13 +153,34 @@ export class CodexAgent implements Agent {
     }
   }
 
+  async restart(): Promise<void> {
+    Logger.info('codex agent restarting', {
+      threadId: this.threadId,
+      turnId: this.activeTurnId
+    })
+    await this.interruptActiveTurn()
+    await this.appServer?.stop()
+    this.activeTurnId = undefined
+    this.threadId = undefined
+    this.messageByItemId.clear()
+    this.appServer = undefined
+    this.started = false
+    this.appServer = this.createAppServer()
+    await this.appServer.start()
+    this.started = true
+    await this.ensureLoggedIn()
+    await this.resumeOrStartThread()
+    Logger.info('codex agent restarted', {
+      threadId: this.threadId
+    })
+  }
+
   async stop(): Promise<void> {
-    if (this.threadId && this.activeTurnId && this.appServer) {
-      await this.appServer.request('turn/interrupt', {
-        threadId: this.threadId,
-        turnId: this.activeTurnId
-      }).catch(() => {})
-    }
+    Logger.info('codex agent stopping', {
+      threadId: this.threadId,
+      turnId: this.activeTurnId
+    })
+    await this.interruptActiveTurn()
     await this.appServer?.stop()
     this.activeTurnId = undefined
     this.threadId = undefined
@@ -143,11 +197,65 @@ export class CodexAgent implements Agent {
       cwd: this.options.workspacePath,
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
-      ephemeral: true,
-      developerInstructions: (await readFile(join(codexioRootPath, 'instruction.md'), 'utf8'))
-        .replaceAll('${toolBaseUrl}', this.options.toolBaseUrl)
-        .replaceAll('${token}', this.options.config.server.token)
+      ephemeral: false,
+      developerInstructions: await this.readDeveloperInstructions()
     })
+    this.threadId = this.readThreadId(response)
+    this.activeTurnId = undefined
+    this.messageByItemId.clear()
+    await this.sessionStore.write(this.threadId)
+    Logger.info('codex thread started', {
+      threadId: this.threadId
+    })
+  }
+
+  private async resumeOrStartThread(): Promise<void> {
+    const session = await this.sessionStore.read()
+    if (session?.threadId) {
+      try {
+        Logger.info('codex thread resume requested', {
+          threadId: session.threadId
+        })
+        await this.resumeThread(session.threadId)
+        return
+      } catch (error) {
+        Logger.warn('codex thread resume failed', {
+          threadId: session.threadId,
+          error: error instanceof Error ? error.message : String(error)
+        })
+        await this.sessionStore.clear()
+      }
+    }
+    await this.startThread()
+  }
+
+  private async resumeThread(threadId: string): Promise<void> {
+    if (!this.appServer) {
+      throw new Error('codex app-server not started')
+    }
+    const response = await this.appServer.request('thread/resume', {
+      threadId,
+      cwd: this.options.workspacePath,
+      approvalPolicy: 'never',
+      sandbox: 'danger-full-access',
+      developerInstructions: await this.readDeveloperInstructions()
+    })
+    this.threadId = this.readThreadId(response)
+    this.activeTurnId = undefined
+    this.messageByItemId.clear()
+    await this.sessionStore.write(this.threadId)
+    Logger.info('codex thread resumed', {
+      threadId: this.threadId
+    })
+  }
+
+  private async readDeveloperInstructions(): Promise<string> {
+    return (await readFile(join(codexioRootPath, 'instruction.md'), 'utf8'))
+      .replaceAll('${toolBaseUrl}', this.options.toolBaseUrl)
+      .replaceAll('${token}', this.options.config.server.token)
+  }
+
+  private readThreadId(response: unknown): string {
     if (!response || typeof response !== 'object') {
       throw new Error('codex thread response not found')
     }
@@ -155,9 +263,24 @@ export class CodexAgent implements Agent {
     if (!thread || typeof thread !== 'object' || typeof (thread as Record<string, unknown>).id !== 'string') {
       throw new Error('codex thread id not found')
     }
-    this.threadId = (thread as Record<string, string>).id
-    this.activeTurnId = undefined
-    this.messageByItemId.clear()
+    return (thread as Record<string, string>).id
+  }
+
+  private async interruptActiveTurn(): Promise<void> {
+    if (this.threadId && this.activeTurnId && this.appServer) {
+      Logger.info('codex turn interrupt requested', {
+        threadId: this.threadId,
+        turnId: this.activeTurnId
+      })
+      await this.appServer.request('turn/interrupt', {
+        threadId: this.threadId,
+        turnId: this.activeTurnId
+      }).catch((error) => {
+        Logger.warn('codex turn interrupt failed', {
+          error: error instanceof Error ? error.message : String(error)
+        })
+      })
+    }
   }
 
   private async ensureLoggedIn(): Promise<void> {
@@ -168,8 +291,10 @@ export class CodexAgent implements Agent {
       refreshToken: false
     })
     if (status && typeof status === 'object' && (status as Record<string, unknown>).account) {
+      Logger.info('codex account ready')
       return
     }
+    Logger.warn('codex login required')
     const login = await this.appServer.request('account/login/start', {
       type: 'chatgptDeviceCode'
     })
@@ -191,6 +316,7 @@ export class CodexAgent implements Agent {
     const completedMessage = 'Codex login completed.'
     process.stdout.write(`${completedMessage}\n`)
     await this.options.send(completedMessage).catch(() => {})
+    Logger.info('codex login notification completed')
   }
 
   private async handleNotification(method: string, params: unknown): Promise<void> {
@@ -264,6 +390,7 @@ export class CodexAgent implements Agent {
     if (method === 'error') {
       const error = data.error
       if (error && typeof error === 'object' && typeof (error as Record<string, unknown>).message === 'string') {
+        Logger.error('codex notification error', new Error((error as Record<string, string>).message))
         await this.options.send((error as Record<string, string>).message)
       }
     }

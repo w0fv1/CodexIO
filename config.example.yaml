@@ -11,8 +11,6 @@ agents:
     enabled: true
   claude:
     enabled: false
-  echo:
-    enabled: false
 channels:
   web:
     enabled: true

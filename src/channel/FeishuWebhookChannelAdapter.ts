@@ -1,12 +1,13 @@
-import { ChannelAdapter, ChannelMessage, ChannelStartInput } from './ChannelAdapter.js'
-import { Result } from '../Result.js'
+import { Channel, ChannelMessage, ChannelStartInput } from './Channel.js'
+import { Result } from '../value/Result.js'
+import { Logger } from '../component/Logger.js'
 
 export type FeishuWebhookChannelConfig = {
   enabled?: boolean
   url?: string
 }
 
-export class FeishuWebhookChannelAdapter implements ChannelAdapter {
+export class FeishuWebhookChannelAdapter implements Channel {
   readonly type = 'feishuWebhook'
 
   constructor(private readonly config?: FeishuWebhookChannelConfig) {}
@@ -15,6 +16,7 @@ export class FeishuWebhookChannelAdapter implements ChannelAdapter {
     if (!this.config?.url || this.config.url.trim().length === 0) {
       throw new Error('feishu webhook url is required')
     }
+    Logger.info('feishu webhook channel ready')
   }
 
   async send(message: ChannelMessage): Promise<Result<null>> {
@@ -29,6 +31,11 @@ export class FeishuWebhookChannelAdapter implements ChannelAdapter {
       text = '已开始新对话'
     }
     try {
+      Logger.info('feishu webhook send started', {
+        role: message.role,
+        source: message.source ?? null,
+        length: text.length
+      })
       const response = await fetch(this.config.url, {
         method: 'POST',
         headers: {
@@ -42,15 +49,23 @@ export class FeishuWebhookChannelAdapter implements ChannelAdapter {
         })
       })
       if (!response.ok) {
+        Logger.warn('feishu webhook send failed', {
+          status: response.status
+        })
         return Result.fail(`feishu webhook failed: ${response.status}`)
       }
+      Logger.info('feishu webhook send completed', {
+        role: message.role
+      })
       return Result.success(null)
     } catch (error) {
+      Logger.error('feishu webhook send crashed', error)
       return Result.fromError(error)
     }
   }
 
   async stop(): Promise<Result<null>> {
+    Logger.info('feishu webhook channel stopped')
     return Result.success(null)
   }
 }

@@ -1,17 +1,27 @@
 import { describe, expect, it } from 'vitest'
 import { WebSocket } from 'ws'
 import { Server as HttpServer } from 'node:http'
-import { ConfigSchema } from './ConfigService.js'
-import { createCodexioApp } from './index.js'
-import { webPageHtml } from './channel/WebPage.js'
+import { createServer as createNetServer } from 'node:net'
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { ConfigSchema } from '../src/ConfigService.js'
+import { codexioRootPath } from '../src/AppMetadata.js'
+import { createCodexioApp, resolveAvailableServerPort, resolveRestartTargets } from '../src/index.js'
+import { createServeProcessSpec } from '../src/component/ServerLifecycle.js'
+import { webPageHtml } from '../src/channel/WebPage.js'
+import { TestAgent } from './TestAgent.js'
 
 const testToken = 'test-message-token'
 
 describe('server', () => {
   it('serves a compact Codexio web chat page', () => {
-    expect(webPageHtml).toContain('<span>Codexio</span>')
+    expect(webPageHtml).toContain('Codexio')
     expect(webPageHtml).toContain('id="messages"')
     expect(webPageHtml).toContain('id="form"')
+    expect(webPageHtml).toContain('https://unpkg.com/@tailwindcss/browser@4')
+    expect(webPageHtml).toContain('https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js')
+    expect(webPageHtml).toContain('event.shiftKey')
     expect(webPageHtml).not.toContain('让 coding agent 通过统一通道工作')
     expect(webPageHtml).not.toContain('Codex CLI')
   })
@@ -34,7 +44,7 @@ describe('server', () => {
     })
     expect(messages[2]).toMatchObject({
       type: 'agent',
-      text: 'echo: hello'
+      text: 'test: hello'
     })
     await closeWebSocket(socket)
     await closeTestServer(listener)
@@ -49,7 +59,7 @@ describe('server', () => {
     }))
     await waitForWebSocketMessages(messages, 3)
     socket.send(JSON.stringify({
-      text: '/$ clear'
+      text: '$ clear'
     }))
     await waitForWebSocketMessages(messages, 4)
     const clear = messages[3]
@@ -63,7 +73,26 @@ describe('server', () => {
     })
     expect(second).toMatchObject({
       type: 'agent',
-      text: 'echo: second'
+      text: 'test: second'
+    })
+    await closeWebSocket(socket)
+    await closeTestServer(listener)
+  })
+
+  it('clears with yuan-prefixed command without a space', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    const socket = await openWebSocket(baseUrl)
+    const messages = recordWebSocket(socket)
+    socket.send(JSON.stringify({
+      text: 'first'
+    }))
+    await waitForWebSocketMessages(messages, 3)
+    socket.send(JSON.stringify({
+      text: '￥clear'
+    }))
+    await waitForWebSocketMessages(messages, 4)
+    expect(messages[3]).toMatchObject({
+      type: 'clear'
     })
     await closeWebSocket(socket)
     await closeTestServer(listener)
@@ -155,6 +184,86 @@ describe('server', () => {
     await closeTestServer(listener)
   })
 
+  it('restarts the active agent through the authenticated admin endpoint', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    const unauthorized = await fetch(`${baseUrl}/api/agent/restart`, {
+      method: 'POST'
+    })
+    expect(unauthorized.status).toBe(401)
+
+    const response = await fetch(`${baseUrl}/api/agent/restart`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${testToken}`
+      }
+    })
+    const result = await response.json() as {
+      isFailed: boolean
+      data: {
+        action: string
+      }
+    }
+    expect(result.isFailed).toBe(false)
+    expect(result.data.action).toBe('restart')
+    await closeTestServer(listener)
+  })
+
+  it('stops the host server through the authenticated admin endpoint', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    const unauthorized = await fetch(`${baseUrl}/api/server/stop`, {
+      method: 'POST'
+    })
+    expect(unauthorized.status).toBe(401)
+
+    const closed = new Promise<void>((resolve) => {
+      listener.once('close', resolve)
+    })
+    const response = await fetch(`${baseUrl}/api/server/stop`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${testToken}`
+      }
+    })
+    const result = await response.json() as {
+      isFailed: boolean
+      data: {
+        stopping: boolean
+      }
+    }
+    expect(result.isFailed).toBe(false)
+    expect(result.data.stopping).toBe(true)
+    await closed
+  })
+
+  it('notifies users when the host server starts and stops', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    const { socket, messages } = await openRecordedWebSocket(baseUrl)
+    await waitForWebSocketMessages(messages, 1)
+    expect(messages[0]).toMatchObject({
+      type: 'agent',
+      text: 'Codexio server started.'
+    })
+    const closed = new Promise<void>((resolve) => {
+      listener.once('close', resolve)
+    })
+    const response = await fetch(`${baseUrl}/api/server/stop`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${testToken}`
+      }
+    })
+    const result = await response.json() as {
+      isFailed: boolean
+    }
+    expect(result.isFailed).toBe(false)
+    await waitForWebSocketMessages(messages, 2)
+    expect(messages[1]).toMatchObject({
+      type: 'agent',
+      text: 'Codexio server stopping.'
+    })
+    await closed
+  })
+
   it('broadcasts agent output to every web connection', async () => {
     const { baseUrl, listener } = await startTestServer()
     const first = await openWebSocket(baseUrl)
@@ -221,11 +330,11 @@ describe('server', () => {
     })
     expect(firstMessages[2]).toMatchObject({
       type: 'agent',
-      text: 'echo: shared input'
+      text: 'test: shared input'
     })
     expect(secondMessages[2]).toMatchObject({
       type: 'agent',
-      text: 'echo: shared input'
+      text: 'test: shared input'
     })
     await closeWebSocket(first)
     await closeWebSocket(second)
@@ -267,7 +376,7 @@ describe('server', () => {
     })
     expect(restored[1]).toMatchObject({
       type: 'agent',
-      text: 'echo: message 6'
+      text: 'test: message 6'
     })
     expect(restored[2]).toMatchObject({
       type: 'user',
@@ -275,7 +384,7 @@ describe('server', () => {
     })
     expect(restored[19]).toMatchObject({
       type: 'agent',
-      text: 'echo: message 12'
+      text: 'test: message 12'
     })
     await closeWebSocket(restoredSocket)
     await closeWebSocket(socket)
@@ -322,6 +431,102 @@ describe('server', () => {
     })
     expect(() => createCodexioApp(config)).toThrow('only one agent can be enabled')
   })
+
+  it('selects the next server port when the preferred port is occupied', async () => {
+    const occupied = createNetServer()
+    await new Promise<void>((resolve, reject) => {
+      occupied.once('error', reject)
+      occupied.listen(0, '127.0.0.1', resolve)
+    })
+    try {
+      const address = occupied.address()
+      if (!address || typeof address === 'string') {
+        throw new Error('occupied server address not found')
+      }
+      const port = await resolveAvailableServerPort('127.0.0.1', address.port)
+      expect(port).toBeGreaterThan(address.port)
+    } finally {
+      await closeTestServer(occupied)
+    }
+  })
+
+  it('uses runtime server port before configured restart port', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-runtime-'))
+    const configPath = join(dir, 'config.yaml')
+    await writeFile(join(dir, 'server.json'), JSON.stringify({
+      pid: process.pid,
+      host: '127.0.0.1',
+      port: 8788,
+      startedAt: new Date().toISOString()
+    }), 'utf8')
+    const config = ConfigSchema.parse({
+      server: {
+        host: '127.0.0.1',
+        port: 8787,
+        token: testToken
+      },
+      agents: {
+        codex: {
+          enabled: false
+        },
+        claude: {
+          enabled: true
+        }
+      },
+      channels: {
+        web: {
+          enabled: true
+        }
+      },
+      workspace: {
+        path: '.'
+      }
+    })
+
+    const targets = await resolveRestartTargets(configPath, config)
+
+    expect(targets).toEqual([
+      {
+        host: '127.0.0.1',
+        port: 8788,
+        source: 'runtime'
+      },
+      {
+        host: '127.0.0.1',
+        port: 8787,
+        source: 'config'
+      }
+    ])
+  })
+
+  it('resolves source and built serve process commands without npm restart branching', () => {
+    const configPath = join(codexioRootPath, '.codexio', 'config.yaml')
+    const sourceEntryPath = join(codexioRootPath, 'src', 'index.ts')
+    const builtEntryPath = join(codexioRootPath, 'dist', 'index.js')
+    const source = createServeProcessSpec(configPath, sourceEntryPath)
+    expect(source.command).toBe(process.execPath)
+    expect(source.args.slice(1)).toEqual([
+      join('src', 'index.ts'),
+      'serve',
+      '--config',
+      configPath
+    ])
+    expect(source.args[0]).toContain(join('tsx', 'dist', 'cli.mjs'))
+
+    const built = createServeProcessSpec(configPath, builtEntryPath)
+    expect(built.command).toBe(process.execPath)
+    expect(built.args).toEqual([
+      builtEntryPath,
+      'serve',
+      '--config',
+      configPath
+    ])
+
+    const dev = createServeProcessSpec(configPath, sourceEntryPath, {
+      autoPort: true
+    })
+    expect(dev.args).toContain('--auto-port')
+  })
 })
 
 async function startTestServer(): Promise<{
@@ -337,9 +542,6 @@ async function startTestServer(): Promise<{
         enabled: false
       },
       claude: {
-        enabled: false
-      },
-      echo: {
         enabled: true
       }
     },
@@ -352,7 +554,11 @@ async function startTestServer(): Promise<{
       path: '.'
     }
   })
-  const server = createCodexioApp(config)
+  const server = createCodexioApp(config, {
+    agentFactory: () => new TestAgent(async (text) => {
+      await server.channelManager.send(text)
+    })
+  })
   const listener = server.listen(0)
   await new Promise<void>((resolve) => listener.once('listening', resolve))
   const address = listener.address()
@@ -380,7 +586,40 @@ async function openWebSocket(baseUrl: string): Promise<WebSocket> {
   return socket
 }
 
+async function openRecordedWebSocket(baseUrl: string): Promise<{
+  socket: WebSocket
+  messages: Array<Record<string, unknown>>
+}> {
+  const url = baseUrl.replace('http://', 'ws://').replace('https://', 'wss://')
+  const socket = new WebSocket(`${url}/ws`)
+  const messages = recordRawWebSocket(socket)
+  await new Promise<void>((resolve, reject) => {
+    socket.on('message', (data) => {
+      const message = JSON.parse(data.toString()) as Record<string, unknown>
+      if (message.type === 'ready') {
+        resolve()
+      }
+    })
+    socket.once('error', reject)
+  })
+  return {
+    socket,
+    messages
+  }
+}
+
 function recordWebSocket(socket: WebSocket): Array<Record<string, unknown>> {
+  const messages: Array<Record<string, unknown>> = []
+  socket.on('message', (data) => {
+    const message = JSON.parse(data.toString()) as Record<string, unknown>
+    if (message.type !== 'ready' && message.text !== 'Codexio server started.' && message.text !== 'Codexio server stopping.') {
+      messages.push(message)
+    }
+  })
+  return messages
+}
+
+function recordRawWebSocket(socket: WebSocket): Array<Record<string, unknown>> {
   const messages: Array<Record<string, unknown>> = []
   socket.on('message', (data) => {
     const message = JSON.parse(data.toString()) as Record<string, unknown>

@@ -1,12 +1,13 @@
 import { Server as HttpServer } from 'node:http'
 import { Express } from 'express'
 import { CodexioConfig } from '../ConfigService.js'
-import { Result } from '../Result.js'
-import { ChannelAdapter, ChannelMessage, ChannelReceiveResult } from './ChannelAdapter.js'
+import { Result } from '../value/Result.js'
+import { Channel, ChannelMessage, ChannelReceiveResult } from './Channel.js'
 import { EmailChannelAdapter } from './EmailChannelAdapter.js'
 import { FeishuChannelAdapter } from './FeishuChannelAdapter.js'
 import { FeishuWebhookChannelAdapter } from './FeishuWebhookChannelAdapter.js'
 import { WebChannelAdapter } from './WebChannelAdapter.js'
+import { Logger } from '../component/Logger.js'
 
 const messageHistoryLimit = 20
 
@@ -15,9 +16,9 @@ export class ChannelManager {
   private readonly feishu: FeishuChannelAdapter
   private readonly feishuWebhook: FeishuWebhookChannelAdapter
   private readonly email: EmailChannelAdapter
-  private readonly channels = new Map<string, ChannelAdapter>()
+  private readonly channels = new Map<string, Channel>()
   private readonly messages: ChannelMessage[] = []
-  private handleReceive?: (text: string) => Promise<Result<ChannelReceiveResult>>
+  private handleReceive?: (text: string, source: string) => Promise<Result<ChannelReceiveResult>>
 
   constructor(config: CodexioConfig) {
     this.feishu = new FeishuChannelAdapter(config.channels.feishu)
@@ -36,7 +37,7 @@ export class ChannelManager {
     }
   }
 
-  start(app: Express, receive: (text: string) => Promise<Result<ChannelReceiveResult>>): void {
+  start(app: Express, receive: (text: string, source: string) => Promise<Result<ChannelReceiveResult>>): void {
     this.handleReceive = receive
     for (const channel of this.channels.values()) {
       channel.start({
@@ -62,27 +63,23 @@ export class ChannelManager {
     if (!this.handleReceive) {
       return Result.fail('channel manager not started')
     }
-    if (text.trim() === '/$ clear') {
-      const result = await this.handleReceive(text)
-      if (result.data?.action === 'clear') {
-        this.messages.length = 0
-        await this.broadcast({
-          role: 'system',
-          text: 'clear',
-          createdAt: Date.now(),
-          source
-        })
-      }
-      return result
+    return this.handleReceive(text, source)
+  }
+
+  async displayUser(text: string, source = 'unknown'): Promise<Result<null>> {
+    if (text.trim().length === 0) {
+      return Result.fail('text is required')
     }
-    process.stdout.write(`user message received source=${source} text=${text}\n`)
-    await this.display({
+    Logger.info('user message received', {
+      source,
+      text
+    })
+    return this.display({
       role: 'user',
       text,
       createdAt: Date.now(),
       source
     })
-    return this.handleReceive(text)
   }
 
   async send(text: string): Promise<Result<null>> {
@@ -98,6 +95,28 @@ export class ChannelManager {
 
   async status(_text: string): Promise<Result<null>> {
     return Result.success(null)
+  }
+
+  async sendSystem(text: string, source = 'unknown'): Promise<Result<null>> {
+    if (text.trim().length === 0) {
+      return Result.fail('text is required')
+    }
+    return this.display({
+      role: 'system',
+      text,
+      createdAt: Date.now(),
+      source
+    })
+  }
+
+  async clear(source = 'unknown'): Promise<Result<null>> {
+    this.messages.length = 0
+    return this.broadcast({
+      role: 'system',
+      text: 'clear',
+      createdAt: Date.now(),
+      source
+    })
   }
 
   async stop(): Promise<Result<null>> {
@@ -149,7 +168,9 @@ export class ChannelManager {
       return Result.fail(failures.join('\n'))
     }
     if (failures.length > 0) {
-      process.stderr.write(`channel send partially failed: ${failures.join('\n')}\n`)
+      Logger.warn('channel send partially failed', {
+        failures
+      })
     }
     return Result.success(null)
   }

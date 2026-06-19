@@ -1,7 +1,7 @@
 {
   "name": "codexio",
   "private": true,
-  "version": "0.2.4",
+  "version": "0.3.0",
   "type": "module",
   "bin": {
     "codexio": "dist/index.js"
@@ -12,10 +12,13 @@
     "build": "tsc -p tsconfig.json",
     "bundle": "tsup src/index.ts --format esm --platform node --target node22 --out-dir bundle --no-splitting --sourcemap --clean",
     "dev": "tsx src/index.ts dev",
+    "init": "tsx src/index.ts init",
     "login": "tsx src/index.ts login",
-    "test": "vitest run src",
+    "start": "tsx src/index.ts start",
+    "stop": "tsx src/index.ts stop",
+    "restart": "tsx src/index.ts restart",
+    "test": "vitest run test/app.test.ts test/core.test.ts test/UpdateChecker.test.ts",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "start": "node dist/index.js",
     "package:windows": "powershell -ExecutionPolicy Bypass -File scripts/build_windows_zip.ps1",
     "deploy": "powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1"
   },

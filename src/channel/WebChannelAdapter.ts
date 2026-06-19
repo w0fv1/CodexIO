@@ -1,10 +1,11 @@
 import { Server as HttpServer } from 'node:http'
 import { WebSocket, WebSocketServer } from 'ws'
 import { z } from 'zod'
-import { ChannelAdapter, ChannelMessage, ChannelStartInput } from './ChannelAdapter.js'
-import { renderMarkdownHtml, shouldRenderMarkdown } from './Markdown.js'
+import { Channel, ChannelMessage, ChannelStartInput } from './Channel.js'
+import { renderMarkdownHtml, shouldRenderMarkdown } from '../component/Markdown.js'
 import { webPageHtml } from './WebPage.js'
-import { Result } from '../Result.js'
+import { Result } from '../value/Result.js'
+import { Logger } from '../component/Logger.js'
 
 const WebSocketInputSchema = z.union([
   z.string(),
@@ -20,7 +21,7 @@ type WebChannelMessage = {
   html?: string
 }
 
-export class WebChannelAdapter implements ChannelAdapter {
+export class WebChannelAdapter implements Channel {
   readonly type = 'web'
   private readonly sockets = new Set<WebSocket>()
   private readonly server = new WebSocketServer({
@@ -32,11 +33,15 @@ export class WebChannelAdapter implements ChannelAdapter {
 
   start(input: ChannelStartInput): void {
     this.input = input
+    Logger.info('web channel ready')
     input.app.get('/', (_request, response) => {
       response.type('html').send(webPageHtml)
     })
     this.server.on('connection', (socket) => {
       this.sockets.add(socket)
+      Logger.info('web socket connected', {
+        count: this.sockets.size
+      })
       socket.send(JSON.stringify({
         type: 'ready'
       }))
@@ -58,6 +63,7 @@ export class WebChannelAdapter implements ChannelAdapter {
         }
         const parsed = WebSocketInputSchema.safeParse(body)
         if (!parsed.success) {
+          Logger.warn('web socket input invalid')
           socket.send(JSON.stringify({
             type: 'error',
             message: 'text is required'
@@ -65,6 +71,7 @@ export class WebChannelAdapter implements ChannelAdapter {
           return
         }
         if (!this.input) {
+          Logger.warn('web channel input missing')
           socket.send(JSON.stringify({
             type: 'error',
             message: 'web channel not started'
@@ -72,8 +79,14 @@ export class WebChannelAdapter implements ChannelAdapter {
           return
         }
         const text = typeof parsed.data === 'string' ? parsed.data : parsed.data.text
+        Logger.info('web message received', {
+          length: text.length
+        })
         const result = await this.input.receive(text)
         if (result.isFailed) {
+          Logger.warn('web message receive failed', {
+            message: result.message
+          })
           socket.send(JSON.stringify({
             type: 'error',
             message: result.message
@@ -82,6 +95,9 @@ export class WebChannelAdapter implements ChannelAdapter {
       })
       socket.on('close', () => {
         this.sockets.delete(socket)
+        Logger.info('web socket closed', {
+          count: this.sockets.size
+        })
       })
     })
   }
@@ -95,6 +111,9 @@ export class WebChannelAdapter implements ChannelAdapter {
       try {
         const url = new URL(request.url ?? '/', 'http://localhost')
         if (url.pathname !== '/ws') {
+          Logger.warn('web socket upgrade rejected', {
+            path: url.pathname
+          })
           socket.destroy()
           return
         }
@@ -102,6 +121,7 @@ export class WebChannelAdapter implements ChannelAdapter {
           this.server.emit('connection', webSocket, request)
         })
       } catch (error) {
+        Logger.error('web socket upgrade failed', error)
         socket.destroy(error instanceof Error ? error : undefined)
       }
     })
@@ -135,6 +155,9 @@ export class WebChannelAdapter implements ChannelAdapter {
   }
 
   async stop(): Promise<Result<null>> {
+    Logger.info('web channel stopping', {
+      sockets: this.sockets.size
+    })
     for (const socket of this.sockets) {
       socket.close()
     }

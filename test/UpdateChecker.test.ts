@@ -1,9 +1,9 @@
 import { rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { codexioRootPath } from './AppMetadata.js'
-import { ConfigSchema } from './ConfigService.js'
-import { checkCodexioUpdate } from './UpdateChecker.js'
+import { codexioRootPath } from '../src/AppMetadata.js'
+import { ConfigSchema } from '../src/ConfigService.js'
+import { checkCodexioUpdate } from '../src/component/UpdateChecker.js'
 
 const releasePath = join(codexioRootPath, '.codexio', 'release.json')
 
@@ -22,7 +22,7 @@ describe('update checker', () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       isf: false,
       data: {
-        version: '0.2.5',
+        version: '0.3.1',
         platform: 'windows-x64-pnpm',
         fileName: 'codexio-0.2.5-windows-x64-pnpm.zip',
         fileSizeBytes: 111580,
@@ -40,7 +40,7 @@ describe('update checker', () => {
     }))
 
     expect(fetchMock).toHaveBeenCalledWith(new URL('https://next.firco.cn/api/download/release/codexio/latest?platform=windows-x64-pnpm'))
-    expect(message).toContain('0.2.5')
+    expect(message).toContain('0.3.1')
     expect(message).toContain('https://next.firco.cn/manage/nfirco/release')
     expect(message).not.toContain('fileUrl')
   })

@@ -21,8 +21,7 @@ const AgentConfigSchema = z.object({
 
 const AgentsConfigSchema = z.object({
   codex: AgentConfigSchema.optional(),
-  claude: AgentConfigSchema.optional(),
-  echo: AgentConfigSchema.optional()
+  claude: AgentConfigSchema.optional()
 })
 
 const ChannelConfigSchema = z.object({
@@ -378,9 +377,6 @@ function migrateAgentsConfig(config: LegacyConfigDocument): ConfigReferenceObjec
     },
     claude: {
       enabled: config.defaultAgent === 'claude'
-    },
-    echo: {
-      enabled: config.defaultAgent === 'echo'
     }
   }
 }

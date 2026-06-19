@@ -1,31 +1,96 @@
 import { existsSync, readFileSync } from 'node:fs'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { codexConfigPath, codexHomePath, createAgentEnv } from './agent/AgentEnvironment.js'
-import { AgentManager } from './agent/AgentManager.js'
-import { CodexAppServer } from './agent/CodexAppServer.js'
-import { CodexAgent } from './agent/CodexAgent.js'
-import { EchoAgent } from './agent/EchoAgent.js'
-import { createEmailMessagePayload, createEmailSender, isAllowedEmailSender } from './channel/EmailChannelAdapter.js'
-import { createFeishuMessagePayload } from './channel/FeishuChannelAdapter.js'
-import { renderMarkdownHtml } from './channel/Markdown.js'
-import { ConfigSchema, ConfigService, normalizeWorkspacePath, validateCodexioConfig } from './ConfigService.js'
-import { Result } from './Result.js'
+import { codexConfigPath, codexHomePath, createAgentEnv } from '../src/agent/AgentEnvironment.js'
+import { AgentManager } from '../src/agent/AgentManager.js'
+import { CodexAppServer } from '../src/agent/CodexAppServer.js'
+import { CodexAgent } from '../src/agent/CodexAgent.js'
+import { CodexSessionStore } from '../src/agent/CodexSessionStore.js'
+import { parseCommandInput } from '../src/controller/CommandExecutor.js'
+import { createEmailMessagePayload, createEmailSender, isAllowedEmailSender } from '../src/channel/EmailChannelAdapter.js'
+import { createFeishuMessagePayload } from '../src/channel/FeishuChannelAdapter.js'
+import { Logger } from '../src/component/Logger.js'
+import { renderMarkdownHtml } from '../src/component/Markdown.js'
+import { ConfigSchema, ConfigService, normalizeWorkspacePath, validateCodexioConfig } from '../src/ConfigService.js'
+import { Result } from '../src/value/Result.js'
+import { TestAgent } from './TestAgent.js'
 
 describe('core', () => {
-  it('echo agent sends received text', async () => {
+  it('writes daily persistent log file', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-log-'))
+    Logger.configure({
+      logDir: dir,
+      consoleEnabled: false
+    })
+    try {
+      Logger.info('server started', {
+        port: 8787
+      })
+      Logger.error('server failed', new Error('boom'))
+      await Logger.flush()
+      const files = await readdir(dir)
+      const file = files.find((name) => /^\d{4}-\d{2}-\d{2}\.log$/.test(name))
+      expect(file).toBeDefined()
+      const text = await readFile(join(dir, file ?? ''), 'utf8')
+      const lines = text.trim().split('\n').map((line) => JSON.parse(line) as {
+        level: string
+        message: string
+        data?: unknown
+        error?: {
+          message?: string
+        }
+      })
+      expect(lines[0]).toMatchObject({
+        level: 'info',
+        message: 'server started',
+        data: {
+          port: 8787
+        }
+      })
+      expect(lines[1]).toMatchObject({
+        level: 'error',
+        message: 'server failed',
+        error: {
+          message: 'boom'
+        }
+      })
+    } finally {
+      Logger.reset()
+    }
+  })
+
+  it('cleans log files older than retention days', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-log-'))
+    Logger.configure({
+      logDir: dir,
+      consoleEnabled: false
+    })
+    try {
+      await writeFile(join(dir, '2000-01-01.log'), 'old\n', 'utf8')
+      await writeFile(join(dir, '2999-01-01.log'), 'new\n', 'utf8')
+      await writeFile(join(dir, 'keep.txt'), 'keep\n', 'utf8')
+      const result = await Logger.cleanup(30)
+      expect(result.deleted).toBe(1)
+      const files = await readdir(dir)
+      expect(files).not.toContain('2000-01-01.log')
+      expect(files).toContain('2999-01-01.log')
+      expect(files).toContain('keep.txt')
+    } finally {
+      Logger.reset()
+    }
+  })
+
+  it('test agent sends received text', async () => {
     const outbound: string[] = []
-    const agent = new EchoAgent({
-      send: async (text) => {
-        outbound.push(text)
-      }
+    const agent = new TestAgent(async (text) => {
+      outbound.push(text)
     })
     await agent.start(ConfigSchema.parse({}))
     await agent.receive('hello')
     expect(outbound).toEqual([
-      'echo: hello'
+      'test: hello'
     ])
   })
 
@@ -36,15 +101,14 @@ describe('core', () => {
           enabled: false
         },
         claude: {
-          enabled: false
-        },
-        echo: {
           enabled: true
         }
       }
     }), 'http://127.0.0.1:8787', {
       send: async () => Result.success(null),
       status: async () => Result.success(null)
+    }, {
+      agentFactory: () => new TestAgent(async () => {})
     })
     expect(manager.status().status).toBe('idle')
     await expect(manager.login()).resolves.toBeUndefined()
@@ -58,9 +122,6 @@ describe('core', () => {
           enabled: false
         },
         claude: {
-          enabled: false
-        },
-        echo: {
           enabled: true
         }
       }
@@ -70,12 +131,16 @@ describe('core', () => {
         return Result.success(null)
       },
       status: async () => Result.success(null)
+    }, {
+      agentFactory: () => new TestAgent(async (text) => {
+        outbound.push(text)
+      })
     })
-    const result = await manager.receive('hello')
+    const result = await manager.receiveMessage('hello')
     expect(result.isFailed).toBe(false)
     expect(outbound).toEqual([
       expect.any(String),
-      'echo: hello'
+      'test: hello'
     ])
   })
 
@@ -87,16 +152,13 @@ describe('core', () => {
           enabled: false
         },
         claude: {
-          enabled: false
-        },
-        echo: {
           enabled: true
         }
       }
     }), 'http://127.0.0.1:8787', {
       send: async (text) => {
         outbound.push(text)
-        if (!text.startsWith('echo:')) {
+        if (!text.startsWith('test:')) {
           await new Promise((resolve) => {
             setTimeout(resolve, 10)
           })
@@ -104,18 +166,22 @@ describe('core', () => {
         return Result.success(null)
       },
       status: async () => Result.success(null)
+    }, {
+      agentFactory: () => new TestAgent(async (text) => {
+        outbound.push(text)
+      })
     })
     const [first, second] = await Promise.all([
-      manager.receive('first'),
-      manager.receive('second')
+      manager.receiveMessage('first'),
+      manager.receiveMessage('second')
     ])
     expect(first.isFailed).toBe(false)
     expect(second.isFailed).toBe(false)
     expect(outbound).toEqual([
       expect.any(String),
-      'echo: first',
+      'test: first',
       expect.any(String),
-      'echo: second'
+      'test: second'
     ])
   })
 
@@ -146,6 +212,33 @@ describe('core', () => {
     expect(codexConfig).toContain('"NO_PROXY" = "localhost,127.0.0.1,::1"')
   })
 
+  it('parses chat commands with dollar and yuan prefixes', () => {
+    expect(parseCommandInput('$ clear')).toEqual({
+      type: 'command',
+      name: 'clear',
+      args: []
+    })
+    expect(parseCommandInput('￥clear')).toEqual({
+      type: 'command',
+      name: 'clear',
+      args: []
+    })
+    expect(parseCommandInput('$ restart')).toEqual({
+      type: 'command',
+      name: 'restart',
+      args: []
+    })
+    expect(parseCommandInput('￥restart')).toEqual({
+      type: 'command',
+      name: 'restart',
+      args: []
+    })
+    expect(parseCommandInput('hello')).toEqual({
+      type: 'message',
+      text: 'hello'
+    })
+  })
+
   it('codex agent injects codexio runtime instruction', async () => {
     const requests: Array<{
       method: string
@@ -160,6 +253,7 @@ describe('core', () => {
       }),
       toolBaseUrl: 'http://127.0.0.1:8787',
       send: async () => {},
+      sessionStore: await createTempSessionStore(),
       appServer: {
         async start(): Promise<void> {},
         async request(method: string, params: unknown): Promise<unknown> {
@@ -185,6 +279,7 @@ describe('core', () => {
     await agent.start(ConfigSchema.parse({}))
     const threadStart = requests.find((request) => request.method === 'thread/start')
     expect(threadStart?.params).toMatchObject({
+      ephemeral: false,
       developerInstructions: expect.stringContaining('http://127.0.0.1:8787/api/message')
     })
     const developerInstructions = (threadStart?.params as Record<string, unknown>).developerInstructions
@@ -193,6 +288,160 @@ describe('core', () => {
     expect(developerInstructions).toContain('application/json; charset=utf-8')
     expect(developerInstructions).not.toContain('${toolBaseUrl}')
     expect(developerInstructions).not.toContain('${token}')
+  })
+
+  it('codex agent saves a new persistent thread when no session exists', async () => {
+    const { store, path } = await createTempSessionStoreWithPath()
+    const requests: Array<{
+      method: string
+      params: unknown
+    }> = []
+    const agent = new CodexAgent({
+      workspacePath: '.',
+      config: ConfigSchema.parse({}),
+      toolBaseUrl: 'http://127.0.0.1:8787',
+      send: async () => {},
+      sessionStore: store,
+      appServer: createCodexAppServerMock(requests)
+    })
+
+    await agent.start(ConfigSchema.parse({}))
+
+    expect(requests.map((request) => request.method)).toEqual([
+      'account/read',
+      'thread/start'
+    ])
+    expect(requests[1].params).toMatchObject({
+      ephemeral: false
+    })
+    expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({
+      agent: 'codex',
+      threadId: 'thread-1',
+      updatedAt: expect.any(String)
+    })
+  })
+
+  it('codex agent resumes an existing persistent thread', async () => {
+    const { store } = await createTempSessionStoreWithPath()
+    await store.write('thread-existing')
+    const requests: Array<{
+      method: string
+      params: unknown
+    }> = []
+    const agent = new CodexAgent({
+      workspacePath: '.',
+      config: ConfigSchema.parse({}),
+      toolBaseUrl: 'http://127.0.0.1:8787',
+      send: async () => {},
+      sessionStore: store,
+      appServer: createCodexAppServerMock(requests)
+    })
+
+    await agent.start(ConfigSchema.parse({}))
+
+    expect(requests.map((request) => request.method)).toEqual([
+      'account/read',
+      'thread/resume'
+    ])
+    expect(requests[1].params).toMatchObject({
+      threadId: 'thread-existing',
+      approvalPolicy: 'never',
+      sandbox: 'danger-full-access'
+    })
+  })
+
+  it('codex agent clears an invalid session and creates a new thread', async () => {
+    const { store } = await createTempSessionStoreWithPath()
+    await store.write('thread-stale')
+    const requests: Array<{
+      method: string
+      params: unknown
+    }> = []
+    const agent = new CodexAgent({
+      workspacePath: '.',
+      config: ConfigSchema.parse({}),
+      toolBaseUrl: 'http://127.0.0.1:8787',
+      send: async () => {},
+      sessionStore: store,
+      appServer: createCodexAppServerMock(requests, {
+        failResume: true
+      })
+    })
+
+    await agent.start(ConfigSchema.parse({}))
+
+    expect(requests.map((request) => request.method)).toEqual([
+      'account/read',
+      'thread/resume',
+      'thread/start'
+    ])
+    await expect(store.read()).resolves.toMatchObject({
+      threadId: 'thread-1'
+    })
+  })
+
+  it('codex agent restart resumes the same persisted thread', async () => {
+    const { store } = await createTempSessionStoreWithPath()
+    const requests: Array<{
+      method: string
+      params: unknown
+    }> = []
+    const appServer = createCodexAppServerMock(requests)
+    const agent = new CodexAgent({
+      workspacePath: '.',
+      config: ConfigSchema.parse({}),
+      toolBaseUrl: 'http://127.0.0.1:8787',
+      send: async () => {},
+      sessionStore: store,
+      appServer
+    })
+
+    await agent.start(ConfigSchema.parse({}))
+    await agent.receive('hello')
+    await agent.restart()
+
+    expect(requests.map((request) => request.method)).toEqual([
+      'account/read',
+      'thread/start',
+      'turn/start',
+      'turn/interrupt',
+      'account/read',
+      'thread/resume'
+    ])
+    expect(requests.at(-1)?.params).toMatchObject({
+      threadId: 'thread-1'
+    })
+    await expect(store.read()).resolves.toMatchObject({
+      threadId: 'thread-1'
+    })
+  })
+
+  it('codex agent clear overwrites the persisted thread with a new thread', async () => {
+    const { store } = await createTempSessionStoreWithPath()
+    const requests: Array<{
+      method: string
+      params: unknown
+    }> = []
+    const agent = new CodexAgent({
+      workspacePath: '.',
+      config: ConfigSchema.parse({}),
+      toolBaseUrl: 'http://127.0.0.1:8787',
+      send: async () => {},
+      sessionStore: store,
+      appServer: createCodexAppServerMock(requests)
+    })
+
+    await agent.start(ConfigSchema.parse({}))
+    await agent.clear()
+
+    expect(requests.map((request) => request.method)).toEqual([
+      'account/read',
+      'thread/start',
+      'thread/start'
+    ])
+    await expect(store.read()).resolves.toMatchObject({
+      threadId: 'thread-2'
+    })
   })
 
   it('codex agent steers the active app-server turn', async () => {
@@ -243,6 +492,7 @@ describe('core', () => {
       config: ConfigSchema.parse({}),
       toolBaseUrl: 'http://127.0.0.1:8787',
       send: async () => {},
+      sessionStore: await createTempSessionStore(),
       appServer
     })
     await agent.start(ConfigSchema.parse({}))
@@ -259,7 +509,8 @@ describe('core', () => {
     ])
     expect(requests[1].params).toMatchObject({
       approvalPolicy: 'never',
-      sandbox: 'danger-full-access'
+      sandbox: 'danger-full-access',
+      ephemeral: false
     })
     expect(requests[3].params).toMatchObject({
       threadId: 'thread-1',
@@ -314,6 +565,7 @@ describe('core', () => {
       send: async (text) => {
         outbound.push(text)
       },
+      sessionStore: await createTempSessionStore(),
       appServer
     })
     const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
@@ -412,7 +664,7 @@ describe('core', () => {
       'proxy:',
       '  enabled: true',
       '  http: http://proxy.local:8080',
-      'defaultAgent: echo',
+      'defaultAgent: claude',
       'workspaces:',
       '  default:',
       '    path: C:\\\\default',
@@ -422,9 +674,8 @@ describe('core', () => {
       '  defaultWorkspace: product'
     ].join('\n'), 'utf8')
     const config = await new ConfigService(path).load()
-    expect(config.agents.echo?.enabled).toBe(true)
     expect(config.agents.codex?.enabled).toBe(false)
-    expect(config.agents.claude?.enabled).toBe(false)
+    expect(config.agents.claude?.enabled).toBe(true)
     expect(config.workspace.path).toBe('C:\\\\product')
     expect(config.proxy).toEqual({
       enabled: true,
@@ -460,7 +711,7 @@ describe('core', () => {
         codex: {
           enabled: false
         },
-        echo: {
+        claude: {
           enabled: true
         }
       },
@@ -696,7 +947,77 @@ describe('core', () => {
       '<script>alert(1)</script>'
     ].join('\n'))
     expect(html).toContain('<strong>bold</strong>')
-    expect(html).toContain('<code>const value = 1')
+    expect(html).toContain('const value = 1')
     expect(html).not.toContain('<script>')
   })
 })
+
+async function createTempSessionStore(): Promise<CodexSessionStore> {
+  return (await createTempSessionStoreWithPath()).store
+}
+
+async function createTempSessionStoreWithPath(): Promise<{
+  store: CodexSessionStore
+  path: string
+}> {
+  const dir = await mkdtemp(join(tmpdir(), 'codexio-session-'))
+  const path = join(dir, 'session.json')
+  return {
+    store: new CodexSessionStore(path),
+    path
+  }
+}
+
+function createCodexAppServerMock(
+  requests: Array<{
+    method: string
+    params: unknown
+  }>,
+  options: {
+    failResume?: boolean
+  } = {}
+) {
+  let threadCount = 0
+  return {
+    async start(): Promise<void> {},
+    async request(method: string, params: unknown): Promise<unknown> {
+      requests.push({
+        method,
+        params
+      })
+      if (method === 'account/read') {
+        return {
+          account: {}
+        }
+      }
+      if (method === 'thread/resume') {
+        if (options.failResume) {
+          throw new Error('resume failed')
+        }
+        return {
+          thread: {
+            id: (params as Record<string, string>).threadId
+          }
+        }
+      }
+      if (method === 'thread/start') {
+        threadCount += 1
+        return {
+          thread: {
+            id: `thread-${threadCount}`
+          }
+        }
+      }
+      if (method === 'turn/start') {
+        return {
+          turn: {
+            id: 'turn-1'
+          }
+        }
+      }
+      return {}
+    },
+    async waitForNotification(): Promise<void> {},
+    async stop(): Promise<void> {}
+  }
+}

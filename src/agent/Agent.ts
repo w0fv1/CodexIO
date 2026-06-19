@@ -5,6 +5,7 @@ export interface Agent {
   login(): Promise<void>
   start(config: CodexioConfig): Promise<void>
   receive(text: string): Promise<void>
+  restart(): Promise<void>
   clear(): Promise<void>
   stop(): Promise<void>
 }

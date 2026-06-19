@@ -1,5 +1,5 @@
-import { CodexioConfig } from './ConfigService.js'
-import { readCodexioReleaseMetadata, readCodexioVersion } from './AppMetadata.js'
+import { CodexioConfig } from '../ConfigService.js'
+import { readCodexioReleaseMetadata, readCodexioVersion } from '../AppMetadata.js'
 
 type LatestReleaseResponse = {
   isf?: unknown

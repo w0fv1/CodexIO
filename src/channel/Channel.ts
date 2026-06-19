@@ -1,8 +1,8 @@
 import { Express } from 'express'
-import { Result } from '../Result.js'
+import { Result } from '../value/Result.js'
 
 export type ChannelReceiveResult = {
-  action?: 'clear'
+  action?: 'clear' | 'restart'
 }
 
 export type ChannelMessage = {
@@ -18,7 +18,7 @@ export type ChannelStartInput = {
   receive: (text: string) => Promise<Result<ChannelReceiveResult>>
 }
 
-export interface ChannelAdapter {
+export interface Channel {
   type: string
   start(input: ChannelStartInput): void
   send(message: ChannelMessage): Promise<Result<null>>

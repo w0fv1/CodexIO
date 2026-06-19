@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { Server as HttpServer } from 'node:http'
 import { resolve } from 'node:path'
-import { argv, stdout as output, stderr as errorOutput } from 'node:process'
+import { argv, pid, stdout as output } from 'node:process'
 import { pathToFileURL } from 'node:url'
 import express from 'express'
 import cors from 'cors'
@@ -9,10 +9,22 @@ import { Command } from 'commander'
 import { z } from 'zod'
 import { ChannelManager } from './channel/ChannelManager.js'
 import { AgentManager } from './agent/AgentManager.js'
-import { CodexioConfig, ConfigService, validateCodexioConfig } from './ConfigService.js'
-import { Result } from './Result.js'
+import { CodexioConfig, ConfigSchema, ConfigService, validateCodexioConfig } from './ConfigService.js'
+import { Result } from './value/Result.js'
 import { readCodexioVersion } from './AppMetadata.js'
-import { checkCodexioUpdate } from './UpdateChecker.js'
+import { checkCodexioUpdate } from './component/UpdateChecker.js'
+import { CommandExecutor } from './controller/CommandExecutor.js'
+import { AgentFactory } from './agent/AgentManager.js'
+import { Logger } from './component/Logger.js'
+import { runSupervisor } from './component/Supervisor.js'
+import {
+  removeRuntimeServerState,
+  resolveAvailableServerPort,
+  resolveRestartTargets,
+  restartServer,
+  stopServer,
+  writeRuntimeServerState
+} from './component/ServerLifecycle.js'
 
 const AgentMessageBodySchema = z.object({
   text: z.string().refine((value) => value.trim().length > 0)
@@ -26,7 +38,11 @@ export type CodexioServer = {
   stop: () => Promise<Result<null>>
 }
 
-export function createCodexioApp(config: CodexioConfig): CodexioServer {
+export type CodexioAppOptions = {
+  agentFactory?: AgentFactory
+}
+
+export function createCodexioApp(config: CodexioConfig, options: CodexioAppOptions = {}): CodexioServer {
   validateCodexioConfig(config)
   const app = express()
   app.use(cors())
@@ -39,20 +55,29 @@ export function createCodexioApp(config: CodexioConfig): CodexioServer {
   const agentManager = new AgentManager(config, toolBaseUrl, {
     send: async (text) => channelManager.send(text),
     status: async (text) => channelManager.status(text)
+  }, {
+    agentFactory: options.agentFactory
   })
+  const commandExecutor = new CommandExecutor(channelManager, agentManager)
+  let activeListener: HttpServer | undefined
 
   app.post('/api/message', async (request, response) => {
     try {
       const authorization = request.header('authorization')
       if (authorization !== `Bearer ${config.server.token}`) {
+        Logger.warn('api message unauthorized')
         response.status(401).json(Result.fail('unauthorized', '401'))
         return
       }
       const body = AgentMessageBodySchema.safeParse(request.body)
       if (!body.success) {
+        Logger.warn('api message invalid body')
         response.json(Result.fail('text is required'))
         return
       }
+      Logger.info('api message received', {
+        length: body.data.text.length
+      })
       const sent = await channelManager.send(body.data.text)
       if (sent.isFailed) {
         response.json(sent)
@@ -62,15 +87,67 @@ export function createCodexioApp(config: CodexioConfig): CodexioServer {
         sent: true
       }))
     } catch (error) {
+      Logger.error('api message failed', error)
+      response.json(Result.fromError(error))
+    }
+  })
+
+  app.post('/api/agent/restart', async (request, response) => {
+    try {
+      const authorization = request.header('authorization')
+      if (authorization !== `Bearer ${config.server.token}`) {
+        Logger.warn('api agent restart unauthorized')
+        response.status(401).json(Result.fail('unauthorized', '401'))
+        return
+      }
+      Logger.info('api agent restart requested')
+      response.json(await agentManager.restart())
+    } catch (error) {
+      Logger.error('api agent restart failed', error)
+      response.json(Result.fromError(error))
+    }
+  })
+
+  app.post('/api/server/stop', async (request, response) => {
+    try {
+      const authorization = request.header('authorization')
+      if (authorization !== `Bearer ${config.server.token}`) {
+        Logger.warn('api server stop unauthorized')
+        response.status(401).json(Result.fail('unauthorized', '401'))
+        return
+      }
+      Logger.info('api server stop requested', {
+        pid
+      })
+      response.json(Result.success({
+        stopping: true,
+        pid
+      }))
+      setImmediate(() => {
+        activeListener?.close((error) => {
+          if (error) {
+            Logger.error('server stop failed', error)
+            process.exitCode = 1
+          }
+        })
+      })
+    } catch (error) {
+      Logger.error('api server stop failed', error)
       response.json(Result.fromError(error))
     }
   })
 
   app.get('/api/status', (_request, response) => {
-    response.json(Result.success(agentManager.status()))
+    response.json(Result.success({
+      ...agentManager.status(),
+      pid
+    }))
   })
 
-  channelManager.start(app, async (received) => agentManager.receive(received))
+  channelManager.start(app, async (text, source) => commandExecutor.receive({
+    text,
+    source
+  }))
 
   return {
     app,
@@ -85,8 +162,10 @@ export function createCodexioApp(config: CodexioConfig): CodexioServer {
       } else {
         listener = app.listen()
       }
+      activeListener = listener
       channelManager.attach(listener)
       listener.once('listening', () => {
+        void channelManager.send('Codexio server started.')
         void checkCodexioUpdate(config)
           .then(async (message) => {
             if (message) {
@@ -94,14 +173,14 @@ export function createCodexioApp(config: CodexioConfig): CodexioServer {
             }
           })
           .catch((error) => {
-            const message = error instanceof Error ? error.message : String(error)
-            errorOutput.write(`${message}\n`)
+            Logger.error('update check failed', error)
           })
         void agentManager.start()
       })
       const close = listener.close.bind(listener)
       listener.close = ((callback?: (error?: Error) => void) => {
         void (async () => {
+          await channelManager.send('Codexio server stopping.')
           const agentStopped = await agentManager.stop()
           const channelStopped = await channelManager.stop()
           close((error?: Error) => {
@@ -144,6 +223,17 @@ type ConfigOption = {
   config?: string
 }
 
+type ServeOptions = {
+  autoPort?: boolean
+}
+
+type ServeCommandOption = ConfigOption & ServeOptions
+
+type ListenError = NodeJS.ErrnoException & {
+  address?: unknown
+  port?: unknown
+}
+
 function getCommandOptions<T extends ConfigOption>(value: T | Command): T {
   const maybeCommand = value as {
     opts?: unknown
@@ -163,7 +253,7 @@ program
   .description('Codexio text relay')
   .version(readCodexioVersion())
   .action(async () => {
-    await serve()
+    await runSupervisor()
   })
 
 program
@@ -179,19 +269,48 @@ program
   })
 
 program
-  .command('serve')
+  .command('serve', {
+    hidden: true
+  })
+  .option('--config <path>', 'config file path')
+  .option('--auto-port', 'use next available server port')
+  .action(async (command: Command | ServeCommandOption) => {
+    const options = getCommandOptions<ServeCommandOption>(command)
+    await serve(undefined, options.config, {
+      autoPort: Boolean(options.autoPort)
+    })
+  })
+
+program
+  .command('start')
   .option('--config <path>', 'config file path')
   .action(async (command: Command | ConfigOption) => {
-    await serve(undefined, getConfigPath(command))
+    await runSupervisor({
+      configPath: getConfigPath(command)
+    })
+  })
+
+program
+  .command('stop')
+  .option('--config <path>', 'config file path')
+  .action(async (command: Command | ConfigOption) => {
+    const stopped = await stopServer(getConfigPath(command))
+    if (stopped) {
+      output.write('codexio server stopped\n')
+      return
+    }
+    output.write('codexio server not running\n')
   })
 
 program
   .command('dev')
   .option('--config <path>', 'config file path')
   .action(async (command: Command | ConfigOption) => {
-    const service = new ConfigService(getConfigPath(command))
-    const config = await service.init(false)
-    await serve(config, service.path)
+    await runSupervisor({
+      configPath: getConfigPath(command),
+      initConfig: true,
+      autoPort: true
+    })
   })
 
 program
@@ -215,6 +334,14 @@ program
     await agentManager.login()
   })
 
+program
+  .command('restart')
+  .option('--config <path>', 'config file path')
+  .action(async (command: Command | ConfigOption) => {
+    const state = await restartServer(getConfigPath(command))
+    output.write(`codexio restart requested through supervisor ${state.host}:${state.port}\n`)
+  })
+
 if (argv[1] && import.meta.url === pathToFileURL(resolve(argv[1])).href) {
   void main()
 }
@@ -223,34 +350,93 @@ async function main(): Promise<void> {
   try {
     await program.parseAsync()
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    errorOutput.write(`${message}\n`)
+    Logger.error('codexio command failed', error)
     process.exitCode = 1
   }
 }
 
-async function serve(config?: CodexioConfig, configPath?: string): Promise<void> {
+async function serve(config?: CodexioConfig, configPath?: string, options: ServeOptions = {}): Promise<void> {
+  const cleanedLogs = await Logger.cleanup(30)
+  if (cleanedLogs.deleted > 0) {
+    Logger.info('old log files cleaned', cleanedLogs)
+  }
   const service = new ConfigService(configPath)
   const resolvedConfig = config ?? await service.load()
-  const server = createCodexioApp(resolvedConfig)
-  const listener = server.listen(resolvedConfig.server.port, resolvedConfig.server.host)
-  await new Promise<void>((resolveListening) => {
-    listener.once('listening', resolveListening)
+  const port = options.autoPort
+    ? await resolveAvailableServerPort(resolvedConfig.server.host, resolvedConfig.server.port)
+    : resolvedConfig.server.port
+  const serverConfig = ConfigSchema.parse({
+    ...resolvedConfig,
+    server: {
+      ...resolvedConfig.server,
+      port
+    }
   })
-  output.write(`codexio listening on http://${resolvedConfig.server.host}:${resolvedConfig.server.port}\n`)
+  const server = createCodexioApp(serverConfig)
+  const listener = server.listen(serverConfig.server.port, serverConfig.server.host)
+  try {
+    await waitForListening(listener)
+  } catch (error) {
+    await server.stop()
+    throw error
+  }
+  if (port !== resolvedConfig.server.port) {
+    Logger.warn('configured port is in use', {
+      configuredPort: resolvedConfig.server.port,
+      port
+    })
+  }
+  await writeRuntimeServerState(service.path, {
+    pid,
+    host: serverConfig.server.host,
+    port: serverConfig.server.port,
+    startedAt: new Date().toISOString()
+  })
+  Logger.info('codexio server listening', {
+    host: serverConfig.server.host,
+    port: serverConfig.server.port,
+    pid
+  })
+  output.write(`codexio listening on http://${serverConfig.server.host}:${serverConfig.server.port}\n`)
   let stopping = false
   const stop = () => {
     if (stopping) {
       return
     }
     stopping = true
+    Logger.info('codexio server stopping', {
+      pid
+    })
     listener.close((error) => {
-      if (error) {
-        errorOutput.write(`${error.message}\n`)
-        process.exitCode = 1
-      }
+      void removeRuntimeServerState(service.path)
+        .finally(() => {
+          if (error) {
+            Logger.error('server close failed', error)
+            process.exitCode = 1
+          }
+        })
     })
   }
   process.once('SIGINT', stop)
   process.once('SIGTERM', stop)
 }
+
+function waitForListening(listener: HttpServer): Promise<void> {
+  return new Promise((resolveListening, reject) => {
+    listener.once('listening', resolveListening)
+    listener.once('error', (error: NodeJS.ErrnoException) => {
+      if (error.code === 'EADDRINUSE') {
+        const listenError = error as ListenError
+        const detail = [
+          typeof listenError.address === 'string' ? listenError.address : undefined,
+          typeof listenError.port === 'number' ? String(listenError.port) : undefined
+        ].filter(Boolean).join(':')
+        reject(new Error(`server port is already in use${detail ? `: ${detail}` : ''}`))
+        return
+      }
+      reject(error)
+    })
+  })
+}
+
+export { resolveAvailableServerPort, resolveRestartTargets }

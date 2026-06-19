@@ -23,16 +23,23 @@ Codex 登录使用控制台设备码流程，只输出登录链接和验证码�
 正式运行：
 
 ```bash
-pnpm build
-pnpm start -- init
-pnpm start
+pnpm run init
+pnpm run start
+```
+
+停止或重启 Codexio host：
+
+```bash
+pnpm run stop
+pnpm run restart
 ```
 
 默认配置写入项目内 `.codexio/config.yaml`，也可以通过 `--config <path>` 指定配置文件。默认启用 `web` 通道，可启用 `feishu` 长连接通道、`feishuWebhook` 单向通道和 `email` 邮件通道。配置里的 `server.token` 是 agent 写入 `/api/message` 的内部 token，空值会在启动或初始化配置时自动生成并写回。
 默认 workspace 是项目内 `.codexio/workspace`。`workspace.path` 支持绝对路径、相对配置文件所在目录的路径，也支持 `~` 和 `~/Desktop` 这类用户目录路径。
-`codexio` 和 `codexio serve` 是同一个 host 启动入口。
+`pnpm run dev` 和 `pnpm run start` 会启动 Codexio supervisor，并在同一个终端里运行 Codexio host。日志会输出在当前终端，按 `Ctrl+C` 会停止 supervisor 和 host。
 `pnpm bundle` 生成未来 exe 使用的单文件 Node bundle，产物不入库。
-每次启动 codexio 后，Codex 的第一条消息都会创建新 session；同一进程内的后续消息会继续当前 session。`/$ clear` 会开启新对话。
+运行日志按天写入 `.codexio/log/YYYY-MM-DD.log`，本机日志目录不会进入发布包。
+Codex 当前对话 ID 保存在 `.codexio/session.json`；进程重启后会恢复该 thread。`pnpm run restart` 会请求 supervisor 重启 Codexio host，日志继续输出在启动 supervisor 的终端。`$ restart` 或 `￥ restart` 只重启 agent 子进程并保留当前对话，`$ clear` 或 `￥ clear` 会开启新对话。
 Codex 子进程的 stdout/stderr 会同步输出到启动 codexio 的终端。
 内置 agent 默认按完全访问模式运行：Codex 使用 `danger-full-access` 和 `never` approval，Claude 使用 `bypassPermissions`。
 
@@ -110,6 +117,10 @@ Authorization: Bearer <server.token>
 网页输入框支持清空命令，命令不会发送给 Codex：
 
 ```text
-/$ clear
-/$$ /$ clear
+$ clear
+$clear
+￥ clear
+￥clear
+$ restart
+￥restart
 ```

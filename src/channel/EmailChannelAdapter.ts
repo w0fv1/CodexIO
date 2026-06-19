@@ -1,8 +1,9 @@
 import { ImapFlow } from 'imapflow'
 import { simpleParser } from 'mailparser'
 import nodemailer, { Transporter } from 'nodemailer'
-import { ChannelAdapter, ChannelMessage, ChannelStartInput } from './ChannelAdapter.js'
-import { Result } from '../Result.js'
+import { Channel, ChannelMessage, ChannelStartInput } from './Channel.js'
+import { Result } from '../value/Result.js'
+import { Logger } from '../component/Logger.js'
 
 type EmailMessagePayload = {
   subject: string
@@ -89,7 +90,7 @@ export function createEmailMessagePayload(message: ChannelMessage): EmailMessage
   }
 }
 
-export class EmailChannelAdapter implements ChannelAdapter {
+export class EmailChannelAdapter implements Channel {
   readonly type = 'email'
   private input?: ChannelStartInput
   private imap?: ImapFlow
@@ -102,6 +103,11 @@ export class EmailChannelAdapter implements ChannelAdapter {
   start(input: ChannelStartInput): void {
     this.input = input
     this.assertConfig()
+    Logger.info('email channel starting', {
+      user: this.config?.user,
+      imapHost: this.config?.agent?.imap?.host,
+      smtpHost: this.config?.agent?.smtp?.host
+    })
     this.smtp = nodemailer.createTransport({
       host: this.config?.agent?.smtp?.host,
       port: this.config?.agent?.smtp?.port,
@@ -112,8 +118,7 @@ export class EmailChannelAdapter implements ChannelAdapter {
       }
     })
     void this.run().catch((error) => {
-      const result = Result.fromError(error)
-      process.stderr.write(`email channel failed: ${result.message}\n`)
+      Logger.error('email channel failed', error)
     })
   }
 
@@ -133,23 +138,36 @@ export class EmailChannelAdapter implements ChannelAdapter {
     }
     const payload = createEmailMessagePayload(message)
     try {
+      Logger.info('email send started', {
+        role: message.role,
+        source: message.source ?? null,
+        subject: payload.subject,
+        length: payload.text.length
+      })
       await this.smtp.sendMail({
         from: createEmailSender(this.config?.agent?.smtp?.from, this.config?.agent?.smtp?.user),
         to: recipient,
         subject: payload.subject,
         text: payload.text
       })
+      Logger.info('email send completed', {
+        role: message.role,
+        subject: payload.subject
+      })
       return Result.success(null)
     } catch (error) {
+      Logger.error('email send failed', error)
       return Result.fromError(error)
     }
   }
 
   async stop(): Promise<Result<null>> {
     this.stopped = true
+    Logger.info('email channel stopping')
     try {
       await this.imap?.logout()
     } catch (error) {
+      Logger.error('email channel stop failed', error)
       return Result.fromError(error)
     } finally {
       this.imap = undefined
@@ -173,8 +191,7 @@ export class EmailChannelAdapter implements ChannelAdapter {
         const imap = await this.ensureImap()
         await imap.idle()
       } catch (error) {
-        const result = Result.fromError(error)
-        process.stderr.write(`email channel failed: ${result.message}\n`)
+        Logger.error('email channel loop failed', error)
         this.imap = undefined
         await new Promise((resolve) => {
           setTimeout(resolve, (this.config?.pollSeconds ?? 30) * 1000)
@@ -204,6 +221,9 @@ export class EmailChannelAdapter implements ChannelAdapter {
         const parsed = await simpleParser(message.source)
         const senderList = parsed.from?.value.map((address) => address.address).filter((address): address is string => Boolean(address)) ?? []
         if (!isAllowedEmailSender(senderList, this.config?.user)) {
+          Logger.info('email message ignored', {
+            from: senderList
+          })
           await imap.messageFlagsAdd([message.uid], ['\\Seen'], {
             uid: true
           })
@@ -215,8 +235,16 @@ export class EmailChannelAdapter implements ChannelAdapter {
           parsed.text?.trim() ?? ''
         ].filter((item) => item.trim().length > 0).join('\n\n')
         if (text.trim().length > 0 && this.input) {
+          Logger.info('email message received', {
+            uid: message.uid,
+            length: text.length
+          })
           const result = await this.input.receive(text)
           if (result.isFailed) {
+            Logger.warn('email message receive failed', {
+              uid: message.uid,
+              message: result.message
+            })
             await this.send({
               role: 'system',
               text: result.message,
@@ -251,10 +279,14 @@ export class EmailChannelAdapter implements ChannelAdapter {
       logger: false
     })
     this.imap.on('error', (error) => {
-      process.stderr.write(`email imap failed: ${error.message}\n`)
+      Logger.error('email imap failed', error)
       this.imap = undefined
     })
     await this.imap.connect()
+    Logger.info('email imap connected', {
+      host: this.config?.agent?.imap?.host,
+      mailbox: this.config?.agent?.imap?.mailbox ?? 'INBOX'
+    })
     return this.imap
   }
 

@@ -1,7 +1,8 @@
 import * as Lark from '@larksuiteoapi/node-sdk'
 import { z } from 'zod'
-import { ChannelAdapter, ChannelMessage, ChannelStartInput } from './ChannelAdapter.js'
-import { Result } from '../Result.js'
+import { Channel, ChannelMessage, ChannelStartInput } from './Channel.js'
+import { Result } from '../value/Result.js'
+import { Logger } from '../component/Logger.js'
 
 const FeishuTextContentSchema = z.object({
   text: z.string()
@@ -51,7 +52,7 @@ export function createFeishuMessagePayload(message: ChannelMessage): FeishuMessa
   }
 }
 
-export class FeishuChannelAdapter implements ChannelAdapter {
+export class FeishuChannelAdapter implements Channel {
   readonly type = 'feishu'
   private input?: ChannelStartInput
   private client?: Lark.Client
@@ -65,6 +66,10 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     if (!this.config?.appId || !this.config.appSecret) {
       throw new Error('feishu appId and appSecret are required')
     }
+    Logger.info('feishu channel starting', {
+      chatId: this.config.chatId?.trim() ?? '',
+      wsEnabled: Boolean(this.config.ws?.trim())
+    })
     this.client = new Lark.Client({
       appId: this.config.appId,
       appSecret: this.config.appSecret
@@ -100,13 +105,20 @@ export class FeishuChannelAdapter implements ChannelAdapter {
           try {
             if (this.chatId.length === 0) {
               this.chatId = data.message.chat_id
-              process.stdout.write(`feishu chat connected: ${data.message.chat_id}\n`)
+              Logger.info('feishu chat connected', {
+                chatId: data.message.chat_id
+              })
             }
             if (data.message.chat_id !== this.chatId) {
-              process.stdout.write(`feishu chat ignored: ${data.message.chat_id}\n`)
+              Logger.info('feishu chat ignored', {
+                chatId: data.message.chat_id
+              })
               return
             }
             if (data.message.message_type !== 'text') {
+              Logger.warn('feishu message unsupported', {
+                type: data.message.message_type
+              })
               await this.send({
                 role: 'system',
                 text: '当前只支持文本消息',
@@ -117,6 +129,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
             }
             const content = FeishuTextContentSchema.safeParse(JSON.parse(data.message.content))
             if (!content.success) {
+              Logger.warn('feishu message parse failed')
               await this.send({
                 role: 'system',
                 text: '消息文本为空',
@@ -130,6 +143,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
               text = text.replaceAll(mention.key, '')
             }
             if (!this.input) {
+              Logger.warn('feishu channel input missing')
               await this.send({
                 role: 'system',
                 text: 'feishu channel not started',
@@ -138,8 +152,15 @@ export class FeishuChannelAdapter implements ChannelAdapter {
               })
               return
             }
+            Logger.info('feishu message received', {
+              chatId: data.message.chat_id,
+              length: text.length
+            })
             void this.input.receive(text).then(async (result) => {
               if (result.isFailed) {
+                Logger.warn('feishu message receive failed', {
+                  message: result.message
+                })
                 await this.send({
                   role: 'system',
                   text: result.message,
@@ -149,6 +170,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
               }
             }).catch(async (error) => {
               const result = Result.fromError(error)
+              Logger.error('feishu message receive crashed', error)
               await this.send({
                 role: 'system',
                 text: result.message,
@@ -158,6 +180,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
             })
           } catch (error) {
             const result = Result.fromError(error)
+            Logger.error('feishu event failed', error)
             await this.send({
               role: 'system',
               text: result.message,
@@ -168,8 +191,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
         }
       })
     }).catch((error) => {
-      const message = error instanceof Error ? error.message : String(error)
-      process.stderr.write(`feishu channel failed: ${message}\n`)
+      Logger.error('feishu channel failed', error)
     })
   }
 
@@ -188,6 +210,11 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     }
     try {
       const payload = createFeishuMessagePayload(message)
+      Logger.info('feishu send started', {
+        role: message.role,
+        source: message.source ?? null,
+        length: message.text.length
+      })
       await this.client.im.v1.message.create({
         params: {
           receive_id_type: 'chat_id'
@@ -198,13 +225,18 @@ export class FeishuChannelAdapter implements ChannelAdapter {
           content: payload.content
         }
       })
+      Logger.info('feishu send completed', {
+        role: message.role
+      })
     } catch (error) {
+      Logger.error('feishu send failed', error)
       return Result.fromError(error)
     }
     return Result.success(null)
   }
 
   async stop(): Promise<Result<null>> {
+    Logger.info('feishu channel stopping')
     this.wsClient?.close()
     this.wsClient = undefined
     this.client = undefined
