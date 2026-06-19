@@ -78,8 +78,7 @@ Write-Step "platforms: $($selectedPlatforms -join ', ')"
 
 Write-Step "build release packages locally"
 $buildScript = Join-Path $scriptRoot "build_windows_zip.ps1"
-$buildArgs = @("-ExecutionPolicy", "Bypass", "-File", $buildScript, "-Platforms") + $selectedPlatforms
-& powershell @buildArgs
+& powershell -ExecutionPolicy Bypass -File $buildScript -Platforms $selectedPlatforms
 if ($LASTEXITCODE -ne 0) {
     throw "codexio build failed with exit code $LASTEXITCODE"
 }
