@@ -55,6 +55,7 @@ export type AgentReceiveResult = {
 export class AgentManager {
   private agent?: Agent
   private startTask?: Promise<Result<null>>
+  private receiveQueue: Promise<void> = Promise.resolve()
   private state: AgentManagerState = {
     status: 'idle',
     agent: null,
@@ -117,6 +118,12 @@ export class AgentManager {
   }
 
   async receive(text: string): Promise<Result<AgentReceiveResult>> {
+    const task = this.receiveQueue.then(() => this.receiveNow(text), () => this.receiveNow(text))
+    this.receiveQueue = task.then(() => {}, () => {})
+    return task
+  }
+
+  private async receiveNow(text: string): Promise<Result<AgentReceiveResult>> {
     if (text.trim().length === 0) {
       return Result.fail('text is required')
     }

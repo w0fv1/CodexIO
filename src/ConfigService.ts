@@ -195,7 +195,11 @@ type ConfigDocument = z.infer<typeof ConfigDocumentSchema>
 type LegacyConfigDocument = z.infer<typeof LegacyConfigSchema>
 
 export class ConfigService {
-  constructor(private readonly configPath = defaultConfigPath) {}
+  private readonly configPath: string
+
+  constructor(configPath = defaultConfigPath) {
+    this.configPath = resolve(configPath)
+  }
 
   get path(): string {
     return this.configPath
@@ -207,7 +211,7 @@ export class ConfigService {
     const document = ConfigDocumentSchema.parse(parsed)
     const resolved = resolveReferences(migrateConfig(document))
     const config = ConfigSchema.parse(resolved)
-    config.workspace.path = normalizeWorkspacePath(config.workspace.path)
+    config.workspace.path = normalizeWorkspacePath(config.workspace.path, dirname(this.configPath))
     if (config.server.token.trim().length === 0) {
       config.server.token = createToken()
       await this.save(config)
@@ -304,7 +308,7 @@ export class ConfigService {
         }
       },
       workspace: {
-        path: normalizeWorkspacePath(workspacePath)
+        path: normalizeWorkspacePath(workspacePath, dirname(this.configPath))
       },
       update: {
         enabled: true,
@@ -449,7 +453,7 @@ function resolveReferencePath(root: ConfigReferenceValue, path: string): ConfigR
   return current
 }
 
-export function normalizeWorkspacePath(path: string): string {
+export function normalizeWorkspacePath(path: string, basePath = codexioRootPath): string {
   const trimmedPath = path.trim()
   if (trimmedPath === '~') {
     return homedir()
@@ -460,7 +464,7 @@ export function normalizeWorkspacePath(path: string): string {
   if (isAbsolute(trimmedPath)) {
     return trimmedPath
   }
-  return resolve(codexioRootPath, trimmedPath)
+  return resolve(basePath, trimmedPath)
 }
 
 export function validateCodexioConfig(config: CodexioConfig): void {

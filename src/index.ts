@@ -140,6 +140,24 @@ export function createCodexioApp(config: CodexioConfig): CodexioServer {
 
 const program = new Command()
 
+type ConfigOption = {
+  config?: string
+}
+
+function getCommandOptions<T extends ConfigOption>(value: T | Command): T {
+  const maybeCommand = value as {
+    opts?: unknown
+  }
+  if (typeof maybeCommand.opts === 'function') {
+    return (value as Command).opts<T>()
+  }
+  return value as T
+}
+
+function getConfigPath(value: Command | ConfigOption): string | undefined {
+  return getCommandOptions<ConfigOption>(value).config
+}
+
 program
   .name('codexio')
   .description('Codexio text relay')
@@ -150,9 +168,11 @@ program
 
 program
   .command('init')
+  .option('--config <path>', 'config file path')
   .option('--force', 'overwrite existing config')
-  .action(async (options: { force?: boolean }) => {
-    const service = new ConfigService()
+  .action(async (command: Command | (ConfigOption & { force?: boolean })) => {
+    const options = getCommandOptions<ConfigOption & { force?: boolean }>(command)
+    const service = new ConfigService(options.config)
     const config = await service.init(Boolean(options.force))
     output.write(`config: ${service.path}\n`)
     output.write(`server: ${config.server.host}:${config.server.port}\n`)
@@ -160,22 +180,25 @@ program
 
 program
   .command('serve')
-  .action(async () => {
-    await serve()
+  .option('--config <path>', 'config file path')
+  .action(async (command: Command | ConfigOption) => {
+    await serve(undefined, getConfigPath(command))
   })
 
 program
   .command('dev')
-  .action(async () => {
-    const service = new ConfigService()
+  .option('--config <path>', 'config file path')
+  .action(async (command: Command | ConfigOption) => {
+    const service = new ConfigService(getConfigPath(command))
     const config = await service.init(false)
-    await serve(config)
+    await serve(config, service.path)
   })
 
 program
   .command('login')
-  .action(async () => {
-    const service = new ConfigService()
+  .option('--config <path>', 'config file path')
+  .action(async (command: Command | ConfigOption) => {
+    const service = new ConfigService(getConfigPath(command))
     const config = await service.init(false)
     validateCodexioConfig(config)
     const toolBaseUrl = `http://${config.server.host}:${config.server.port}`
@@ -206,8 +229,8 @@ async function main(): Promise<void> {
   }
 }
 
-async function serve(config?: CodexioConfig): Promise<void> {
-  const service = new ConfigService()
+async function serve(config?: CodexioConfig, configPath?: string): Promise<void> {
+  const service = new ConfigService(configPath)
   const resolvedConfig = config ?? await service.load()
   const server = createCodexioApp(resolvedConfig)
   const listener = server.listen(resolvedConfig.server.port, resolvedConfig.server.host)

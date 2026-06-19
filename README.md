@@ -28,8 +28,8 @@ pnpm start -- init
 pnpm start
 ```
 
-默认配置写入项目内 `.codexio/config.yaml`，默认启用 `web` 通道，可启用 `feishu` 长连接通道、`feishuWebhook` 单向通道和 `email` 邮件通道。配置里的 `server.token` 是 agent 写入 `/api/message` 的内部 token，空值会在启动或初始化配置时自动生成并写回。
-默认 workspace 是项目内 `.codexio/workspace`。`workspace.path` 支持绝对路径、相对 codexio 项目根目录的路径，也支持 `~` 和 `~/Desktop` 这类用户目录路径。
+默认配置写入项目内 `.codexio/config.yaml`，也可以通过 `--config <path>` 指定配置文件。默认启用 `web` 通道，可启用 `feishu` 长连接通道、`feishuWebhook` 单向通道和 `email` 邮件通道。配置里的 `server.token` 是 agent 写入 `/api/message` 的内部 token，空值会在启动或初始化配置时自动生成并写回。
+默认 workspace 是项目内 `.codexio/workspace`。`workspace.path` 支持绝对路径、相对配置文件所在目录的路径，也支持 `~` 和 `~/Desktop` 这类用户目录路径。
 `codexio` 和 `codexio serve` 是同一个 host 启动入口。
 `pnpm bundle` 生成未来 exe 使用的单文件 Node bundle，产物不入库。
 每次启动 codexio 后，Codex 的第一条消息都会创建新 session；同一进程内的后续消息会继续当前 session。`/$ clear` 会开启新对话。

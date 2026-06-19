@@ -7,7 +7,8 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $scriptRoot = $PSScriptRoot
-$repoRoot = Split-Path -Path (Split-Path -Path $scriptRoot -Parent) -Parent
+$projectRoot = Split-Path -Path $scriptRoot -Parent
+$repoRoot = Split-Path -Path (Split-Path -Path $projectRoot -Parent) -Parent
 . (Join-Path $repoRoot "script\NfircoBackendApiCredential.ps1")
 $adminApiCredential = Read-NfircoBackendApiCredential -RepoRoot $repoRoot
 $adminApiUsername = [string]$adminApiCredential.Username
@@ -20,7 +21,7 @@ function Write-Step {
 }
 
 function Read-ProjectVersion {
-    $packageJsonPath = Join-Path $scriptRoot "package.json"
+    $packageJsonPath = Join-Path $projectRoot "package.json"
     $package = Get-Content -Raw -Path $packageJsonPath | ConvertFrom-Json
     $version = [string]$package.version
     if ($version -notmatch '^\d+\.\d+\.\d+$') {
@@ -63,7 +64,7 @@ function Get-ZipSha256 {
     }
 }
 
-Set-Location -Path $scriptRoot
+Set-Location -Path $projectRoot
 
 $version = Read-ProjectVersion
 Write-Step "version: $version"
@@ -76,7 +77,7 @@ if ($selectedPlatforms.Count -ne $Platforms.Count) {
 Write-Step "platforms: $($selectedPlatforms -join ', ')"
 
 Write-Step "build release packages locally"
-$buildScript = Join-Path $scriptRoot "scripts\build_windows_zip.ps1"
+$buildScript = Join-Path $scriptRoot "build_windows_zip.ps1"
 $buildArgs = @("-ExecutionPolicy", "Bypass", "-File", $buildScript, "-Platforms") + $selectedPlatforms
 & powershell @buildArgs
 if ($LASTEXITCODE -ne 0) {
@@ -90,11 +91,11 @@ $completeUri = "$baseUrl/apim/download/release/codexio/$version/complete"
 $packages = @(
     @{
         Platform = "windows-x64-standalone"
-        Path = Join-Path $scriptRoot "release\codexio-$version-windows-x64-standalone.zip"
+        Path = Join-Path $projectRoot "release\codexio-$version-windows-x64-standalone.zip"
     },
     @{
         Platform = "windows-x64-pnpm"
-        Path = Join-Path $scriptRoot "release\codexio-$version-windows-x64-pnpm.zip"
+        Path = Join-Path $projectRoot "release\codexio-$version-windows-x64-pnpm.zip"
     }
 )
 

@@ -140,16 +140,19 @@ pause
 
 function New-PnpmNodewFile {
     param(
-        [Parameter(Mandatory)] [string] $CmdPath,
-        [Parameter(Mandatory)] [string] $PsPath
+        [Parameter(Mandatory)] [string] $CmdPath
     )
-    $cmd = "@echo off`r`necho [codexio nodew] preparing Node.js runtime`r`npowershell -ExecutionPolicy Bypass -File ""%~dp0nodew.ps1"" %*`r`nexit /b %ERRORLEVEL%`r`n"
-    Write-Utf8File -Path $CmdPath -Text $cmd
     $text = @"
+@echo off
+echo [codexio nodew] preparing Node.js runtime
+set "CODEXIO_NODEW_SCRIPT=%~f0"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "`$marker = '# POWERSHELL'; `$scriptPath = `$env:CODEXIO_NODEW_SCRIPT; `$text = [System.IO.File]::ReadAllText(`$scriptPath); `$index = `$text.LastIndexOf(`$marker); if (`$index -lt 0) { throw 'nodew PowerShell marker not found' }; `$script = `$text.Substring(`$index + `$marker.Length); & ([scriptblock]::Create(`$script)) @args" -- %*
+exit /b %ERRORLEVEL%
+# POWERSHELL
 `$ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-`$Root = Split-Path -Parent `$MyInvocation.MyCommand.Path
+`$Root = Split-Path -Parent `$env:CODEXIO_NODEW_SCRIPT
 `$RuntimeRoot = Join-Path `$Root "runtime\node"
 `$LocalNode = Join-Path `$RuntimeRoot "node.exe"
 `$PnpmRoot = Join-Path `$Root "runtime\pnpm"
@@ -357,32 +360,7 @@ Write-Host "[codexio nodew] launching Node.js"
 & `$node @args
 exit `$LASTEXITCODE
 "@
-    Write-Utf8File -Path $PsPath -Text $text.Replace("`n", "`r`n")
-}
-
-function New-PnpmCommandFile {
-    param(
-        [Parameter(Mandatory)] [string] $Path,
-        [Parameter(Mandatory)] [string[]] $Commands,
-        [Parameter(Mandatory)] [string] $Title
-    )
-    $body = ($Commands | ForEach-Object {
-        "echo [codexio] running step`r`ncall $_`r`nif errorlevel 1 goto failed"
-    }) -join "`r`n"
-    $text = @"
-@echo off
-echo [codexio] $Title
-cd /d %~dp0
-echo [codexio] working directory: %CD%
-$body
-echo [codexio] done
-goto end
-:failed
-echo [codexio] command failed
-:end
-pause
-"@
-    Write-Utf8File -Path $Path -Text $text.Replace("`n", "`r`n")
+    Write-Utf8File -Path $CmdPath -Text $text.Replace("`n", "`r`n")
 }
 
 function New-PnpmStartFile {
@@ -393,20 +371,20 @@ echo [codexio] start Codexio
 cd /d %~dp0
 echo [codexio] working directory: %CD%
 echo [codexio] checking production dependencies
-if not exist node_modules\@openai\codex\bin\codex.js goto install
-if not exist node_modules\@openai\codex-win32-x64\package.json goto install
-if not exist node_modules\@anthropic-ai\claude-code\cli-wrapper.cjs goto install
-if not exist node_modules\@anthropic-ai\claude-code-win32-x64\package.json goto install
+if not exist codexio\node_modules\@openai\codex\bin\codex.js goto install
+if not exist codexio\node_modules\@openai\codex-win32-x64\package.json goto install
+if not exist codexio\node_modules\@anthropic-ai\claude-code\cli-wrapper.cjs goto install
+if not exist codexio\node_modules\@anthropic-ai\claude-code-win32-x64\package.json goto install
 echo [codexio] dependencies are ready
 goto start
 :install
 echo [codexio] dependencies are missing, installing production dependencies
-call "%~dp0nodew.cmd" pnpm install --prod --config.node-linker=hoisted
+call "%~dp0codexio\nodew.cmd" pnpm install --prod --dir "%~dp0codexio" --config.node-linker=hoisted
 if errorlevel 1 goto failed
 echo [codexio] dependencies installed
 :start
 echo [codexio] launching local server
-call "%~dp0nodew.cmd" dist\index.js serve
+call "%~dp0codexio\nodew.cmd" codexio\dist\index.js serve --config "%~dp0config.yaml"
 goto end
 :failed
 echo [codexio] command failed
@@ -424,47 +402,53 @@ function Copy-RuntimeFiles {
     Write-Step "copy runtime files: $DestinationRoot"
     New-Item -ItemType Directory -Force -Path (Join-Path $DestinationRoot ".codexio") | Out-Null
     Copy-Item -Recurse -Force (Join-Path $ProjectRoot "dist") $DestinationRoot
-    Copy-Item -Recurse -Force (Join-Path $ProjectRoot "examples") $DestinationRoot
     Copy-Item -Force (Join-Path $ProjectRoot "package.json") $DestinationRoot
     Copy-Item -Force (Join-Path $ProjectRoot "pnpm-lock.yaml") $DestinationRoot
     Copy-Item -Force (Join-Path $ProjectRoot "instruction.md") $DestinationRoot
     Copy-Item -Force (Join-Path $ProjectRoot "README.md") $DestinationRoot
-    Copy-Item -Force (Join-Path $ProjectRoot "examples\config.yaml") (Join-Path $DestinationRoot ".codexio\config.yaml")
-    Write-Utf8File -Path (Join-Path $DestinationRoot "VERSION") -Text "$script:Version`n"
     Write-Utf8File -Path (Join-Path $DestinationRoot ".codexio\release.json") -Text (@{
         platform = $Platform
+        version = $script:Version
     } | ConvertTo-Json -Compress)
+}
+
+function Copy-PackageConfig {
+    param([Parameter(Mandatory)] [string] $DestinationRoot)
+    Copy-Item -Force (Join-Path $ProjectRoot "config.example.yaml") (Join-Path $DestinationRoot "config.yaml")
 }
 
 function New-StandalonePackage {
     param([Parameter(Mandatory)] [string] $NodeRoot)
     New-Item -ItemType Directory -Force -Path $StandaloneRoot | Out-Null
-    Copy-RuntimeFiles -DestinationRoot $StandaloneRoot -Platform "windows-x64-standalone"
+    $appRoot = Join-Path $StandaloneRoot "codexio"
+    New-Item -ItemType Directory -Force -Path $appRoot | Out-Null
+    Copy-PackageConfig -DestinationRoot $StandaloneRoot
+    Copy-RuntimeFiles -DestinationRoot $appRoot -Platform "windows-x64-standalone"
     Write-Step "copy bundled Node.js runtime"
-    New-Item -ItemType Directory -Force -Path (Join-Path $StandaloneRoot "runtime") | Out-Null
-    Copy-Item -Recurse -Force $NodeRoot (Join-Path $StandaloneRoot "runtime\node")
+    New-Item -ItemType Directory -Force -Path (Join-Path $appRoot "runtime") | Out-Null
+    Copy-Item -Recurse -Force $NodeRoot (Join-Path $appRoot "runtime\node")
     Write-Step "copy production dependencies"
-    Copy-Item -Recurse -Force (Join-Path $InstallRoot "node_modules") $StandaloneRoot
-    New-CommandFile -Path (Join-Path $StandaloneRoot "start.cmd") -Command "runtime\node\node.exe dist\index.js serve" -Title "start Codexio with bundled Node.js"
-    New-CommandFile -Path (Join-Path $StandaloneRoot "login.cmd") -Command "runtime\node\node.exe dist\index.js login" -Title "start Codex login with bundled Node.js"
-    Assert-PathExists (Join-Path $StandaloneRoot "runtime\node\node.exe")
-    Assert-PathExists (Join-Path $StandaloneRoot "node_modules\@openai\codex-win32-x64\package.json")
-    Assert-PathExists (Join-Path $StandaloneRoot "node_modules\@anthropic-ai\claude-code-win32-x64\package.json")
+    Copy-Item -Recurse -Force (Join-Path $InstallRoot "node_modules") $appRoot
+    New-CommandFile -Path (Join-Path $StandaloneRoot "start.cmd") -Command "codexio\runtime\node\node.exe codexio\dist\index.js serve --config ""%~dp0config.yaml""" -Title "start Codexio with bundled Node.js"
+    Assert-PathExists (Join-Path $appRoot "runtime\node\node.exe")
+    Assert-PathExists (Join-Path $appRoot "node_modules\@openai\codex-win32-x64\package.json")
+    Assert-PathExists (Join-Path $appRoot "node_modules\@anthropic-ai\claude-code-win32-x64\package.json")
 }
 
 function New-PnpmPackage {
     param([Parameter(Mandatory)] [string] $PnpmRuntimeRoot)
     New-Item -ItemType Directory -Force -Path $PnpmRoot | Out-Null
-    Copy-RuntimeFiles -DestinationRoot $PnpmRoot -Platform "windows-x64-pnpm"
+    $appRoot = Join-Path $PnpmRoot "codexio"
+    New-Item -ItemType Directory -Force -Path $appRoot | Out-Null
+    Copy-PackageConfig -DestinationRoot $PnpmRoot
+    Copy-RuntimeFiles -DestinationRoot $appRoot -Platform "windows-x64-pnpm"
     Write-Step "copy bundled pnpm runtime"
-    New-Item -ItemType Directory -Force -Path (Join-Path $PnpmRoot "runtime") | Out-Null
-    Copy-Item -Recurse -Force $PnpmRuntimeRoot (Join-Path $PnpmRoot "runtime\pnpm")
-    Assert-PathExists (Join-Path $PnpmRoot "runtime\pnpm\bin\pnpm.cjs")
+    New-Item -ItemType Directory -Force -Path (Join-Path $appRoot "runtime") | Out-Null
+    Copy-Item -Recurse -Force $PnpmRuntimeRoot (Join-Path $appRoot "runtime\pnpm")
+    Assert-PathExists (Join-Path $appRoot "runtime\pnpm\bin\pnpm.cjs")
     Write-Step "write pnpm package bootstrap scripts"
-    New-PnpmNodewFile -CmdPath (Join-Path $PnpmRoot "nodew.cmd") -PsPath (Join-Path $PnpmRoot "nodew.ps1")
-    New-PnpmCommandFile -Path (Join-Path $PnpmRoot "install.cmd") -Commands @('"%~dp0nodew.cmd" pnpm install --prod --config.node-linker=hoisted') -Title "install Codexio production dependencies"
+    New-PnpmNodewFile -CmdPath (Join-Path $appRoot "nodew.cmd")
     New-PnpmStartFile -Path (Join-Path $PnpmRoot "start.cmd")
-    New-PnpmCommandFile -Path (Join-Path $PnpmRoot "login.cmd") -Commands @('"%~dp0nodew.cmd" dist\index.js login') -Title "start Codex login"
 }
 
 function Compress-Package {
@@ -492,13 +476,14 @@ function Invoke-StandaloneSmoke {
     Write-Step "extract standalone package for smoke test"
     Expand-Archive -Path $ArchivePath -DestinationPath $extractRoot -Force
     $root = Join-Path $extractRoot "codexio"
-    $nodeExe = Join-Path $root "runtime\node\node.exe"
+    $appRoot = Join-Path $root "codexio"
+    $nodeExe = Join-Path $appRoot "runtime\node\node.exe"
     Write-Step "check Codexio CLI version"
-    Invoke-CheckedCommand -FilePath $nodeExe -ArgumentList @("dist\index.js", "--version") -WorkingDirectory $root
+    Invoke-CheckedCommand -FilePath $nodeExe -ArgumentList @("dist\index.js", "--version") -WorkingDirectory $appRoot
     Write-Step "check Codex CLI version"
-    Invoke-CheckedCommand -FilePath $nodeExe -ArgumentList @("node_modules\@openai\codex\bin\codex.js", "--version") -WorkingDirectory $root
+    Invoke-CheckedCommand -FilePath $nodeExe -ArgumentList @("node_modules\@openai\codex\bin\codex.js", "--version") -WorkingDirectory $appRoot
     Write-Step "check Claude CLI version"
-    Invoke-CheckedCommand -FilePath $nodeExe -ArgumentList @("node_modules\@anthropic-ai\claude-code\cli-wrapper.cjs", "--version") -WorkingDirectory $root
+    Invoke-CheckedCommand -FilePath $nodeExe -ArgumentList @("node_modules\@anthropic-ai\claude-code\cli-wrapper.cjs", "--version") -WorkingDirectory $appRoot
 }
 
 function Invoke-PnpmSmoke {
@@ -508,24 +493,23 @@ function Invoke-PnpmSmoke {
     Write-Step "extract pnpm package for smoke test"
     Expand-Archive -Path $ArchivePath -DestinationPath $extractRoot -Force
     $root = Join-Path $extractRoot "codexio"
-    Assert-PathExists (Join-Path $root "nodew.cmd")
-    Assert-PathExists (Join-Path $root "nodew.ps1")
+    $appRoot = Join-Path $root "codexio"
+    Assert-PathExists (Join-Path $root "config.yaml")
+    Assert-PathExists (Join-Path $appRoot "nodew.cmd")
     $startText = Get-Content -Raw -Path (Join-Path $root "start.cmd")
-    $installText = Get-Content -Raw -Path (Join-Path $root "install.cmd")
-    $loginText = Get-Content -Raw -Path (Join-Path $root "login.cmd")
-    if (-not $startText.Contains('"%~dp0nodew.cmd"') -or -not $installText.Contains('"%~dp0nodew.cmd"') -or -not $loginText.Contains('"%~dp0nodew.cmd"')) {
-        throw "pnpm command files must call nodew.cmd from script directory"
+    if (-not $startText.Contains('"%~dp0codexio\nodew.cmd"') -or -not $startText.Contains('--config "%~dp0config.yaml"')) {
+        throw "pnpm start command must call inner nodew.cmd and outer config.yaml"
     }
     Write-Step "check nodew bootstrap"
-    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", ".\nodew.cmd", "--version") -WorkingDirectory $root
+    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", ".\codexio\nodew.cmd", "--version") -WorkingDirectory $root
     Write-Step "install pnpm package dependencies"
-    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", ".\nodew.cmd", "pnpm", "install", "--prod", "--config.node-linker=hoisted") -WorkingDirectory $root
+    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", ".\codexio\nodew.cmd", "pnpm", "install", "--prod", "--dir", ".\codexio", "--config.node-linker=hoisted") -WorkingDirectory $root
     Write-Step "check Codexio CLI version"
-    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", ".\nodew.cmd", "dist\index.js", "--version") -WorkingDirectory $root
+    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", ".\codexio\nodew.cmd", "codexio\dist\index.js", "--version") -WorkingDirectory $root
     Write-Step "check Codex CLI version"
-    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", ".\nodew.cmd", "node_modules\@openai\codex\bin\codex.js", "--version") -WorkingDirectory $root
+    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", ".\codexio\nodew.cmd", "codexio\node_modules\@openai\codex\bin\codex.js", "--version") -WorkingDirectory $root
     Write-Step "check Claude CLI version"
-    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", ".\nodew.cmd", "node_modules\@anthropic-ai\claude-code\cli-wrapper.cjs", "--version") -WorkingDirectory $root
+    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", ".\codexio\nodew.cmd", "codexio\node_modules\@anthropic-ai\claude-code\cli-wrapper.cjs", "--version") -WorkingDirectory $root
 }
 Push-Location $ProjectRoot
 try {
@@ -591,16 +575,15 @@ try {
     if ($buildStandalone) {
         Write-Step "compress standalone package"
         Compress-Package -SourceRoot $StandaloneRoot -ArchivePath $standaloneArchive -Entries @(
-            "codexio/runtime/node/node.exe",
-            "codexio/dist/index.js",
-            "codexio/node_modules/@openai/codex/bin/codex.js",
-            "codexio/node_modules/@openai/codex-win32-x64/package.json",
-            "codexio/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs",
-            "codexio/node_modules/@anthropic-ai/claude-code-win32-x64/package.json",
-            "codexio/.codexio/config.yaml",
             "codexio/start.cmd",
-            "codexio/.codexio/release.json",
-            "codexio/VERSION"
+            "codexio/config.yaml",
+            "codexio/codexio/runtime/node/node.exe",
+            "codexio/codexio/dist/index.js",
+            "codexio/codexio/node_modules/@openai/codex/bin/codex.js",
+            "codexio/codexio/node_modules/@openai/codex-win32-x64/package.json",
+            "codexio/codexio/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs",
+            "codexio/codexio/node_modules/@anthropic-ai/claude-code-win32-x64/package.json",
+            "codexio/codexio/.codexio/release.json"
         )
 
         Write-Step "smoke standalone package"
@@ -610,17 +593,14 @@ try {
     if ($buildPnpm) {
         Write-Step "compress pnpm package"
         Compress-Package -SourceRoot $PnpmRoot -ArchivePath $pnpmArchive -Entries @(
-            "codexio/dist/index.js",
-            "codexio/package.json",
-            "codexio/pnpm-lock.yaml",
-            "codexio/.codexio/config.yaml",
-            "codexio/nodew.cmd",
-            "codexio/nodew.ps1",
-            "codexio/runtime/pnpm/bin/pnpm.cjs",
-            "codexio/install.cmd",
             "codexio/start.cmd",
-            "codexio/.codexio/release.json",
-            "codexio/VERSION"
+            "codexio/config.yaml",
+            "codexio/codexio/dist/index.js",
+            "codexio/codexio/package.json",
+            "codexio/codexio/pnpm-lock.yaml",
+            "codexio/codexio/nodew.cmd",
+            "codexio/codexio/runtime/pnpm/bin/pnpm.cjs",
+            "codexio/codexio/.codexio/release.json"
         )
 
         Write-Step "smoke pnpm package"

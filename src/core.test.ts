@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { codexConfigPath, codexHomePath, createAgentEnv } from './agent/AgentEnvironment.js'
 import { AgentManager } from './agent/AgentManager.js'
+import { CodexAppServer } from './agent/CodexAppServer.js'
 import { CodexAgent } from './agent/CodexAgent.js'
 import { EchoAgent } from './agent/EchoAgent.js'
 import { createEmailMessagePayload, createEmailSender, isAllowedEmailSender } from './channel/EmailChannelAdapter.js'
@@ -75,6 +76,46 @@ describe('core', () => {
     expect(outbound).toEqual([
       expect.any(String),
       'echo: hello'
+    ])
+  })
+
+  it('agent manager serializes concurrent user messages', async () => {
+    const outbound: string[] = []
+    const manager = new AgentManager(ConfigSchema.parse({
+      agents: {
+        codex: {
+          enabled: false
+        },
+        claude: {
+          enabled: false
+        },
+        echo: {
+          enabled: true
+        }
+      }
+    }), 'http://127.0.0.1:8787', {
+      send: async (text) => {
+        outbound.push(text)
+        if (!text.startsWith('echo:')) {
+          await new Promise((resolve) => {
+            setTimeout(resolve, 10)
+          })
+        }
+        return Result.success(null)
+      },
+      status: async () => Result.success(null)
+    })
+    const [first, second] = await Promise.all([
+      manager.receive('first'),
+      manager.receive('second')
+    ])
+    expect(first.isFailed).toBe(false)
+    expect(second.isFailed).toBe(false)
+    expect(outbound).toEqual([
+      expect.any(String),
+      'echo: first',
+      expect.any(String),
+      'echo: second'
     ])
   })
 
@@ -297,6 +338,39 @@ describe('core', () => {
     expect(outbound[1]).toBe('Codex login completed.')
   })
 
+  it('codex app-server ignores malformed JSON lines and times out pending requests', async () => {
+    const stderr: string[] = []
+    const script = [
+      'const readline = require("node:readline");',
+      'const rl = readline.createInterface({ input: process.stdin });',
+      'process.stdout.write("not-json\\n");',
+      'rl.on("line", (line) => {',
+      '  const message = JSON.parse(line);',
+      '  if (message.method === "initialize") {',
+      '    process.stdout.write(JSON.stringify({ id: message.id, result: {} }) + "\\n");',
+      '  }',
+      '});'
+    ].join('\n')
+    const server = new CodexAppServer({
+      command: process.execPath,
+      args: [
+        '-e',
+        script
+      ],
+      cwd: '.',
+      env: process.env,
+      requestTimeoutMs: 500,
+      onNotification: () => {},
+      onStderr: (data) => {
+        stderr.push(data.toString('utf8'))
+      }
+    })
+    await server.start()
+    await expect(server.request('never/replies', {})).rejects.toThrow('codex app-server request timed out: never/replies')
+    expect(stderr.join('')).toContain('codex app-server sent invalid JSON')
+    await server.stop()
+  })
+
   it('migrates old config to one enabled agent', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'codexio-'))
     const path = join(dir, 'config.yaml')
@@ -432,7 +506,7 @@ describe('core', () => {
     try {
       const config = await new ConfigService(path).load()
       expect(config.server.token).toBe('env-token')
-      expect(config.workspace.path).toBe(normalizeWorkspacePath('proxy.local'))
+      expect(config.workspace.path).toBe(join(dir, 'proxy.local'))
     } finally {
       if (previousToken === undefined) {
         delete process.env.CODEXIO_TEST_TOKEN

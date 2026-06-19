@@ -17,6 +17,7 @@ export function readCodexioVersion(): string {
 
 export type CodexioReleaseMetadata = {
   platform?: string
+  version?: string
 }
 
 export function readCodexioReleaseMetadata(): CodexioReleaseMetadata {
@@ -27,13 +28,18 @@ export function readCodexioReleaseMetadata(): CodexioReleaseMetadata {
   const text = readFileSync(path, 'utf8')
   const metadata = JSON.parse(text) as {
     platform?: unknown
+    version?: unknown
   }
   if (typeof metadata.platform !== 'string' || metadata.platform.trim().length === 0) {
     return {}
   }
-  return {
+  const release: CodexioReleaseMetadata = {
     platform: metadata.platform.trim()
   }
+  if (typeof metadata.version === 'string' && metadata.version.trim().length > 0) {
+    release.version = metadata.version.trim()
+  }
+  return release
 }
 
 function findCodexioRoot(): string {
