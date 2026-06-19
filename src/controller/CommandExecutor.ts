@@ -4,6 +4,10 @@ import { ChannelManager } from '../channel/ChannelManager.js'
 import { Result } from '../value/Result.js'
 import { Logger } from '../component/Logger.js'
 
+export type UpdateHandler = {
+  update: () => Promise<Result<string>>
+}
+
 type ParsedInput =
   | {
     type: 'message'
@@ -54,7 +58,8 @@ export function parseCommandInput(text: string): ParsedInput {
 export class CommandExecutor {
   constructor(
     private readonly channelManager: ChannelManager,
-    private readonly agentManager: AgentManager
+    private readonly agentManager: AgentManager,
+    private readonly updateHandler?: UpdateHandler
   ) {}
 
   async receive(input: CommandExecutorInput): Promise<Result<ChannelReceiveResult>> {
@@ -98,6 +103,29 @@ export class CommandExecutor {
       })
       return Result.success({
         action: 'restart'
+      })
+    }
+    if (parsed.name === 'update') {
+      if (!this.updateHandler) {
+        return Result.fail<ChannelReceiveResult>('update is not available')
+      }
+      const updated = await this.updateHandler.update()
+      if (updated.isFailed) {
+        const sent = await this.channelManager.sendSystem(updated.message, input.source)
+        if (sent.isFailed) {
+          return Result.fail<ChannelReceiveResult>(sent.message)
+        }
+        return Result.fail<ChannelReceiveResult>(updated.message)
+      }
+      const sent = await this.channelManager.sendSystem(updated.data ?? updated.message, input.source)
+      if (sent.isFailed) {
+        return Result.fail<ChannelReceiveResult>(sent.message)
+      }
+      Logger.info('command executor started update', {
+        source: input.source
+      })
+      return Result.success({
+        action: 'update'
       })
     }
     const name = parsed.name.length > 0 ? parsed.name : '(empty)'

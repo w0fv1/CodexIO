@@ -2,7 +2,7 @@ import { Express } from 'express'
 import { Result } from '../value/Result.js'
 
 export type ChannelReceiveResult = {
-  action?: 'clear' | 'restart'
+  action?: 'clear' | 'restart' | 'update'
 }
 
 export type ChannelMessage = {

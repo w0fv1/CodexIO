@@ -13,6 +13,7 @@ import { createEmailMessagePayload, createEmailSender, isAllowedEmailSender } fr
 import { createFeishuMessagePayload } from '../src/channel/FeishuChannelAdapter.js'
 import { Logger } from '../src/component/Logger.js'
 import { renderMarkdownHtml } from '../src/component/Markdown.js'
+import { createUpdaterScript } from '../src/component/UpdateInstaller.js'
 import { ConfigSchema, ConfigService, normalizeWorkspacePath, validateCodexioConfig } from '../src/ConfigService.js'
 import { Result } from '../src/value/Result.js'
 import { TestAgent } from './TestAgent.js'
@@ -231,6 +232,11 @@ describe('core', () => {
     expect(parseCommandInput('￥restart')).toEqual({
       type: 'command',
       name: 'restart',
+      args: []
+    })
+    expect(parseCommandInput('$ update')).toEqual({
+      type: 'command',
+      name: 'update',
       args: []
     })
     expect(parseCommandInput('hello')).toEqual({
@@ -772,6 +778,30 @@ describe('core', () => {
     expect(config.proxy.enabled).toBe(false)
     expect(config.proxy.host).toBe('127.0.0.1')
     expect(config.proxy.port).toBe(7890)
+  })
+
+  it('loads update base url from config', () => {
+    const config = ConfigSchema.parse({
+      update: {
+        enabled: true,
+        baseUrl: 'https://update.example.test'
+      }
+    })
+    expect(config.update.baseUrl).toBe('https://update.example.test')
+  })
+
+  it('updater waits for restarted server pid', () => {
+    const script = createUpdaterScript()
+    expect(script).toContain('$serverState = Get-Content -Raw -LiteralPath $manifestData.serverStatePath | ConvertFrom-Json')
+    expect(script).toContain('$serverResponse.data.pid -eq $serverState.pid')
+    expect(script).not.toContain('$response.data.pid -eq $state.pid')
+  })
+
+  it('updater preserves runtime data without replacing release metadata', () => {
+    const script = createUpdaterScript()
+    expect(script).toContain('$preservedData = Join-Path $manifestData.updateRoot "preserved-codexio-data"')
+    expect(script).toContain('$currentData = Join-Path $manifestData.installRoot "codexio\\.codexio"')
+    expect(script).toContain('if ($item.Name -eq "release.json")')
   })
 
   it('loads channel credentials from config', () => {

@@ -518,6 +518,7 @@ function New-StandalonePackage {
     Copy-Item -Recurse -Force (Join-Path $InstallRoot "node_modules") $appRoot
     New-CommandFile -Path (Join-Path $StandaloneRoot "start.cmd") -Command "codexio\runtime\node\node.exe codexio\dist\index.js start --config ""%~dp0config.yaml""" -Title "start Codexio with bundled Node.js"
     New-CommandFile -Path (Join-Path $StandaloneRoot "restart.cmd") -Command "codexio\runtime\node\node.exe codexio\dist\index.js restart --config ""%~dp0config.yaml""" -Title "restart Codexio with bundled Node.js"
+    New-CommandFile -Path (Join-Path $StandaloneRoot "update.cmd") -Command "codexio\runtime\node\node.exe codexio\dist\index.js update --config ""%~dp0config.yaml""" -Title "update Codexio with bundled Node.js"
     Assert-PathExists (Join-Path $appRoot "runtime\node\node.exe")
     Assert-PathExists (Join-Path $appRoot "node_modules\@openai\codex-win32-x64\package.json")
     Assert-PathExists (Join-Path $appRoot "node_modules\@anthropic-ai\claude-code-win32-x64\package.json")
@@ -538,6 +539,7 @@ function New-PnpmPackage {
     New-PnpmNodewFile -CmdPath (Join-Path $appRoot "nodew.cmd")
     New-PnpmCommandFile -Path (Join-Path $PnpmRoot "start.cmd") -Action "start" -Command "start"
     New-PnpmCommandFile -Path (Join-Path $PnpmRoot "restart.cmd") -Action "restart" -Command "restart"
+    New-PnpmCommandFile -Path (Join-Path $PnpmRoot "update.cmd") -Action "update" -Command "update"
 }
 
 function Compress-Package {
@@ -603,6 +605,7 @@ function Publish-Package {
         fileSizeBytes = $file.Length
         sha256 = $sha256
         mimeType = "application/zip"
+        access = "PUBLIC"
     }
     $createUri = "$BaseUrl/apim/download/release/codexio"
     $completeUri = "$BaseUrl/apim/download/release/codexio/$Version/complete"
@@ -694,6 +697,7 @@ try {
             Compress-Package -SourceRoot $PnpmRoot -ArchivePath $pnpmArchive -CompressionLevel ([System.IO.Compression.CompressionLevel]::NoCompression) -Entries @(
                 "codexio/start.cmd",
                 "codexio/restart.cmd",
+                "codexio/update.cmd",
                 "codexio/config.yaml",
                 "codexio/codexio/dist/index.js",
                 "codexio/codexio/package.json",
@@ -718,6 +722,7 @@ try {
             Compress-Package -SourceRoot $StandaloneRoot -ArchivePath $standaloneArchive -CompressionLevel ([System.IO.Compression.CompressionLevel]::Optimal) -Entries @(
                 "codexio/start.cmd",
                 "codexio/restart.cmd",
+                "codexio/update.cmd",
                 "codexio/config.yaml",
                 "codexio/codexio/runtime/node/node.exe",
                 "codexio/codexio/dist/index.js",

@@ -13,6 +13,7 @@ import { CodexioConfig, ConfigSchema, ConfigService, validateCodexioConfig } fro
 import { Result } from './value/Result.js'
 import { readCodexioVersion } from './AppMetadata.js'
 import { checkCodexioUpdate } from './component/UpdateChecker.js'
+import { UpdateInstaller } from './component/UpdateInstaller.js'
 import { CommandExecutor } from './controller/CommandExecutor.js'
 import { AgentFactory } from './agent/AgentManager.js'
 import { Logger } from './component/Logger.js'
@@ -40,6 +41,7 @@ export type CodexioServer = {
 
 export type CodexioAppOptions = {
   agentFactory?: AgentFactory
+  configPath?: string
 }
 
 export function createCodexioApp(config: CodexioConfig, options: CodexioAppOptions = {}): CodexioServer {
@@ -58,7 +60,8 @@ export function createCodexioApp(config: CodexioConfig, options: CodexioAppOptio
   }, {
     agentFactory: options.agentFactory
   })
-  const commandExecutor = new CommandExecutor(channelManager, agentManager)
+  const updateInstaller = options.configPath ? new UpdateInstaller(config, options.configPath) : undefined
+  const commandExecutor = new CommandExecutor(channelManager, agentManager, updateInstaller)
   let activeListener: HttpServer | undefined
 
   app.post('/api/message', async (request, response) => {
@@ -342,6 +345,19 @@ program
     output.write(`codexio restart requested through supervisor ${state.host}:${state.port}\n`)
   })
 
+program
+  .command('update')
+  .option('--config <path>', 'config file path')
+  .action(async (command: Command | ConfigOption) => {
+    const service = new ConfigService(getConfigPath(command))
+    const config = await service.load()
+    const result = await new UpdateInstaller(config, service.path).update()
+    if (result.isFailed) {
+      throw new Error(result.message)
+    }
+    output.write(`${result.data ?? result.message}\n`)
+  })
+
 if (argv[1] && import.meta.url === pathToFileURL(resolve(argv[1])).href) {
   void main()
 }
@@ -372,7 +388,9 @@ async function serve(config?: CodexioConfig, configPath?: string, options: Serve
       port
     }
   })
-  const server = createCodexioApp(serverConfig)
+  const server = createCodexioApp(serverConfig, {
+    configPath: service.path
+  })
   const listener = server.listen(serverConfig.server.port, serverConfig.server.host)
   try {
     await waitForListening(listener)

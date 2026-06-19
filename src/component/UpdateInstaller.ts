@@ -1,0 +1,486 @@
+import { createHash } from 'node:crypto'
+import { createReadStream, createWriteStream } from 'node:fs'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { spawn } from 'node:child_process'
+import { CodexioConfig } from '../ConfigService.js'
+import { codexioRootPath, readCodexioReleaseMetadata, readCodexioVersion } from '../AppMetadata.js'
+import { Result } from '../value/Result.js'
+import { Logger } from './Logger.js'
+
+type LatestReleaseResponse = {
+  isf?: unknown
+  data?: unknown
+}
+
+type LatestRelease = {
+  version: string
+  platform: string
+  fileName: string
+  fileSizeBytes: number
+  sha256: string
+  managePath: string
+}
+
+type UpdateManifest = {
+  platform: string
+  fromVersion: string
+  toVersion: string
+  installRoot: string
+  stageRoot: string
+  backupRoot: string
+  configPath: string
+  supervisorStatePath: string
+  serverStatePath: string
+  startCommand: string
+  updateRoot: string
+}
+
+export class UpdateInstaller {
+  constructor(
+    private readonly config: CodexioConfig,
+    private readonly configPath: string
+  ) {}
+
+  async update(): Promise<Result<string>> {
+    try {
+      if (!this.config.update.enabled) {
+        return Result.fail('update is disabled')
+      }
+      const releaseMetadata = readCodexioReleaseMetadata()
+      if (!releaseMetadata.platform) {
+        return Result.fail('当前是源码模式，不支持自动安装更新。')
+      }
+      const latest = await this.fetchLatestRelease(releaseMetadata.platform)
+      const currentVersion = readCodexioVersion()
+      if (compareVersion(latest.version, currentVersion) <= 0) {
+        return Result.success(`Codexio 已是最新版本 ${currentVersion}。`)
+      }
+      const installRoot = dirname(codexioRootPath)
+      const updateRoot = join(installRoot, '.codexio', 'update')
+      const downloadRoot = join(updateRoot, 'download')
+      const stageParent = join(updateRoot, 'stage')
+      const updaterRoot = join(updateRoot, 'updater')
+      const backupRoot = join(updateRoot, 'backup', `${currentVersion}-${formatTimestamp(new Date())}`)
+      await rm(stageParent, {
+        recursive: true,
+        force: true
+      })
+      await mkdir(downloadRoot, {
+        recursive: true
+      })
+      await mkdir(stageParent, {
+        recursive: true
+      })
+      await mkdir(updaterRoot, {
+        recursive: true
+      })
+      const archivePath = join(downloadRoot, latest.fileName)
+      await this.downloadRelease(latest, archivePath)
+      const actualSha256 = await sha256File(archivePath)
+      if (actualSha256.toLowerCase() !== latest.sha256.toLowerCase()) {
+        await rm(archivePath, {
+          force: true
+        })
+        return Result.fail(`更新包校验失败：${actualSha256}`)
+      }
+      await expandZip(archivePath, stageParent)
+      const stageRoot = join(stageParent, 'codexio')
+      await validateStage(stageRoot, latest.platform)
+      const manifest: UpdateManifest = {
+        platform: latest.platform,
+        fromVersion: currentVersion,
+        toVersion: latest.version,
+        installRoot,
+        stageRoot,
+        backupRoot,
+        configPath: this.configPath,
+        supervisorStatePath: join(dirname(this.configPath), 'supervisor.json'),
+        serverStatePath: join(dirname(this.configPath), 'server.json'),
+        startCommand: join(installRoot, 'start.cmd'),
+        updateRoot
+      }
+      const manifestPath = join(updaterRoot, 'update-manifest.json')
+      const updaterPath = join(updaterRoot, 'update.ps1')
+      await writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8')
+      await writeFile(updaterPath, createUpdaterScript(), 'utf8')
+      await startUpdater(updaterPath, manifestPath)
+      Logger.info('codexio update installer started', {
+        fromVersion: currentVersion,
+        toVersion: latest.version,
+        platform: latest.platform
+      })
+      return Result.success(`Codexio ${latest.version} 更新包已准备完成，正在安装并重启。`)
+    } catch (error) {
+      Logger.error('codexio update failed', error)
+      const failed = Result.fromError(error)
+      return Result.fail(failed.message, failed.code)
+    }
+  }
+
+  private async fetchLatestRelease(platform: string): Promise<LatestRelease> {
+    const baseUrl = this.config.update.baseUrl.replace(/\/+$/, '')
+    const url = new URL('/api/download/release/codexio/latest', `${baseUrl}/`)
+    url.searchParams.set('platform', platform)
+    const response = await fetch(url)
+    if (!response.ok) {
+      throw new Error(`update check failed: ${response.status}`)
+    }
+    const body = await response.json() as LatestReleaseResponse
+    if (body.isf || !body.data || typeof body.data !== 'object') {
+      throw new Error('update metadata not found')
+    }
+    return parseLatestRelease(body.data)
+  }
+
+  private async downloadRelease(latest: LatestRelease, archivePath: string): Promise<void> {
+    const baseUrl = this.config.update.baseUrl.replace(/\/+$/, '')
+    const url = new URL('/api/download/release/codexio/latest/file', `${baseUrl}/`)
+    url.searchParams.set('platform', latest.platform)
+    const response = await fetch(url)
+    if (!response.ok || !response.body) {
+      throw new Error(`update download failed: ${response.status}`)
+    }
+    const writer = createWriteStream(archivePath)
+    const reader = response.body.getReader()
+    const finished = new Promise<void>((resolveFinish, reject) => {
+      writer.once('finish', resolveFinish)
+      writer.once('error', reject)
+    })
+    try {
+      while (true) {
+        const read = await reader.read()
+        if (read.done) {
+          break
+        }
+        if (!writer.write(Buffer.from(read.value))) {
+          await new Promise<void>((resolveDrain) => {
+            writer.once('drain', resolveDrain)
+          })
+        }
+      }
+    } finally {
+      reader.releaseLock()
+      writer.end()
+    }
+    await finished
+  }
+}
+
+function parseLatestRelease(value: object): LatestRelease {
+  const data = value as Record<string, unknown>
+  if (
+    typeof data.version !== 'string' ||
+    typeof data.platform !== 'string' ||
+    typeof data.fileName !== 'string' ||
+    typeof data.fileSizeBytes !== 'number' ||
+    typeof data.sha256 !== 'string' ||
+    typeof data.managePath !== 'string'
+  ) {
+    throw new Error('update metadata invalid')
+  }
+  return {
+    version: data.version,
+    platform: data.platform,
+    fileName: data.fileName,
+    fileSizeBytes: data.fileSizeBytes,
+    sha256: data.sha256,
+    managePath: data.managePath
+  }
+}
+
+function compareVersion(left: string, right: string): number {
+  const leftParts = left.split('.').map((value) => Number.parseInt(value, 10))
+  const rightParts = right.split('.').map((value) => Number.parseInt(value, 10))
+  const length = Math.max(leftParts.length, rightParts.length)
+  for (let index = 0; index < length; index += 1) {
+    const leftValue = Number.isFinite(leftParts[index]) ? leftParts[index] : 0
+    const rightValue = Number.isFinite(rightParts[index]) ? rightParts[index] : 0
+    if (leftValue > rightValue) {
+      return 1
+    }
+    if (leftValue < rightValue) {
+      return -1
+    }
+  }
+  return 0
+}
+
+async function sha256File(path: string): Promise<string> {
+  const hash = createHash('sha256')
+  const stream = createReadStream(path)
+  for await (const chunk of stream) {
+    hash.update(chunk)
+  }
+  return hash.digest('hex')
+}
+
+async function expandZip(archivePath: string, destinationPath: string): Promise<void> {
+  await new Promise<void>((resolveExpand, reject) => {
+    const child = spawn(powershellPath(), [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      '& { param([string] $ArchivePath, [string] $DestinationPath) Expand-Archive -LiteralPath $ArchivePath -DestinationPath $DestinationPath -Force }',
+      archivePath,
+      destinationPath
+    ], {
+      stdio: 'ignore',
+      windowsHide: true
+    })
+    child.once('error', reject)
+    child.once('exit', (code) => {
+      if (code === 0) {
+        resolveExpand()
+        return
+      }
+      reject(new Error(`update archive extraction failed: ${code}`))
+    })
+  })
+}
+
+async function startUpdater(updaterPath: string, manifestPath: string): Promise<void> {
+  if (process.platform !== 'win32') {
+    throw new Error(`update platform is not supported: ${process.platform}`)
+  }
+  const launcher = '& { param([string] $PowerShellPath, [string] $UpdaterPath, [string] $ManifestPath) Start-Process -FilePath $PowerShellPath -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $UpdaterPath, "-Manifest", $ManifestPath) -WindowStyle Minimized }'
+  await new Promise<void>((resolveStart, reject) => {
+    const child = spawn(powershellPath(), [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      launcher,
+      powershellPath(),
+      updaterPath,
+      manifestPath
+    ], {
+      stdio: 'ignore',
+      windowsHide: true
+    })
+    child.once('error', reject)
+    child.once('exit', (code) => {
+      if (code === 0) {
+        resolveStart()
+        return
+      }
+      reject(new Error(`update installer launch failed: ${code}`))
+    })
+  })
+}
+
+function powershellPath(): string {
+  if (process.platform !== 'win32') {
+    return 'pwsh'
+  }
+  const systemRoot = process.env.SystemRoot ?? 'C:\\Windows'
+  return join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+}
+
+async function validateStage(stageRoot: string, platform: string): Promise<void> {
+  const required = [
+    'start.cmd',
+    'restart.cmd',
+    'update.cmd',
+    'codexio/dist/index.js',
+    'codexio/.codexio/release.json'
+  ]
+  if (platform === 'windows-x64-pnpm') {
+    required.push('codexio/nodew.cmd')
+    required.push('codexio/runtime/pnpm/bin/pnpm.cjs')
+  }
+  if (platform === 'windows-x64-standalone') {
+    required.push('codexio/runtime/node/node.exe')
+  }
+  for (const item of required) {
+    await readFile(join(stageRoot, item))
+  }
+}
+
+function formatTimestamp(value: Date): string {
+  const pad = (item: number) => item.toString().padStart(2, '0')
+  return [
+    value.getFullYear(),
+    pad(value.getMonth() + 1),
+    pad(value.getDate()),
+    '-',
+    pad(value.getHours()),
+    pad(value.getMinutes()),
+    pad(value.getSeconds())
+  ].join('')
+}
+
+export function createUpdaterScript(): string {
+  return `
+param(
+    [Parameter(Mandatory = $true)] [string] $Manifest
+)
+
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+$manifestData = Get-Content -Raw -LiteralPath $Manifest | ConvertFrom-Json
+$logPath = Join-Path $manifestData.updateRoot "updater\\update.log"
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $logPath) | Out-Null
+
+function Write-UpdateLog {
+    param([Parameter(Mandatory = $true)] [string] $Text)
+    $line = "[$([DateTimeOffset]::Now.ToString("u"))] $Text"
+    Add-Content -LiteralPath $logPath -Value $line
+}
+
+function Stop-Codexio {
+    if (Test-Path -LiteralPath $manifestData.supervisorStatePath) {
+        $state = Get-Content -Raw -LiteralPath $manifestData.supervisorStatePath | ConvertFrom-Json
+        try {
+            Invoke-RestMethod -Method Post -Uri "http://$($state.host):$($state.port)/stop" -Headers @{ Authorization = "Bearer $($state.token)" } -TimeoutSec 10 | Out-Null
+        } catch {
+            Write-UpdateLog "supervisor stop request failed: $($_.Exception.Message)"
+        }
+        $deadline = [DateTimeOffset]::Now.AddSeconds(30)
+        while ([DateTimeOffset]::Now -lt $deadline) {
+            $process = Get-Process -Id $state.pid -ErrorAction SilentlyContinue
+            if ($null -eq $process) {
+                break
+            }
+            Start-Sleep -Milliseconds 500
+        }
+        $remaining = Get-Process -Id $state.pid -ErrorAction SilentlyContinue
+        if ($null -ne $remaining) {
+            Stop-Process -Id $state.pid -Force -ErrorAction SilentlyContinue
+        }
+    }
+    if (Test-Path -LiteralPath $manifestData.serverStatePath) {
+        Remove-Item -Force -LiteralPath $manifestData.serverStatePath -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $manifestData.supervisorStatePath) {
+        Remove-Item -Force -LiteralPath $manifestData.supervisorStatePath -ErrorAction SilentlyContinue
+    }
+}
+
+function Backup-Current {
+    New-Item -ItemType Directory -Force -Path $manifestData.backupRoot | Out-Null
+    foreach ($item in @("start.cmd", "restart.cmd", "update.cmd", "codexio")) {
+        $source = Join-Path $manifestData.installRoot $item
+        if (Test-Path -LiteralPath $source) {
+            Copy-Item -Recurse -Force -LiteralPath $source -Destination (Join-Path $manifestData.backupRoot $item)
+        }
+    }
+}
+
+function Replace-Current {
+    $preservedNode = Join-Path $manifestData.updateRoot "preserved-node"
+    $preservedData = Join-Path $manifestData.updateRoot "preserved-codexio-data"
+    $currentNode = Join-Path $manifestData.installRoot "codexio\\runtime\\node"
+    if ($manifestData.platform -eq "windows-x64-pnpm" -and (Test-Path -LiteralPath $currentNode)) {
+        if (Test-Path -LiteralPath $preservedNode) {
+            Remove-Item -Recurse -Force -LiteralPath $preservedNode
+        }
+        Copy-Item -Recurse -Force -LiteralPath $currentNode -Destination $preservedNode
+    }
+    $currentData = Join-Path $manifestData.installRoot "codexio\\.codexio"
+    if (Test-Path -LiteralPath $currentData) {
+        if (Test-Path -LiteralPath $preservedData) {
+            Remove-Item -Recurse -Force -LiteralPath $preservedData
+        }
+        Copy-Item -Recurse -Force -LiteralPath $currentData -Destination $preservedData
+    }
+    foreach ($item in @("start.cmd", "restart.cmd", "update.cmd", "codexio")) {
+        $target = Join-Path $manifestData.installRoot $item
+        if (Test-Path -LiteralPath $target) {
+            Remove-Item -Recurse -Force -LiteralPath $target
+        }
+    }
+    foreach ($item in @("start.cmd", "restart.cmd", "update.cmd", "codexio")) {
+        $source = Join-Path $manifestData.stageRoot $item
+        if (Test-Path -LiteralPath $source) {
+            Copy-Item -Recurse -Force -LiteralPath $source -Destination (Join-Path $manifestData.installRoot $item)
+        }
+    }
+    if (-not (Test-Path -LiteralPath $manifestData.configPath)) {
+        Copy-Item -Force -LiteralPath (Join-Path $manifestData.stageRoot "config.yaml") -Destination $manifestData.configPath
+    }
+    $newNode = Join-Path $manifestData.installRoot "codexio\\runtime\\node"
+    if ($manifestData.platform -eq "windows-x64-pnpm" -and (Test-Path -LiteralPath $preservedNode) -and -not (Test-Path -LiteralPath $newNode)) {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $newNode) | Out-Null
+        Copy-Item -Recurse -Force -LiteralPath $preservedNode -Destination $newNode
+    }
+    $newData = Join-Path $manifestData.installRoot "codexio\\.codexio"
+    if (Test-Path -LiteralPath $preservedData) {
+        New-Item -ItemType Directory -Force -Path $newData | Out-Null
+        foreach ($item in Get-ChildItem -LiteralPath $preservedData -Force) {
+            if ($item.Name -eq "release.json") {
+                continue
+            }
+            $target = Join-Path $newData $item.Name
+            if (Test-Path -LiteralPath $target) {
+                Remove-Item -Recurse -Force -LiteralPath $target
+            }
+            Copy-Item -Recurse -Force -LiteralPath $item.FullName -Destination $target
+        }
+    }
+}
+
+function Restore-Backup {
+    foreach ($item in @("start.cmd", "restart.cmd", "update.cmd", "codexio")) {
+        $target = Join-Path $manifestData.installRoot $item
+        if (Test-Path -LiteralPath $target) {
+            Remove-Item -Recurse -Force -LiteralPath $target
+        }
+    }
+    foreach ($item in @("start.cmd", "restart.cmd", "update.cmd", "codexio")) {
+        $source = Join-Path $manifestData.backupRoot $item
+        if (Test-Path -LiteralPath $source) {
+            Copy-Item -Recurse -Force -LiteralPath $source -Destination (Join-Path $manifestData.installRoot $item)
+        }
+    }
+}
+
+function Start-Codexio {
+    Start-Process -FilePath $manifestData.startCommand -WorkingDirectory $manifestData.installRoot
+}
+
+function Wait-CodexioStarted {
+    $deadline = [DateTimeOffset]::Now.AddSeconds(60)
+    while ([DateTimeOffset]::Now -lt $deadline) {
+        if ((Test-Path -LiteralPath $manifestData.supervisorStatePath) -and (Test-Path -LiteralPath $manifestData.serverStatePath)) {
+            try {
+                $state = Get-Content -Raw -LiteralPath $manifestData.supervisorStatePath | ConvertFrom-Json
+                $serverState = Get-Content -Raw -LiteralPath $manifestData.serverStatePath | ConvertFrom-Json
+                $supervisorResponse = Invoke-RestMethod -Method Get -Uri "http://$($state.host):$($state.port)/status" -Headers @{ Authorization = "Bearer $($state.token)" } -TimeoutSec 5
+                $serverResponse = Invoke-RestMethod -Method Get -Uri "http://$($serverState.host):$($serverState.port)/api/status" -TimeoutSec 5
+                if ($supervisorResponse.isFailed -eq $false -and $supervisorResponse.data.pid -eq $state.pid -and $serverResponse.isFailed -eq $false -and $serverResponse.data.pid -eq $serverState.pid) {
+                    return
+                }
+            } catch {
+                Write-UpdateLog "codexio health check failed: $($_.Exception.Message)"
+            }
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    throw "codexio did not become ready after start"
+}
+
+try {
+    Write-UpdateLog "update started: $($manifestData.fromVersion) -> $($manifestData.toVersion)"
+    Start-Sleep -Seconds 2
+    Stop-Codexio
+    Backup-Current
+    Replace-Current
+    Start-Codexio
+    Wait-CodexioStarted
+    Write-UpdateLog "update completed"
+} catch {
+    Write-UpdateLog "update failed: $($_.Exception.Message)"
+    try {
+        Stop-Codexio
+        Restore-Backup
+        Start-Codexio
+        Wait-CodexioStarted
+        Write-UpdateLog "rollback completed"
+    } catch {
+        Write-UpdateLog "rollback failed: $($_.Exception.Message)"
+    }
+}
+`
+}
