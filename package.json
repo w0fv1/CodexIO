@@ -17,10 +17,10 @@
     "start": "tsx src/index.ts start",
     "stop": "tsx src/index.ts stop",
     "restart": "tsx src/index.ts restart",
-    "test": "vitest run test/app.test.ts test/core.test.ts test/UpdateChecker.test.ts",
+    "test": "vitest run --pool=threads test/app.test.ts test/core.test.ts test/UpdateChecker.test.ts",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "package:windows": "powershell -ExecutionPolicy Bypass -File scripts/build_windows_zip.ps1",
-    "deploy": "powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1"
+    "package:windows": "powershell -ExecutionPolicy Bypass -File scripts/release.ps1 -BuildOnly",
+    "release": "powershell -ExecutionPolicy Bypass -File scripts/release.ps1"
   },
   "dependencies": {
     "@anthropic-ai/claude-code": "^2.1.178",

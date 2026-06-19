@@ -1,11 +1,14 @@
 param(
-    [string[]] $Platforms = @("windows-x64-standalone", "windows-x64-pnpm")
+    [string] $AppDomain = "next.firco.cn",
+    [string[]] $Platforms = @("windows-x64-pnpm", "windows-x64-standalone"),
+    [switch] $BuildOnly
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+$RepoRoot = Split-Path -Path (Split-Path -Path $ProjectRoot -Parent) -Parent
 $BuildRoot = Join-Path $ProjectRoot "build"
 $InstallRoot = Join-Path $BuildRoot "production-install"
 $ReleaseRoot = Join-Path $ProjectRoot "release"
@@ -13,13 +16,12 @@ $PackageJsonPath = Join-Path $ProjectRoot "package.json"
 $PackageName = "codexio"
 $StandaloneRoot = Join-Path $BuildRoot "standalone\codexio"
 $PnpmRoot = Join-Path $BuildRoot "pnpm\codexio"
-$SmokeRoot = Join-Path $BuildRoot "release-smoke"
 $NodeRuntimeVersion = "22.20.0"
 $PnpmRuntimeVersion = "10.33.4"
 
 function Write-Step {
     param([Parameter(Mandatory)] [string] $Text)
-    Write-Host "[codexio package] $Text"
+    Write-Host "[codexio release] $Text"
 }
 
 function Assert-PathExists {
@@ -113,6 +115,85 @@ function Invoke-CheckedCommand {
     finally {
         Pop-Location
     }
+}
+
+function Read-AdminApiHeaders {
+    . (Join-Path $RepoRoot "script\NfircoBackendApiCredential.ps1")
+    $adminApiCredential = Read-NfircoBackendApiCredential -RepoRoot $RepoRoot
+    $adminApiUsername = [string]$adminApiCredential.Username
+    $adminApiPassword = [string]$adminApiCredential.Password
+    return @{ Authorization = "Basic " + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("${adminApiUsername}:${adminApiPassword}")) }
+}
+
+function Invoke-NfircoApi {
+    param(
+        [Parameter(Mandatory)] [string] $Uri,
+        [Parameter(Mandatory)] [object] $Body,
+        [Parameter(Mandatory)] [hashtable] $Headers
+    )
+    $json = $Body | ConvertTo-Json -Depth 8
+    $response = Invoke-RestMethod -Uri $Uri -Method Post -Headers $Headers -ContentType "application/json; charset=utf-8" -Body $json -TimeoutSec 60
+    if ($null -eq $response) {
+        throw "Nfirco API returned empty response"
+    }
+    if ($response.isf) {
+        throw "Nfirco API failed: $($response.msg)"
+    }
+    return $response.data
+}
+
+function Get-ZipSha256 {
+    param([Parameter(Mandatory)] [string] $Path)
+    $stream = [System.IO.File]::OpenRead((Resolve-Path -Path $Path).Path)
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hash = $sha256.ComputeHash($stream)
+            return -join ($hash | ForEach-Object { $_.ToString("x2") })
+        }
+        finally {
+            $sha256.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
+function Format-Duration {
+    param([Parameter(Mandatory)] [TimeSpan] $Duration)
+    return "{0:n2}s" -f $Duration.TotalSeconds
+}
+
+function Measure-Step {
+    param(
+        [Parameter(Mandatory)] [string] $Name,
+        [Parameter(Mandatory)] [scriptblock] $Action
+    )
+    $startedAt = Get-Date
+    Write-Step "$Name started"
+    & $Action | Out-Host
+    $duration = (Get-Date) - $startedAt
+    Write-Step "$Name completed in $(Format-Duration -Duration $duration)"
+    return $duration
+}
+
+function Remove-PathWithRetry {
+    param([Parameter(Mandatory)] [string] $Path)
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        try {
+            if (Test-Path -Path $Path) {
+                Remove-Item -Recurse -Force $Path
+            }
+            return
+        }
+        catch {
+            $lastError = $_
+            Start-Sleep -Milliseconds (250 * $attempt)
+        }
+    }
+    throw $lastError
 }
 
 function New-CommandFile {
@@ -363,11 +444,15 @@ exit `$LASTEXITCODE
     Write-Utf8File -Path $CmdPath -Text $text.Replace("`n", "`r`n")
 }
 
-function New-PnpmStartFile {
-    param([Parameter(Mandatory)] [string] $Path)
+function New-PnpmCommandFile {
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [Parameter(Mandatory)] [string] $Action,
+        [Parameter(Mandatory)] [string] $Command
+    )
     $text = @"
 @echo off
-echo [codexio] start Codexio
+echo [codexio] $Action Codexio
 cd /d %~dp0
 echo [codexio] working directory: %CD%
 echo [codexio] checking production dependencies
@@ -383,8 +468,10 @@ call "%~dp0codexio\nodew.cmd" pnpm install --prod --dir "%~dp0codexio" --config.
 if errorlevel 1 goto failed
 echo [codexio] dependencies installed
 :start
-echo [codexio] launching local server
-call "%~dp0codexio\nodew.cmd" codexio\dist\index.js start --config "%~dp0config.yaml"
+echo [codexio] running $Action
+call "%~dp0codexio\nodew.cmd" codexio\dist\index.js $Command --config "%~dp0config.yaml"
+if errorlevel 1 goto failed
+echo [codexio] $Action done
 goto end
 :failed
 echo [codexio] command failed
@@ -430,6 +517,7 @@ function New-StandalonePackage {
     Write-Step "copy production dependencies"
     Copy-Item -Recurse -Force (Join-Path $InstallRoot "node_modules") $appRoot
     New-CommandFile -Path (Join-Path $StandaloneRoot "start.cmd") -Command "codexio\runtime\node\node.exe codexio\dist\index.js start --config ""%~dp0config.yaml""" -Title "start Codexio with bundled Node.js"
+    New-CommandFile -Path (Join-Path $StandaloneRoot "restart.cmd") -Command "codexio\runtime\node\node.exe codexio\dist\index.js restart --config ""%~dp0config.yaml""" -Title "restart Codexio with bundled Node.js"
     Assert-PathExists (Join-Path $appRoot "runtime\node\node.exe")
     Assert-PathExists (Join-Path $appRoot "node_modules\@openai\codex-win32-x64\package.json")
     Assert-PathExists (Join-Path $appRoot "node_modules\@anthropic-ai\claude-code-win32-x64\package.json")
@@ -448,20 +536,42 @@ function New-PnpmPackage {
     Assert-PathExists (Join-Path $appRoot "runtime\pnpm\bin\pnpm.cjs")
     Write-Step "write pnpm package bootstrap scripts"
     New-PnpmNodewFile -CmdPath (Join-Path $appRoot "nodew.cmd")
-    New-PnpmStartFile -Path (Join-Path $PnpmRoot "start.cmd")
+    New-PnpmCommandFile -Path (Join-Path $PnpmRoot "start.cmd") -Action "start" -Command "start"
+    New-PnpmCommandFile -Path (Join-Path $PnpmRoot "restart.cmd") -Action "restart" -Command "restart"
 }
 
 function Compress-Package {
     param(
         [Parameter(Mandatory)] [string] $SourceRoot,
         [Parameter(Mandatory)] [string] $ArchivePath,
-        [Parameter(Mandatory)] [string[]] $Entries
+        [Parameter(Mandatory)] [string[]] $Entries,
+        [Parameter(Mandatory)] [System.IO.Compression.CompressionLevel] $CompressionLevel
     )
     if (Test-Path -Path $ArchivePath) {
-        Remove-Item -Force $ArchivePath
+        Remove-PathWithRetry -Path $ArchivePath
     }
     Write-Step "write archive: $ArchivePath"
-    Compress-Archive -Path $SourceRoot -DestinationPath $ArchivePath -CompressionLevel Optimal
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $sourceParent = [System.IO.Path]::GetFullPath((Split-Path -Parent $SourceRoot))
+    if (-not $sourceParent.EndsWith([System.IO.Path]::DirectorySeparatorChar)) {
+        $sourceParent = $sourceParent + [System.IO.Path]::DirectorySeparatorChar
+    }
+    $zip = [System.IO.Compression.ZipFile]::Open($ArchivePath, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        $files = Get-ChildItem -Path $SourceRoot -Recurse -File
+        foreach ($file in $files) {
+            $fullPath = [System.IO.Path]::GetFullPath($file.FullName)
+            if (-not $fullPath.StartsWith($sourceParent, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "File is outside source root: $fullPath"
+            }
+            $relativePath = $fullPath.Substring($sourceParent.Length).Replace("\", "/")
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $file.FullName, $relativePath, $CompressionLevel) | Out-Null
+        }
+    }
+    finally {
+        $zip.Dispose()
+    }
     Write-Step "verify archive contents"
     Assert-ArchiveContains $ArchivePath $Entries
     $file = Get-Item -Path $ArchivePath
@@ -469,51 +579,48 @@ function Compress-Package {
     Write-Step "size: $($file.Length) bytes"
 }
 
-function Invoke-StandaloneSmoke {
-    param([Parameter(Mandatory)] [string] $ArchivePath)
-    $extractRoot = Join-Path $SmokeRoot "standalone"
-    New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
-    Write-Step "extract standalone package for smoke test"
-    Expand-Archive -Path $ArchivePath -DestinationPath $extractRoot -Force
-    $root = Join-Path $extractRoot "codexio"
-    $appRoot = Join-Path $root "codexio"
-    $nodeExe = Join-Path $appRoot "runtime\node\node.exe"
-    Write-Step "check Codexio CLI version"
-    Invoke-CheckedCommand -FilePath $nodeExe -ArgumentList @("dist\index.js", "--version") -WorkingDirectory $appRoot
-    Write-Step "check Codex CLI version"
-    Invoke-CheckedCommand -FilePath $nodeExe -ArgumentList @("node_modules\@openai\codex\bin\codex.js", "--version") -WorkingDirectory $appRoot
-    Write-Step "check Claude CLI version"
-    Invoke-CheckedCommand -FilePath $nodeExe -ArgumentList @("node_modules\@anthropic-ai\claude-code\cli-wrapper.cjs", "--version") -WorkingDirectory $appRoot
+function Publish-Package {
+    param(
+        [Parameter(Mandatory)] [string] $Platform,
+        [Parameter(Mandatory)] [string] $ArchivePath,
+        [Parameter(Mandatory)] [string] $Version,
+        [Parameter(Mandatory)] [string] $BaseUrl,
+        [Parameter(Mandatory)] [hashtable] $Headers
+    )
+    if (-not (Test-Path -Path $ArchivePath)) {
+        throw "Release zip not found: $ArchivePath"
+    }
+    $file = Get-Item -Path $ArchivePath
+    $sha256 = Get-ZipSha256 -Path $ArchivePath
+    Write-Step "built: $ArchivePath"
+    Write-Step "platform: $Platform"
+    Write-Step "size: $($file.Length) bytes"
+    Write-Step "SHA256: $sha256"
+    $createBody = @{
+        platform = $Platform
+        version = $Version
+        fileName = $file.Name
+        fileSizeBytes = $file.Length
+        sha256 = $sha256
+        mimeType = "application/zip"
+    }
+    $createUri = "$BaseUrl/apim/download/release/codexio"
+    $completeUri = "$BaseUrl/apim/download/release/codexio/$Version/complete"
+    Write-Step "request upload URL: $Platform"
+    $uploadData = Invoke-NfircoApi -Uri $createUri -Body $createBody -Headers $Headers
+    if ($null -eq $uploadData -or [string]::IsNullOrWhiteSpace($uploadData.uploadUrl)) {
+        throw "Nfirco API did not return uploadUrl"
+    }
+    Write-Step "upload package to OSS: $Platform"
+    Invoke-WebRequest -Uri $uploadData.uploadUrl -Method Put -InFile $ArchivePath -ContentType "application/zip" -UseBasicParsing -TimeoutSec 900 | Out-Null
+    Write-Step "complete release record: $Platform"
+    Invoke-NfircoApi -Uri $completeUri -Body @{ platform = $Platform } -Headers $Headers | Out-Null
+    Write-Step "package published: $Platform"
 }
 
-function Invoke-PnpmSmoke {
-    param([Parameter(Mandatory)] [string] $ArchivePath)
-    $extractRoot = Join-Path $SmokeRoot "pnpm"
-    New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
-    Write-Step "extract pnpm package for smoke test"
-    Expand-Archive -Path $ArchivePath -DestinationPath $extractRoot -Force
-    $root = Join-Path $extractRoot "codexio"
-    $appRoot = Join-Path $root "codexio"
-    Assert-PathExists (Join-Path $root "config.yaml")
-    Assert-PathExists (Join-Path $appRoot "nodew.cmd")
-    $startText = Get-Content -Raw -Path (Join-Path $root "start.cmd")
-    if (-not $startText.Contains('"%~dp0codexio\nodew.cmd"') -or -not $startText.Contains('--config "%~dp0config.yaml"')) {
-        throw "pnpm start command must call inner nodew.cmd and outer config.yaml"
-    }
-    Write-Step "check nodew bootstrap"
-    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", ".\codexio\nodew.cmd", "--version") -WorkingDirectory $root
-    Write-Step "install pnpm package dependencies"
-    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", ".\codexio\nodew.cmd", "pnpm", "install", "--prod", "--dir", ".\codexio", "--config.node-linker=hoisted") -WorkingDirectory $root
-    Write-Step "check Codexio CLI version"
-    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", ".\codexio\nodew.cmd", "codexio\dist\index.js", "--version") -WorkingDirectory $root
-    Write-Step "check Codex CLI version"
-    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", ".\codexio\nodew.cmd", "codexio\node_modules\@openai\codex\bin\codex.js", "--version") -WorkingDirectory $root
-    Write-Step "check Claude CLI version"
-    Invoke-CheckedCommand -FilePath "cmd" -ArgumentList @("/c", ".\codexio\nodew.cmd", "codexio\node_modules\@anthropic-ai\claude-code\cli-wrapper.cjs", "--version") -WorkingDirectory $root
-}
 Push-Location $ProjectRoot
 try {
-    $supportedPlatforms = @("windows-x64-standalone", "windows-x64-pnpm")
+    $supportedPlatforms = @("windows-x64-pnpm", "windows-x64-standalone")
     $selectedPlatforms = @($supportedPlatforms | Where-Object { $Platforms -contains $_ })
     if ($selectedPlatforms.Count -ne $Platforms.Count) {
         throw "Unsupported platform. Supported platforms: $($supportedPlatforms -join ', ')"
@@ -524,6 +631,8 @@ try {
     $script:Version = Read-ProjectVersion
     $standaloneArchive = Join-Path $ReleaseRoot "$PackageName-$script:Version-windows-x64-standalone.zip"
     $pnpmArchive = Join-Path $ReleaseRoot "$PackageName-$script:Version-windows-x64-pnpm.zip"
+    $baseUrl = "https://$AppDomain"
+    $adminApiHeaders = $null
     Write-Step "version: $script:Version"
     Write-Step "platforms: $($selectedPlatforms -join ', ')"
     if ($buildStandalone) {
@@ -535,15 +644,18 @@ try {
         Write-Step "pnpm runtime: $pnpmRuntimeRoot"
     }
 
-    Write-Step "clean previous build artifacts"
-    if (Test-Path -Path $BuildRoot) {
-        Remove-Item -Recurse -Force $BuildRoot
-    }
-    if (Test-Path -Path $ReleaseRoot) {
-        Remove-Item -Recurse -Force $ReleaseRoot
-    }
-    if (Test-Path -Path (Join-Path $ProjectRoot "dist")) {
-        Remove-Item -Recurse -Force (Join-Path $ProjectRoot "dist")
+    $durations = @{}
+
+    $durations["clean"] = Measure-Step -Name "clean previous build artifacts" -Action {
+        if (Test-Path -Path $BuildRoot) {
+            Remove-PathWithRetry -Path $BuildRoot
+        }
+        if (Test-Path -Path $ReleaseRoot) {
+            Remove-PathWithRetry -Path $ReleaseRoot
+        }
+        if (Test-Path -Path (Join-Path $ProjectRoot "dist")) {
+            Remove-PathWithRetry -Path (Join-Path $ProjectRoot "dist")
+        }
     }
 
     Write-Step "create build directories"
@@ -551,61 +663,96 @@ try {
     New-Item -ItemType Directory -Force -Path $ReleaseRoot | Out-Null
     New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
 
-    Write-Step "test"
-    Invoke-CheckedCommand -FilePath "pnpm" -ArgumentList @("test")
+    $durations["test"] = Measure-Step -Name "test" -Action {
+        Invoke-CheckedCommand -FilePath "pnpm" -ArgumentList @("test")
+    }
 
-    Write-Step "build"
-    Invoke-CheckedCommand -FilePath "pnpm" -ArgumentList @("build")
-
-    if ($buildStandalone) {
-        Write-Step "install production dependencies"
-        Copy-Item -Force (Join-Path $ProjectRoot "package.json") $InstallRoot
-        Copy-Item -Force (Join-Path $ProjectRoot "pnpm-lock.yaml") $InstallRoot
-        Invoke-CheckedCommand -FilePath "pnpm" -ArgumentList @("install", "--prod", "--dir", $InstallRoot, "--config.node-linker=hoisted")
-
-        Write-Step "assemble standalone package"
-        New-StandalonePackage -NodeRoot $nodeRoot
+    $durations["build"] = Measure-Step -Name "build" -Action {
+        Invoke-CheckedCommand -FilePath "pnpm" -ArgumentList @("build")
     }
 
     if ($buildPnpm) {
-        Write-Step "assemble pnpm package"
-        New-PnpmPackage -PnpmRuntimeRoot $pnpmRuntimeRoot
+        $durations["assemble windows-x64-pnpm"] = Measure-Step -Name "assemble pnpm package" -Action {
+            New-PnpmPackage -PnpmRuntimeRoot $pnpmRuntimeRoot
+        }
     }
 
     if ($buildStandalone) {
-        Write-Step "compress standalone package"
-        Compress-Package -SourceRoot $StandaloneRoot -ArchivePath $standaloneArchive -Entries @(
-            "codexio/start.cmd",
-            "codexio/config.yaml",
-            "codexio/codexio/runtime/node/node.exe",
-            "codexio/codexio/dist/index.js",
-            "codexio/codexio/node_modules/@openai/codex/bin/codex.js",
-            "codexio/codexio/node_modules/@openai/codex-win32-x64/package.json",
-            "codexio/codexio/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs",
-            "codexio/codexio/node_modules/@anthropic-ai/claude-code-win32-x64/package.json",
-            "codexio/codexio/.codexio/release.json"
-        )
+        $durations["install production dependencies"] = Measure-Step -Name "install production dependencies" -Action {
+            Copy-Item -Force (Join-Path $ProjectRoot "package.json") $InstallRoot
+            Copy-Item -Force (Join-Path $ProjectRoot "pnpm-lock.yaml") $InstallRoot
+            Invoke-CheckedCommand -FilePath "pnpm" -ArgumentList @("install", "--prod", "--dir", $InstallRoot, "--config.node-linker=hoisted")
+        }
 
-        Write-Step "smoke standalone package"
-        Invoke-StandaloneSmoke -ArchivePath $standaloneArchive
+        $durations["assemble windows-x64-standalone"] = Measure-Step -Name "assemble standalone package" -Action {
+            New-StandalonePackage -NodeRoot $nodeRoot
+        }
     }
 
     if ($buildPnpm) {
-        Write-Step "compress pnpm package"
-        Compress-Package -SourceRoot $PnpmRoot -ArchivePath $pnpmArchive -Entries @(
-            "codexio/start.cmd",
-            "codexio/config.yaml",
-            "codexio/codexio/dist/index.js",
-            "codexio/codexio/package.json",
-            "codexio/codexio/pnpm-lock.yaml",
-            "codexio/codexio/nodew.cmd",
-            "codexio/codexio/runtime/pnpm/bin/pnpm.cjs",
-            "codexio/codexio/.codexio/release.json"
-        )
-
-        Write-Step "smoke pnpm package"
-        Invoke-PnpmSmoke -ArchivePath $pnpmArchive
+        $durations["compress windows-x64-pnpm"] = Measure-Step -Name "compress pnpm package" -Action {
+            Compress-Package -SourceRoot $PnpmRoot -ArchivePath $pnpmArchive -CompressionLevel ([System.IO.Compression.CompressionLevel]::NoCompression) -Entries @(
+                "codexio/start.cmd",
+                "codexio/restart.cmd",
+                "codexio/config.yaml",
+                "codexio/codexio/dist/index.js",
+                "codexio/codexio/package.json",
+                "codexio/codexio/pnpm-lock.yaml",
+                "codexio/codexio/nodew.cmd",
+                "codexio/codexio/runtime/pnpm/bin/pnpm.cjs",
+                "codexio/codexio/.codexio/release.json"
+            )
+        }
+        if (-not $BuildOnly) {
+            if ($null -eq $adminApiHeaders) {
+                $adminApiHeaders = Read-AdminApiHeaders
+            }
+            $durations["publish windows-x64-pnpm"] = Measure-Step -Name "publish windows-x64-pnpm" -Action {
+                Publish-Package -Platform "windows-x64-pnpm" -ArchivePath $pnpmArchive -Version $script:Version -BaseUrl $baseUrl -Headers $adminApiHeaders
+            }
+        }
     }
+
+    if ($buildStandalone) {
+        $durations["compress windows-x64-standalone"] = Measure-Step -Name "compress standalone package" -Action {
+            Compress-Package -SourceRoot $StandaloneRoot -ArchivePath $standaloneArchive -CompressionLevel ([System.IO.Compression.CompressionLevel]::Optimal) -Entries @(
+                "codexio/start.cmd",
+                "codexio/restart.cmd",
+                "codexio/config.yaml",
+                "codexio/codexio/runtime/node/node.exe",
+                "codexio/codexio/dist/index.js",
+                "codexio/codexio/node_modules/@openai/codex/bin/codex.js",
+                "codexio/codexio/node_modules/@openai/codex-win32-x64/package.json",
+                "codexio/codexio/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs",
+                "codexio/codexio/node_modules/@anthropic-ai/claude-code-win32-x64/package.json",
+                "codexio/codexio/.codexio/release.json"
+            )
+        }
+        if (-not $BuildOnly) {
+            if ($null -eq $adminApiHeaders) {
+                $adminApiHeaders = Read-AdminApiHeaders
+            }
+            $durations["publish windows-x64-standalone"] = Measure-Step -Name "publish windows-x64-standalone" -Action {
+                Publish-Package -Platform "windows-x64-standalone" -ArchivePath $standaloneArchive -Version $script:Version -BaseUrl $baseUrl -Headers $adminApiHeaders
+            }
+        }
+    }
+
+    Write-Step "summary"
+    foreach ($name in $durations.Keys) {
+        Write-Step "$name`: $(Format-Duration -Duration $durations[$name])"
+    }
+
+    if ($BuildOnly) {
+        Write-Step "build only completed"
+        return
+    }
+
+    Write-Step "release summary"
+    foreach ($name in $durations.Keys) {
+        Write-Step "$name`: $(Format-Duration -Duration $durations[$name])"
+    }
+    Write-Step "release page updated: $baseUrl/manage/nfirco/release"
 }
 finally {
     Pop-Location
