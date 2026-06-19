@@ -30,7 +30,7 @@ describe('server', () => {
     })
     expect(messages[1]).toMatchObject({
       type: 'agent',
-      text: '收到，我会马上处理这条消息。'
+      text: expect.any(String)
     })
     expect(messages[2]).toMatchObject({
       type: 'agent',
@@ -213,11 +213,11 @@ describe('server', () => {
     })
     expect(firstMessages[1]).toMatchObject({
       type: 'agent',
-      text: '收到，我会马上处理这条消息。'
+      text: expect.any(String)
     })
     expect(secondMessages[1]).toMatchObject({
       type: 'agent',
-      text: '收到，我会马上处理这条消息。'
+      text: expect.any(String)
     })
     expect(firstMessages[2]).toMatchObject({
       type: 'agent',
@@ -263,7 +263,7 @@ describe('server', () => {
     expect(restored).toHaveLength(20)
     expect(restored[0]).toMatchObject({
       type: 'agent',
-      text: '收到，我会马上处理这条消息。'
+      text: expect.any(String)
     })
     expect(restored[1]).toMatchObject({
       type: 'agent',

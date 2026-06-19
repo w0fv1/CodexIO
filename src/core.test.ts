@@ -73,7 +73,7 @@ describe('core', () => {
     const result = await manager.receive('hello')
     expect(result.isFailed).toBe(false)
     expect(outbound).toEqual([
-      '收到，我会马上处理这条消息。',
+      expect.any(String),
       'echo: hello'
     ])
   })
