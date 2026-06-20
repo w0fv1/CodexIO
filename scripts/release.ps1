@@ -118,7 +118,7 @@ function Invoke-CheckedCommand {
 }
 
 function Read-AdminApiHeaders {
-    . (Join-Path $RepoRoot "script\NfircoBackendApiCredential.ps1")
+    Import-Module (Join-Path $RepoRoot "script\NfircoBackendApiCredential.psm1") -Force
     $adminApiCredential = Read-NfircoBackendApiCredential -RepoRoot $RepoRoot
     $adminApiUsername = [string]$adminApiCredential.Username
     $adminApiPassword = [string]$adminApiCredential.Password
