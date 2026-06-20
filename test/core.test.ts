@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs'
-import { mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -9,12 +9,14 @@ import { CodexAppServer } from '../src/agent/CodexAppServer.js'
 import { CodexAgent } from '../src/agent/CodexAgent.js'
 import { CodexSessionStore } from '../src/agent/CodexSessionStore.js'
 import { AgentLoginInProgressError } from '../src/agent/Agent.js'
+import { codexioRootPath } from '../src/AppMetadata.js'
 import { CommandExecutor, parseCommandInput } from '../src/controller/CommandExecutor.js'
-import { createEmailMessagePayload, createEmailSender, isAllowedEmailSender } from '../src/channel/EmailChannelAdapter.js'
-import { createFeishuMessagePayload } from '../src/channel/FeishuChannelAdapter.js'
+import { createEmailMessagePayload, createEmailSender, createFeishuMessagePayload, createFeishuWebhookText, isAllowedEmailSender } from '../src/channel/ChannelUtil.js'
 import { Logger } from '../src/component/Logger.js'
 import { renderMarkdownHtml } from '../src/component/Markdown.js'
+import { runtimeServerStatePath, supervisorStatePath } from '../src/component/ServerLifecycle.js'
 import { createUpdaterScript } from '../src/component/UpdateInstaller.js'
+import { Configer, diffConfigPaths } from '../src/config/Configer.js'
 import { ConfigSchema, ConfigService, normalizeWorkspacePath, validateCodexioConfig } from '../src/ConfigService.js'
 import { Result } from '../src/value/Result.js'
 import { TestAgent } from './TestAgent.js'
@@ -811,6 +813,159 @@ describe('core', () => {
     expect(existsSync(config.workspace.path)).toBe(true)
   })
 
+  it('configer patches config file and notifies after successful write', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-configer-'))
+    const workspace = join(dir, 'workspace')
+    await mkdir(workspace)
+    const path = join(dir, 'config.yaml')
+    await writeFile(path, [
+      'server:',
+      '  host: 127.0.0.1',
+      '  port: 8787',
+      '  token: test-token',
+      'agents:',
+      '  codex:',
+      '    enabled: true',
+      '  claude:',
+      '    enabled: false',
+      'channels:',
+      '  web:',
+      '    enabled: true',
+      'workspace:',
+      `  path: ${workspace}`
+    ].join('\n'), 'utf8')
+    const configer = new Configer(path)
+    const changes: Array<{
+      previousPort: number
+      currentPort: number
+      paths: string[]
+    }> = []
+    configer.subscribe((change) => {
+      changes.push({
+        previousPort: change.previous.proxy.port,
+        currentPort: change.current.proxy.port,
+        paths: change.paths
+      })
+    })
+
+    const change = await configer.patch({
+      proxy: {
+        enabled: true,
+        host: '127.0.0.1',
+        port: 7891
+      }
+    } as Partial<CodexioConfig>)
+    const text = await readFile(path, 'utf8')
+
+    expect(change.paths).toEqual([
+      'proxy.enabled',
+      'proxy.port'
+    ])
+    expect(text).toContain('port: 7891')
+    expect(changes).toEqual([
+      {
+        previousPort: 7890,
+        currentPort: 7891,
+        paths: [
+          'proxy.enabled',
+          'proxy.port'
+        ]
+      }
+    ])
+
+    await configer.patch({
+      proxy: {
+        enabled: true,
+        host: '127.0.0.1',
+        port: 7891
+      }
+    } as Partial<CodexioConfig>)
+    expect(changes).toHaveLength(1)
+  })
+
+  it('configer selected subscription only receives selected config changes', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-configer-'))
+    const workspace = join(dir, 'workspace')
+    await mkdir(workspace)
+    const path = join(dir, 'config.yaml')
+    await writeFile(path, [
+      'server:',
+      '  host: 127.0.0.1',
+      '  port: 8787',
+      '  token: test-token',
+      'agents:',
+      '  codex:',
+      '    enabled: true',
+      '  claude:',
+      '    enabled: false',
+      'channels:',
+      '  web:',
+      '    enabled: true',
+      '  feishu:',
+      '    enabled: false',
+      '    appId: app-1',
+      '    appSecret: secret-1',
+      '    chatId: chat-1',
+      '    ws: wss://old.example.test',
+      'workspace:',
+      `  path: ${workspace}`
+    ].join('\n'), 'utf8')
+    const configer = new Configer(path)
+    const feishuChanges: Array<{
+      previousSecret: string | undefined
+      currentSecret: string | undefined
+    }> = []
+    configer.subscribe((config) => config.channels.feishu, (change) => {
+      feishuChanges.push({
+        previousSecret: change.previousValue?.appSecret,
+        currentSecret: change.currentValue?.appSecret
+      })
+    })
+
+    await configer.patch({
+      proxy: {
+        enabled: true,
+        host: '127.0.0.1',
+        port: 7891
+      }
+    } as Partial<CodexioConfig>)
+    expect(feishuChanges).toEqual([])
+
+    await configer.patch({
+      channels: {
+        feishu: {
+          enabled: false,
+          appId: 'app-1',
+          appSecret: 'secret-2',
+          chatId: 'chat-1',
+          ws: 'wss://old.example.test'
+        }
+      }
+    } as Partial<CodexioConfig>)
+    expect(feishuChanges).toEqual([
+      {
+        previousSecret: 'secret-1',
+        currentSecret: 'secret-2'
+      }
+    ])
+  })
+
+  it('diffs config paths by leaf value', () => {
+    expect(diffConfigPaths({
+      proxy: {
+        enabled: false,
+        port: 7890
+      }
+    }, {
+      proxy: {
+        enabled: true,
+        port: 7890
+      }
+    })).toEqual([
+      'proxy.enabled'
+    ])
+  })
+
   it('creates packaged managed workspace when loading default release config', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'codexio-package-'))
     const path = join(dir, 'config.yaml')
@@ -912,6 +1067,11 @@ describe('core', () => {
     expect(config.update.baseUrl).toBe('https://update.example.test')
   })
 
+  it('stores runtime server state under codexio runtime data directory', () => {
+    expect(runtimeServerStatePath(join('C:\\app', 'config.yaml'))).toBe(join(codexioRootPath, '.codexio', 'state', 'server.json'))
+    expect(supervisorStatePath(join('C:\\app', 'config.yaml'))).toBe(join(codexioRootPath, '.codexio', 'state', 'supervisor.json'))
+  })
+
   it('updater waits for restarted server pid', () => {
     const script = createUpdaterScript()
     expect(script).toContain('$serverState = Get-Content -Raw -LiteralPath $manifestData.serverStatePath | ConvertFrom-Json')
@@ -919,11 +1079,19 @@ describe('core', () => {
     expect(script).not.toContain('$response.data.pid -eq $state.pid')
   })
 
-  it('updater preserves runtime data without replacing release metadata', () => {
+  it('updater preserves runtime data in place while updating release metadata', () => {
     const script = createUpdaterScript()
-    expect(script).toContain('$preservedData = Join-Path $manifestData.updateRoot "preserved-codexio-data"')
-    expect(script).toContain('$currentData = Join-Path $manifestData.installRoot "codexio\\.codexio"')
-    expect(script).toContain('if ($item.Name -eq "release.json")')
+    expect(script).toContain('function Copy-CodexioAppContent')
+    expect(script).toContain('if ($item.Name -eq ".codexio")')
+    expect(script).toContain('Copy-UpdateItem -Source (Join-Path $item.FullName "release.json") -Destination (Join-Path $targetData "release.json")')
+    expect(script).not.toContain('preserved-codexio-data')
+  })
+
+  it('updater removes only transient application data directories', () => {
+    const script = createUpdaterScript()
+    expect(script).toContain('function Remove-TransientAppData')
+    expect(script).toContain('foreach ($item in @("download", "update"))')
+    expect(script).toContain('Join-Path $manifestData.installRoot "codexio\\.codexio"')
   })
 
   it('updater terminates install-root processes and retries directory removal', () => {
@@ -935,6 +1103,17 @@ describe('core', () => {
     expect(script).toContain('$_.CommandLine.Contains($installRoot)')
     expect(script).toContain('for ($attempt = 1; $attempt -le 10; $attempt++)')
     expect(script).toContain('Stop-InstallRootProcess')
+  })
+
+  it('updater removes legacy root runtime state files after replacement', () => {
+    const script = createUpdaterScript()
+    expect(script).toContain('function Remove-LegacyRootState')
+    expect(script).toContain('function Remove-LegacyInstallDataRoot')
+    expect(script).toContain('Join-Path $manifestData.installRoot "server.json"')
+    expect(script).toContain('Join-Path $manifestData.installRoot "supervisor.json"')
+    expect(script).toContain('Join-Path $manifestData.installRoot ".codexio"')
+    expect(script).toContain('Remove-LegacyRootState')
+    expect(script).toContain('Remove-LegacyInstallDataRoot')
   })
 
   it('loads channel credentials from config', () => {
@@ -1037,7 +1216,7 @@ describe('core', () => {
     ], 'user@example.test')).toBe(false)
   })
 
-  it('formats feishu message without codexio title and labels user at bottom', () => {
+  it('formats feishu message without codexio title and labels non-agent roles at bottom', () => {
     const agentPayload = createFeishuMessagePayload({
       role: 'agent',
       text: 'agent output',
@@ -1075,9 +1254,47 @@ describe('core', () => {
         text: 'User'
       }
     ])
+
+    const systemPayload = createFeishuMessagePayload({
+      role: 'system',
+      text: 'system output',
+      createdAt: Date.now()
+    })
+    const systemContent = JSON.parse(systemPayload.content) as {
+      zh_cn: {
+        content: Array<Array<{ tag: string, text: string }>>
+      }
+    }
+    expect(systemContent.zh_cn.content).toEqual([
+      [
+        {
+          tag: 'md',
+          text: 'system output'
+        }
+      ],
+      [
+        {
+          tag: 'text',
+          text: 'System'
+        }
+      ]
+    ])
   })
 
-  it('formats email message without codexio title and labels user at bottom', () => {
+  it('formats feishu webhook system message with system suffix', () => {
+    expect(createFeishuWebhookText({
+      role: 'system',
+      text: 'system output',
+      createdAt: Date.now()
+    })).toBe('system output\n\nSystem')
+    expect(createFeishuWebhookText({
+      role: 'system',
+      text: 'clear',
+      createdAt: Date.now()
+    })).toBe('已开始新对话\n\nSystem')
+  })
+
+  it('formats email message without codexio title and labels non-agent roles at bottom', () => {
     const agentPayload = createEmailMessagePayload({
       role: 'agent',
       text: 'agent output',
@@ -1096,6 +1313,16 @@ describe('core', () => {
     expect(userPayload).toEqual({
       subject: 'User',
       text: 'user input\n\nUser'
+    })
+
+    const systemPayload = createEmailMessagePayload({
+      role: 'system',
+      text: 'system output',
+      createdAt: Date.now()
+    })
+    expect(systemPayload).toEqual({
+      subject: 'System',
+      text: 'system output\n\nSystem'
     })
   })
 

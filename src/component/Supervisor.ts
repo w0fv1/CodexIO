@@ -2,7 +2,8 @@ import { ChildProcess } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { IncomingMessage, Server as HttpServer, ServerResponse, createServer } from 'node:http'
 import { pid } from 'node:process'
-import { ConfigService, validateCodexioConfig } from '../ConfigService.js'
+import { validateCodexioConfig } from '../ConfigService.js'
+import { Configer } from '../config/Configer.js'
 import { Result } from '../value/Result.js'
 import { Logger } from './Logger.js'
 import {
@@ -25,14 +26,14 @@ export type SupervisorOptions = {
 type SupervisorAction = 'restart' | 'stop'
 
 export async function runSupervisor(options: SupervisorOptions = {}): Promise<void> {
-  const service = new ConfigService(options.configPath)
-  const config = options.initConfig ? await service.init(false) : await service.load()
+  const configer = new Configer(options.configPath)
+  const config = options.initConfig ? await configer.init(false) : await configer.read()
   validateCodexioConfig(config)
-  const running = await readRunningSupervisorState(service.path)
+  const running = await readRunningSupervisorState(configer.path)
   if (running) {
     throw new Error(`codexio supervisor is already running on ${running.host}:${running.port}`)
   }
-  const supervisor = new Supervisor(service.path, config.server.token, Boolean(options.autoPort))
+  const supervisor = new Supervisor(configer.path, config.server.token, Boolean(options.autoPort))
   await supervisor.run()
 }
 

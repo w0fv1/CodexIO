@@ -6,7 +6,7 @@ import { dirname, join, relative } from 'node:path'
 import { argv, execPath } from 'node:process'
 import { z } from 'zod'
 import { codexioRootPath } from '../AppMetadata.js'
-import { ConfigService } from '../ConfigService.js'
+import { Configer } from '../config/Configer.js'
 
 const require = createRequire(import.meta.url)
 
@@ -41,10 +41,10 @@ export type ServeProcessSpecOptions = {
 type SupervisorAction = 'restart' | 'stop'
 
 export class SupervisorClient {
-  private readonly service: ConfigService
+  private readonly configer: Configer
 
   constructor(configPath?: string) {
-    this.service = new ConfigService(configPath)
+    this.configer = new Configer(configPath)
   }
 
   async restart(): Promise<SupervisorState> {
@@ -54,7 +54,7 @@ export class SupervisorClient {
   }
 
   async stop(): Promise<boolean> {
-    const supervisor = await readRunningSupervisorState(this.service.path)
+    const supervisor = await readRunningSupervisorState(this.configer.path)
     if (!supervisor) {
       await this.clearState()
       return false
@@ -64,7 +64,7 @@ export class SupervisorClient {
   }
 
   async requireRunning(): Promise<SupervisorState> {
-    const supervisor = await readRunningSupervisorState(this.service.path)
+    const supervisor = await readRunningSupervisorState(this.configer.path)
     if (!supervisor) {
       throw new Error('Codexio supervisor 未运行，请用 start.cmd 启动后再重启。')
     }
@@ -72,8 +72,8 @@ export class SupervisorClient {
   }
 
   async clearState(): Promise<void> {
-    await removeSupervisorState(this.service.path)
-    await removeRuntimeServerState(this.service.path)
+    await removeSupervisorState(this.configer.path)
+    await removeRuntimeServerState(this.configer.path)
   }
 }
 
@@ -277,12 +277,16 @@ async function isServerReady(state: RuntimeServerState): Promise<boolean> {
   }
 }
 
-function runtimeServerStatePath(configPath: string): string {
-  return join(dirname(configPath), 'server.json')
+export function runtimeServerStatePath(_configPath: string): string {
+  return join(runtimeStateRoot(), 'server.json')
 }
 
-function supervisorStatePath(configPath: string): string {
-  return join(dirname(configPath), 'supervisor.json')
+export function supervisorStatePath(_configPath: string): string {
+  return join(runtimeStateRoot(), 'supervisor.json')
+}
+
+function runtimeStateRoot(): string {
+  return join(codexioRootPath, '.codexio', 'state')
 }
 
 function isServerPortAvailable(host: string, port: number): Promise<boolean> {

@@ -464,7 +464,7 @@ function New-PnpmCommandFile {
     $text = @"
 @echo off
 setlocal
-set "CODEXIO_LOG_DIR=%~dp0.codexio\log"
+set "CODEXIO_LOG_DIR=%~dp0codexio\.codexio\log"
 if not exist "%CODEXIO_LOG_DIR%" mkdir "%CODEXIO_LOG_DIR%"
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd-HHmmss"') do set "CODEXIO_COMMAND_LOG=%CODEXIO_LOG_DIR%\command-$Action-%%i.log"
 call :log "[codexio] $Action Codexio"

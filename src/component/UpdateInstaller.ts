@@ -1,12 +1,14 @@
 import { createHash } from 'node:crypto'
 import { createReadStream, createWriteStream } from 'node:fs'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { CodexioConfig } from '../ConfigService.js'
 import { codexioRootPath, readCodexioReleaseMetadata, readCodexioVersion } from '../AppMetadata.js'
 import { Result } from '../value/Result.js'
 import { Logger } from './Logger.js'
+import { runtimeServerStatePath, supervisorStatePath } from './ServerLifecycle.js'
 
 type LatestReleaseResponse = {
   isf?: unknown
@@ -64,7 +66,7 @@ export class UpdateInstaller {
         fileSizeBytes: latest.fileSizeBytes
       })
       const installRoot = dirname(codexioRootPath)
-      const updateRoot = join(installRoot, '.codexio', 'update')
+      const updateRoot = join(tmpdir(), 'codexio-update', shortHash(installRoot), `${currentVersion}-${latest.version}-${formatTimestamp(new Date())}`)
       const downloadRoot = join(updateRoot, 'download')
       const stageParent = join(updateRoot, 'stage')
       const updaterRoot = join(updateRoot, 'updater')
@@ -112,8 +114,8 @@ export class UpdateInstaller {
         stageRoot,
         backupRoot,
         configPath: this.configPath,
-        supervisorStatePath: join(dirname(this.configPath), 'supervisor.json'),
-        serverStatePath: join(dirname(this.configPath), 'server.json'),
+        supervisorStatePath: supervisorStatePath(this.configPath),
+        serverStatePath: runtimeServerStatePath(this.configPath),
         startCommand: join(installRoot, 'start.cmd'),
         updateRoot
       }
@@ -335,6 +337,10 @@ function formatTimestamp(value: Date): string {
   ].join('')
 }
 
+function shortHash(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 16)
+}
+
 export function createUpdaterScript(): string {
   return `
 param(
@@ -456,6 +462,35 @@ function Copy-UpdateDirectoryContent {
     }
 }
 
+function Copy-CodexioAppContent {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Source,
+        [Parameter(Mandatory = $true)] [string] $Destination
+    )
+    Assert-UpdatePath $Source
+    if (-not (Test-Path -LiteralPath $Destination)) {
+        New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+    }
+    foreach ($item in Get-ChildItem -Force -LiteralPath $Destination) {
+        if ($item.Name -eq ".codexio") {
+            continue
+        }
+        Remove-UpdateItem -Path $item.FullName
+    }
+    foreach ($item in Get-ChildItem -Force -LiteralPath $Source) {
+        if ($item.Name -eq ".codexio") {
+            $targetData = Join-Path $Destination ".codexio"
+            New-Item -ItemType Directory -Force -Path $targetData | Out-Null
+            Copy-UpdateItem -Source (Join-Path $item.FullName "release.json") -Destination (Join-Path $targetData "release.json")
+            continue
+        }
+        $target = Join-Path $Destination $item.Name
+        Write-UpdateLog "copy $($item.FullName) -> $target"
+        Copy-Item -Recurse -Force -LiteralPath $item.FullName -Destination $target
+        Assert-UpdatePath $target
+    }
+}
+
 function Remove-UpdateItem {
     param([Parameter(Mandatory = $true)] [string] $Path)
     for ($attempt = 1; $attempt -le 10; $attempt++) {
@@ -513,6 +548,51 @@ function Stop-Codexio {
     Write-UpdateLog "stop codexio completed"
 }
 
+function Remove-LegacyRootState {
+    foreach ($item in @(
+        (Join-Path $manifestData.installRoot "server.json"),
+        (Join-Path $manifestData.installRoot "supervisor.json")
+    )) {
+        if (Test-Path -LiteralPath $item) {
+            Write-UpdateLog "remove legacy root state: $item"
+            Remove-Item -Force -LiteralPath $item -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Remove-LegacyInstallDataRoot {
+    $legacyRoot = Join-Path $manifestData.installRoot ".codexio"
+    if (-not (Test-Path -LiteralPath $legacyRoot)) {
+        return
+    }
+    foreach ($item in @("log", "update", "state")) {
+        $target = Join-Path $legacyRoot $item
+        if (Test-Path -LiteralPath $target) {
+            Write-UpdateLog "remove legacy install data item: $target"
+            Remove-UpdateItem -Path $target
+        }
+    }
+    $remaining = @(Get-ChildItem -Force -LiteralPath $legacyRoot)
+    if ($remaining.Count -eq 0) {
+        Write-UpdateLog "remove legacy install data root: $legacyRoot"
+        Remove-UpdateItem -Path $legacyRoot
+    }
+}
+
+function Remove-TransientAppData {
+    $appDataRoot = Join-Path $manifestData.installRoot "codexio\\.codexio"
+    if (-not (Test-Path -LiteralPath $appDataRoot)) {
+        return
+    }
+    foreach ($item in @("download", "update")) {
+        $target = Join-Path $appDataRoot $item
+        if (Test-Path -LiteralPath $target) {
+            Write-UpdateLog "remove transient app data: $target"
+            Remove-UpdateItem -Path $target
+        }
+    }
+}
+
 function Backup-Current {
     Write-UpdateLog "backup current started"
     New-Item -ItemType Directory -Force -Path $manifestData.backupRoot | Out-Null
@@ -527,7 +607,6 @@ function Backup-Current {
 function Replace-Current {
     Write-UpdateLog "replace current started"
     $preservedNode = Join-Path $manifestData.updateRoot "preserved-node"
-    $preservedData = Join-Path $manifestData.updateRoot "preserved-codexio-data"
     $currentNode = Join-Path $manifestData.installRoot "codexio\\runtime\\node"
     if ($manifestData.platform -eq "windows-x64-pnpm" -and (Test-Path -LiteralPath $currentNode)) {
         if (Test-Path -LiteralPath $preservedNode) {
@@ -535,14 +614,6 @@ function Replace-Current {
         }
         Write-UpdateLog "preserve node runtime: $currentNode"
         Copy-Item -Recurse -Force -LiteralPath $currentNode -Destination $preservedNode
-    }
-    $currentData = Join-Path $manifestData.installRoot "codexio\\.codexio"
-    if (Test-Path -LiteralPath $currentData) {
-        if (Test-Path -LiteralPath $preservedData) {
-            Remove-Item -Recurse -Force -LiteralPath $preservedData
-        }
-        Write-UpdateLog "preserve runtime data: $currentData"
-        Copy-Item -Recurse -Force -LiteralPath $currentData -Destination $preservedData
     }
     foreach ($item in @("start.cmd", "restart.cmd", "update.cmd")) {
         $target = Join-Path $manifestData.installRoot $item
@@ -552,7 +623,7 @@ function Replace-Current {
         $source = Join-Path $manifestData.stageRoot $item
         Copy-UpdateItem -Source $source -Destination (Join-Path $manifestData.installRoot $item)
     }
-    Copy-UpdateDirectoryContent -Source (Join-Path $manifestData.stageRoot "codexio") -Destination (Join-Path $manifestData.installRoot "codexio")
+    Copy-CodexioAppContent -Source (Join-Path $manifestData.stageRoot "codexio") -Destination (Join-Path $manifestData.installRoot "codexio")
     if (-not (Test-Path -LiteralPath $manifestData.configPath)) {
         Copy-UpdateItem -Source (Join-Path $manifestData.stageRoot "config.yaml") -Destination $manifestData.configPath
     }
@@ -562,21 +633,9 @@ function Replace-Current {
         Write-UpdateLog "restore preserved node runtime: $newNode"
         Copy-Item -Recurse -Force -LiteralPath $preservedNode -Destination $newNode
     }
-    $newData = Join-Path $manifestData.installRoot "codexio\\.codexio"
-    if (Test-Path -LiteralPath $preservedData) {
-        New-Item -ItemType Directory -Force -Path $newData | Out-Null
-        foreach ($item in Get-ChildItem -LiteralPath $preservedData -Force) {
-            if ($item.Name -eq "release.json") {
-                continue
-            }
-            $target = Join-Path $newData $item.Name
-            if (Test-Path -LiteralPath $target) {
-                Remove-Item -Recurse -Force -LiteralPath $target
-            }
-            Write-UpdateLog "restore runtime data item: $($item.Name)"
-            Copy-Item -Recurse -Force -LiteralPath $item.FullName -Destination $target
-        }
-    }
+    Remove-TransientAppData
+    Remove-LegacyRootState
+    Remove-LegacyInstallDataRoot
     Assert-InstallLayout -Root $manifestData.installRoot -Platform $manifestData.platform
     Write-UpdateSnapshot -Label "install snapshot after replace" -Root $manifestData.installRoot
     Write-UpdateLog "replace current completed"

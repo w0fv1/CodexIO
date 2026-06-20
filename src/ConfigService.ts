@@ -206,12 +206,7 @@ export class ConfigService {
 
   async load(): Promise<CodexioConfig> {
     const text = await readFile(this.configPath, 'utf8')
-    const parsed = YAML.parse(text)
-    const document = ConfigDocumentSchema.parse(parsed)
-    const resolved = resolveReferences(migrateConfig(document))
-    const config = ConfigSchema.parse(resolved)
-    config.workspace.path = normalizeWorkspacePath(config.workspace.path, dirname(this.configPath))
-    await ensureManagedWorkspace(config.workspace.path, this.configPath)
+    const config = await parseCodexioConfigText(text, this.configPath)
     if (config.server.token.trim().length === 0) {
       config.server.token = createToken()
       await this.save(config)
@@ -316,6 +311,16 @@ export class ConfigService {
       }
     })
   }
+}
+
+export async function parseCodexioConfigText(text: string, configPath = defaultConfigPath): Promise<CodexioConfig> {
+  const parsed = YAML.parse(text)
+  const document = ConfigDocumentSchema.parse(parsed)
+  const resolved = resolveReferences(migrateConfig(document))
+  const config = ConfigSchema.parse(resolved)
+  config.workspace.path = normalizeWorkspacePath(config.workspace.path, dirname(resolve(configPath)))
+  await ensureManagedWorkspace(config.workspace.path, resolve(configPath))
+  return config
 }
 
 function migrateConfig(document: ConfigDocument): ConfigReferenceObject {

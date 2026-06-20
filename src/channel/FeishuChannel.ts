@@ -3,15 +3,11 @@ import { z } from 'zod'
 import { Channel, ChannelMessage, ChannelStartInput } from './Channel.js'
 import { Result } from '../value/Result.js'
 import { Logger } from '../component/Logger.js'
+import { createFeishuMessagePayload } from './ChannelUtil.js'
 
 const FeishuTextContentSchema = z.object({
   text: z.string()
 })
-
-type FeishuMessagePayload = {
-  msgType: string
-  content: string
-}
 
 export type FeishuChannelConfig = {
   enabled?: boolean
@@ -21,38 +17,7 @@ export type FeishuChannelConfig = {
   ws?: string
 }
 
-export function createFeishuMessagePayload(message: ChannelMessage): FeishuMessagePayload {
-  let text = message.text
-  if (message.role === 'system' && message.text === 'clear') {
-    text = '已开始新对话'
-  }
-  const content: Array<Array<Record<string, string>>> = [
-    [
-      {
-        tag: 'md',
-        text
-      }
-    ]
-  ]
-  if (message.role === 'user') {
-    content.push([
-      {
-        tag: 'text',
-        text: 'User'
-      }
-    ])
-  }
-  return {
-    msgType: 'post',
-    content: JSON.stringify({
-      zh_cn: {
-        content
-      }
-    })
-  }
-}
-
-export class FeishuChannelAdapter implements Channel {
+export class FeishuChannel implements Channel {
   readonly type = 'feishu'
   private input?: ChannelStartInput
   private client?: Lark.Client

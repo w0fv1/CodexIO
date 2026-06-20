@@ -1,13 +1,14 @@
 import { Channel, ChannelMessage, ChannelStartInput } from './Channel.js'
 import { Result } from '../value/Result.js'
 import { Logger } from '../component/Logger.js'
+import { createFeishuWebhookText } from './ChannelUtil.js'
 
 export type FeishuWebhookChannelConfig = {
   enabled?: boolean
   url?: string
 }
 
-export class FeishuWebhookChannelAdapter implements Channel {
+export class FeishuWebhookChannel implements Channel {
   readonly type = 'feishuWebhook'
 
   constructor(private readonly config?: FeishuWebhookChannelConfig) {}
@@ -26,10 +27,7 @@ export class FeishuWebhookChannelAdapter implements Channel {
     if (message.text.trim().length === 0) {
       return Result.fail('text is required')
     }
-    let text = message.text
-    if (message.role === 'system' && message.text === 'clear') {
-      text = '已开始新对话'
-    }
+    const text = createFeishuWebhookText(message)
     try {
       Logger.info('feishu webhook send started', {
         role: message.role,

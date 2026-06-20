@@ -45,6 +45,7 @@ export type AgentManagerState = {
 
 export type AgentManagerCallbacks = {
   send: (text: string) => Promise<Result<null>>
+  system?: (text: string) => Promise<Result<null>>
   status: (text: string) => Promise<Result<null>>
 }
 
@@ -69,7 +70,7 @@ export class AgentManager {
   }
 
   constructor(
-    private readonly config: CodexioConfig,
+    private config: CodexioConfig,
     private readonly toolBaseUrl: string,
     private readonly callbacks: AgentManagerCallbacks,
     private readonly options: AgentManagerOptions = {}
@@ -170,7 +171,7 @@ export class AgentManager {
     if (!this.agent) {
       return Result.fail<AgentReceiveResult>('agent not started')
     }
-    const received = await this.callbacks.send(createReceiveConfirmation())
+    const received = await (this.callbacks.system ?? this.callbacks.send)(createReceiveConfirmation())
     if (received.isFailed) {
       return Result.fail<AgentReceiveResult>(received.message)
     }
@@ -246,6 +247,21 @@ export class AgentManager {
     }
   }
 
+  async applyConfig(config: CodexioConfig): Promise<Result<null>> {
+    this.config = config
+    const stopped = await this.stop()
+    if (stopped.isFailed) {
+      return stopped
+    }
+    await this.setState({
+      status: 'idle',
+      agent: null,
+      message: 'agent idle'
+    })
+    Logger.info('agent config applied')
+    return Result.success(null)
+  }
+
   private createAgent(): Agent {
     if (this.options.agentFactory) {
       return this.options.agentFactory()
@@ -264,12 +280,19 @@ export class AgentManager {
         throw new Error(result.message)
       }
     }
+    const system = async (value: string) => {
+      const result = await (this.callbacks.system ?? this.callbacks.send)(value)
+      if (result.isFailed) {
+        throw new Error(result.message)
+      }
+    }
     if (agentName === 'codex') {
       return new CodexAgent({
         workspacePath: this.config.workspace.path,
         config: this.config,
         toolBaseUrl: this.toolBaseUrl,
-        send
+        send,
+        system
       })
     }
     if (agentName === 'claude') {

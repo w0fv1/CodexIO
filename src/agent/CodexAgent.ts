@@ -20,6 +20,7 @@ export type CodexAgentOptions = {
   config: CodexioConfig
   toolBaseUrl: string
   send: (text: string) => Promise<void>
+  system?: (text: string) => Promise<void>
   appServer?: CodexAppServerHandle
   sessionStore?: CodexSessionStoreHandle
 }
@@ -299,13 +300,13 @@ export class CodexAgent implements Agent {
       `Code: ${data.userCode}`
     ].join('\n')
     process.stdout.write(`${message}\n`)
-    await this.options.send(message).catch(() => {})
+    await (this.options.system ?? this.options.send)(message).catch(() => {})
     const appServer = this.appServer
     const task = (async () => {
       await appServer.waitForNotification('account/login/completed')
       const completedMessage = 'Codex login completed.'
       process.stdout.write(`${completedMessage}\n`)
-      await this.options.send(completedMessage).catch(() => {})
+      await (this.options.system ?? this.options.send)(completedMessage).catch(() => {})
     })()
     this.loginTask = task
     void task.then(() => {
@@ -396,7 +397,7 @@ export class CodexAgent implements Agent {
       const error = data.error
       if (error && typeof error === 'object' && typeof (error as Record<string, unknown>).message === 'string') {
         Logger.error('codex notification error', new Error((error as Record<string, string>).message))
-        await this.options.send((error as Record<string, string>).message)
+        await (this.options.system ?? this.options.send)((error as Record<string, string>).message)
       }
     }
   }

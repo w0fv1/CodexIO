@@ -4,16 +4,7 @@ import nodemailer, { Transporter } from 'nodemailer'
 import { Channel, ChannelMessage, ChannelStartInput } from './Channel.js'
 import { Result } from '../value/Result.js'
 import { Logger } from '../component/Logger.js'
-
-type EmailMessagePayload = {
-  subject: string
-  text: string
-}
-
-type EmailAddress = {
-  name?: string
-  address: string
-}
+import { createEmailMessagePayload, createEmailSender, isAllowedEmailSender } from './ChannelUtil.js'
 
 type EmailServerConfig = {
   host?: string
@@ -38,59 +29,7 @@ export type EmailChannelConfig = {
   pollSeconds?: number
 }
 
-export function createEmailSender(from: string | undefined, user: string | undefined): string | EmailAddress | undefined {
-  const trimmedFrom = from?.trim()
-  const trimmedUser = user?.trim()
-  if (trimmedFrom && trimmedFrom.includes('@')) {
-    return trimmedFrom
-  }
-  if (trimmedFrom && trimmedUser && trimmedUser.includes('@')) {
-    return {
-      name: trimmedFrom,
-      address: trimmedUser
-    }
-  }
-  if (trimmedUser) {
-    return trimmedUser
-  }
-  return trimmedFrom
-}
-
-export function isAllowedEmailSender(from: string[], user: string | undefined): boolean {
-  const trimmedUser = user?.trim().toLowerCase()
-  if (!trimmedUser) {
-    return false
-  }
-  return from.some((item) => item.trim().toLowerCase() === trimmedUser)
-}
-
-export function createEmailMessagePayload(message: ChannelMessage): EmailMessagePayload {
-  let text = message.text
-  if (message.role === 'system' && message.text === 'clear') {
-    text = '已开始新对话'
-  }
-  if (message.role === 'user') {
-    text = `${text}\n\nUser`
-  }
-  if (message.role === 'agent') {
-    return {
-      subject: 'Agent',
-      text
-    }
-  }
-  if (message.role === 'user') {
-    return {
-      subject: 'User',
-      text
-    }
-  }
-  return {
-    subject: 'System',
-    text
-  }
-}
-
-export class EmailChannelAdapter implements Channel {
+export class EmailChannel implements Channel {
   readonly type = 'email'
   private input?: ChannelStartInput
   private imap?: ImapFlow

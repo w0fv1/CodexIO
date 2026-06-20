@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { WebSocket } from 'ws'
 import { Server as HttpServer } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ConfigSchema } from '../src/ConfigService.js'
@@ -30,8 +30,10 @@ describe('server', () => {
     expect(webPageHtml).not.toContain('Disconnected')
     expect(webPageHtml).not.toContain('WebSocket 已断开')
     expect(webPageHtml).not.toContain('WebSocket 连接异常')
-    expect(webPageHtml.indexOf('>重连</button>')).toBeLessThan(webPageHtml.indexOf('@click="toggleTheme()"'))
+    expect(webPageHtml).not.toContain('>重连</button>')
+    expect(webPageHtml).toContain('href="/config"')
     expect(webPageHtml).toContain("if (message.type === 'system')")
+    expect(webPageHtml).toContain('whitespace-pre-wrap break-words')
   })
 
   it('receives web text', async () => {
@@ -47,7 +49,7 @@ describe('server', () => {
       text: 'hello'
     })
     expect(messages[1]).toMatchObject({
-      type: 'agent',
+      type: 'system',
       text: expect.any(String)
     })
     expect(messages[2]).toMatchObject({
@@ -205,6 +207,134 @@ describe('server', () => {
     await closeTestServer(listener)
   })
 
+  it('serves config page and saves config patches', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-config-page-'))
+    const workspace = join(dir, 'workspace')
+    await mkdir(workspace)
+    const configPath = join(dir, 'config.yaml')
+    await writeFile(configPath, [
+      'server:',
+      '  host: 127.0.0.1',
+      '  port: 8787',
+      '  token: test-message-token',
+      'proxy:',
+      '  enabled: false',
+      '  host: 127.0.0.1',
+      '  port: 7890',
+      'agents:',
+      '  codex:',
+      '    enabled: false',
+      '  claude:',
+      '    enabled: true',
+      'channels:',
+      '  web:',
+      '    enabled: true',
+      'workspace:',
+      `  path: ${workspace}`
+    ].join('\n'), 'utf8')
+    const config = ConfigSchema.parse({
+      server: {
+        token: testToken
+      },
+      agents: {
+        codex: {
+          enabled: false
+        },
+        claude: {
+          enabled: true
+        }
+      },
+      channels: {
+        web: {
+          enabled: true
+        }
+      },
+      workspace: {
+        path: workspace
+      }
+    })
+    const server = createCodexioApp(config, {
+      configPath,
+      agentFactory: () => new TestAgent(async () => {})
+    })
+    const listener = server.listen(0)
+    await new Promise<void>((resolve) => listener.once('listening', resolve))
+    const address = listener.address()
+    if (!address || typeof address === 'string') {
+      throw new Error('server address not found')
+    }
+    const baseUrl = `http://127.0.0.1:${address.port}`
+    const page = await fetch(`${baseUrl}/config`)
+    const pageText = await page.text()
+    expect(pageText).toContain('Codexio Config')
+    expect(pageText).toContain('导入配置')
+    expect(pageText).toContain('导出配置')
+
+    const readResponse = await fetch(`${baseUrl}/api/config`)
+    const readResult = await readResponse.json() as {
+      isFailed: boolean
+      data: {
+        descriptor: Array<{ path: string }>
+      }
+    }
+    expect(readResult.isFailed).toBe(false)
+    expect(readResult.data.descriptor.some((item) => item.path === 'proxy.port')).toBe(true)
+
+    const patchResponse = await fetch(`${baseUrl}/api/config`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        patch: {
+          proxy: {
+            enabled: true,
+            host: '127.0.0.1',
+            port: 7891
+          }
+        }
+      })
+    })
+    const patchResult = await patchResponse.json() as {
+      isFailed: boolean
+      data: {
+        changedPaths: string[]
+        effects: string[]
+      }
+    }
+    expect(patchResult.isFailed).toBe(false)
+    expect(patchResult.data.changedPaths).toContain('proxy.port')
+    expect(patchResult.data.effects).toContain('agentRestart')
+    expect(await readFile(configPath, 'utf8')).toContain('port: 7891')
+
+    const exportResponse = await fetch(`${baseUrl}/api/config/export`)
+    const exported = await exportResponse.text()
+    expect(exported).toContain('baseUrl: https://next.firco.cn')
+
+    const imported = exported.replace('baseUrl: https://next.firco.cn', 'baseUrl: https://import.example.test')
+    const importResponse = await fetch(`${baseUrl}/api/config/import`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        text: imported
+      })
+    })
+    const importResult = await importResponse.json() as {
+      isFailed: boolean
+      data: {
+        changedPaths: string[]
+        effects: string[]
+      }
+    }
+    expect(importResult.isFailed).toBe(false)
+    expect(importResult.data.changedPaths).toContain('update.baseUrl')
+    expect(importResult.data.effects).toContain('hot')
+    expect(await readFile(configPath, 'utf8')).toContain('baseUrl: https://import.example.test')
+    await closeTestServer(listener)
+  })
+
   it('accepts agent output through the configured default channel', async () => {
     const { baseUrl, listener } = await startTestServer()
     const socket = await openWebSocket(baseUrl)
@@ -352,7 +482,7 @@ describe('server', () => {
     const { socket, messages } = await openRecordedWebSocket(baseUrl)
     await waitForWebSocketMessages(messages, 1)
     expect(messages[0]).toMatchObject({
-      type: 'agent',
+      type: 'system',
       text: 'Codexio server started.'
     })
     const closed = new Promise<void>((resolve) => {
@@ -370,7 +500,7 @@ describe('server', () => {
     expect(result.isFailed).toBe(false)
     await waitForWebSocketMessages(messages, 2)
     expect(messages[1]).toMatchObject({
-      type: 'agent',
+      type: 'system',
       text: 'Codexio server stopping.'
     })
     await closed
@@ -433,11 +563,11 @@ describe('server', () => {
       text: 'shared input'
     })
     expect(firstMessages[1]).toMatchObject({
-      type: 'agent',
+      type: 'system',
       text: expect.any(String)
     })
     expect(secondMessages[1]).toMatchObject({
-      type: 'agent',
+      type: 'system',
       text: expect.any(String)
     })
     expect(firstMessages[2]).toMatchObject({
@@ -483,7 +613,7 @@ describe('server', () => {
     })
     expect(restored).toHaveLength(20)
     expect(restored[0]).toMatchObject({
-      type: 'agent',
+      type: 'system',
       text: expect.any(String)
     })
     expect(restored[1]).toMatchObject({

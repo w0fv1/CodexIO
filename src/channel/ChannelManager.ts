@@ -2,28 +2,29 @@ import { Server as HttpServer } from 'node:http'
 import { Express } from 'express'
 import { CodexioConfig } from '../ConfigService.js'
 import { Result } from '../value/Result.js'
-import { Channel, ChannelMessage, ChannelReceiveResult } from './Channel.js'
-import { EmailChannelAdapter } from './EmailChannelAdapter.js'
-import { FeishuChannelAdapter } from './FeishuChannelAdapter.js'
-import { FeishuWebhookChannelAdapter } from './FeishuWebhookChannelAdapter.js'
-import { WebChannelAdapter } from './WebChannelAdapter.js'
+import { Channel, ChannelMessage, ChannelReceiveResult, ChannelStartInput } from './Channel.js'
+import { EmailChannel } from './EmailChannel.js'
+import { FeishuChannel } from './FeishuChannel.js'
+import { FeishuWebhookChannel } from './FeishuWebhookChannel.js'
+import { WebChannel } from './WebChannel.js'
 import { Logger } from '../component/Logger.js'
 
 const messageHistoryLimit = 20
 
 export class ChannelManager {
-  private readonly web = new WebChannelAdapter()
-  private readonly feishu: FeishuChannelAdapter
-  private readonly feishuWebhook: FeishuWebhookChannelAdapter
-  private readonly email: EmailChannelAdapter
+  private readonly web = new WebChannel()
+  private feishu: FeishuChannel
+  private feishuWebhook: FeishuWebhookChannel
+  private email: EmailChannel
   private readonly channels = new Map<string, Channel>()
   private readonly messages: ChannelMessage[] = []
+  private app?: Express
   private handleReceive?: (text: string, source: string) => Promise<Result<ChannelReceiveResult>>
 
-  constructor(config: CodexioConfig) {
-    this.feishu = new FeishuChannelAdapter(config.channels.feishu)
-    this.feishuWebhook = new FeishuWebhookChannelAdapter(config.channels.feishuWebhook)
-    this.email = new EmailChannelAdapter(config.channels.email)
+  constructor(private config: CodexioConfig) {
+    this.feishu = new FeishuChannel(config.channels.feishu)
+    this.feishuWebhook = new FeishuWebhookChannel(config.channels.feishuWebhook)
+    this.email = new EmailChannel(config.channels.email)
     for (const adapter of [
       this.web,
       this.feishu,
@@ -38,15 +39,10 @@ export class ChannelManager {
   }
 
   start(app: Express, receive: (text: string, source: string) => Promise<Result<ChannelReceiveResult>>): void {
+    this.app = app
     this.handleReceive = receive
     for (const channel of this.channels.values()) {
-      channel.start({
-        app,
-        displayHistory: () => [...this.messages],
-        receive: async (text) => {
-          return this.receive(text, channel.type)
-        }
-      })
+      channel.start(this.createStartInput(channel))
     }
   }
 
@@ -133,6 +129,51 @@ export class ChannelManager {
     return Result.success(null)
   }
 
+  async applyConfig(config: CodexioConfig): Promise<Result<null>> {
+    this.config = config
+    const failures: string[] = []
+    for (const channel of [
+      this.feishu,
+      this.feishuWebhook,
+      this.email
+    ]) {
+      if (this.channels.has(channel.type)) {
+        const result = await channel.stop()
+        if (result.isFailed) {
+          failures.push(`${channel.type}: ${result.message}`)
+        }
+        this.channels.delete(channel.type)
+      }
+    }
+    this.feishu = new FeishuChannel(config.channels.feishu)
+    this.feishuWebhook = new FeishuWebhookChannel(config.channels.feishuWebhook)
+    this.email = new EmailChannel(config.channels.email)
+    for (const channel of [
+      this.feishu,
+      this.feishuWebhook,
+      this.email
+    ]) {
+      const channelConfig = config.channels[channel.type]
+      if (!channelConfig?.enabled) {
+        continue
+      }
+      this.channels.set(channel.type, channel)
+      if (this.app && this.handleReceive) {
+        try {
+          channel.start(this.createStartInput(channel))
+        } catch (error) {
+          const failed = Result.fromError(error)
+          failures.push(`${channel.type}: ${failed.message}`)
+        }
+      }
+    }
+    if (failures.length > 0) {
+      return Result.fail(failures.join('\n'))
+    }
+    Logger.info('channel config applied')
+    return Result.success(null)
+  }
+
   private async display(message: ChannelMessage): Promise<Result<null>> {
     if (this.channels.size === 0) {
       return Result.fail('channel not found')
@@ -149,6 +190,19 @@ export class ChannelManager {
       }
     }
     return result
+  }
+
+  private createStartInput(channel: Channel): ChannelStartInput {
+    if (!this.app) {
+      throw new Error('channel manager not started')
+    }
+    return {
+      app: this.app,
+      displayHistory: () => [...this.messages],
+      receive: async (text) => {
+        return this.receive(text, channel.type)
+      }
+    }
   }
 
   private async broadcast(message: ChannelMessage): Promise<Result<null>> {

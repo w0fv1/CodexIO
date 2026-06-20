@@ -21,7 +21,7 @@ type WebChannelMessage = {
   html?: string
 }
 
-export class WebChannelAdapter implements Channel {
+export class WebChannel implements Channel {
   readonly type = 'web'
   private readonly sockets = new Set<WebSocket>()
   private readonly server = new WebSocketServer({
