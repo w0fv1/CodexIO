@@ -132,7 +132,7 @@ function Invoke-NfircoApi {
         [Parameter(Mandatory)] [hashtable] $Headers
     )
     $json = $Body | ConvertTo-Json -Depth 8
-    $response = Invoke-RestMethod -Uri $Uri -Method Post -Headers $Headers -ContentType "application/json; charset=utf-8" -Body $json -TimeoutSec 60
+    $response = Invoke-RestMethod -Uri $Uri -Method Post -Headers $Headers -ContentType "application/json; charset=utf-8" -Body $json -TimeoutSec 60 -NoProxy
     if ($null -eq $response) {
         throw "Nfirco API returned empty response"
     }
@@ -615,7 +615,7 @@ function Publish-Package {
         throw "Nfirco API did not return uploadUrl"
     }
     Write-Step "upload package to OSS: $Platform"
-    Invoke-WebRequest -Uri $uploadData.uploadUrl -Method Put -InFile $ArchivePath -ContentType "application/zip" -UseBasicParsing -TimeoutSec 900 | Out-Null
+    Invoke-WebRequest -Uri $uploadData.uploadUrl -Method Put -InFile $ArchivePath -ContentType "application/zip" -UseBasicParsing -TimeoutSec 900 -NoProxy | Out-Null
     Write-Step "complete release record: $Platform"
     Invoke-NfircoApi -Uri $completeUri -Body @{ platform = $Platform } -Headers $Headers | Out-Null
     Write-Step "package published: $Platform"
