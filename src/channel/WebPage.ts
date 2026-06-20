@@ -22,8 +22,6 @@ export const webPageHtml = `<!doctype html>
     .theme-dark .app-mark{background:#f8fafc;color:#020617}
     .app-title{color:#020617}
     .theme-dark .app-title{color:#f8fafc}
-    .status-label{color:#64748b}
-    .theme-dark .status-label{color:#94a3b8}
     .header-button{cursor:pointer;border-color:#e2e8f0;color:#334155;background:transparent}
     .header-button:hover{background:#f8fafc}
     .theme-dark .header-button{border-color:#334155;color:#cbd5e1}
@@ -98,7 +96,12 @@ export const webPageHtml = `<!doctype html>
             :class="connected ? 'bg-emerald-500' : 'bg-rose-500'"
             aria-hidden="true"
           ></span>
-          <span class="status-label font-medium" x-text="statusText"></span>
+          <button
+            type="button"
+            class="header-button rounded-md border px-2.5 py-1.5 font-semibold transition disabled:hidden"
+            :disabled="connected || connecting"
+            @click="connect()"
+          >重连</button>
           <button
             type="button"
             class="header-button grid size-8 place-items-center rounded-md border transition"
@@ -109,12 +112,6 @@ export const webPageHtml = `<!doctype html>
             <svg x-cloak x-show="theme !== 'dark'" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
             <svg x-cloak x-show="theme === 'dark'" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
           </button>
-          <button
-            type="button"
-            class="header-button rounded-md border px-2.5 py-1.5 font-semibold transition disabled:hidden"
-            :disabled="connected || connecting"
-            @click="connect()"
-          >重连</button>
         </div>
       </div>
     </header>
@@ -223,15 +220,6 @@ export const webPageHtml = `<!doctype html>
         copiedId: null,
         theme: 'light',
         nextId: 1,
-        get statusText() {
-          if (this.connected) {
-            return 'Connected'
-          }
-          if (this.connecting) {
-            return 'Connecting'
-          }
-          return 'Disconnected'
-        },
         init() {
           this.theme = this.getInitialTheme()
           this.connect()
@@ -279,7 +267,6 @@ export const webPageHtml = `<!doctype html>
             }
             this.connected = false
             this.connecting = false
-            this.append('system', 'WebSocket 已断开')
             this.scheduleReconnect()
           })
           socket.addEventListener('error', () => {
@@ -288,7 +275,7 @@ export const webPageHtml = `<!doctype html>
             }
             this.connected = false
             this.connecting = false
-            this.append('error', 'WebSocket 连接异常')
+            this.scheduleReconnect()
           })
           socket.addEventListener('message', (event) => {
             this.receive(event.data)
@@ -327,6 +314,10 @@ export const webPageHtml = `<!doctype html>
             this.append('user', message.text || '')
             return
           }
+          if (message.type === 'system') {
+            this.append('system', message.text || '')
+            return
+          }
           if (message.type === 'agent') {
             this.append('agent', message.text || '', message.html)
           }
@@ -337,7 +328,7 @@ export const webPageHtml = `<!doctype html>
             return
           }
           if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
-            this.append('system', 'WebSocket 未连接')
+            this.scheduleReconnect()
             return
           }
           this.socket.send(JSON.stringify({

@@ -18,10 +18,10 @@ import { CommandExecutor } from './controller/CommandExecutor.js'
 import { AgentFactory } from './agent/AgentManager.js'
 import { Logger } from './component/Logger.js'
 import { runSupervisor } from './component/Supervisor.js'
+import { ApplicationLifecycle, SupervisorApplicationLifecycle } from './component/ApplicationLifecycle.js'
 import {
   removeRuntimeServerState,
   resolveAvailableServerPort,
-  resolveRestartTargets,
   restartServer,
   stopServer,
   writeRuntimeServerState
@@ -42,6 +42,7 @@ export type CodexioServer = {
 export type CodexioAppOptions = {
   agentFactory?: AgentFactory
   configPath?: string
+  applicationLifecycle?: ApplicationLifecycle
 }
 
 export function createCodexioApp(config: CodexioConfig, options: CodexioAppOptions = {}): CodexioServer {
@@ -61,7 +62,8 @@ export function createCodexioApp(config: CodexioConfig, options: CodexioAppOptio
     agentFactory: options.agentFactory
   })
   const updateInstaller = options.configPath ? new UpdateInstaller(config, options.configPath) : undefined
-  const commandExecutor = new CommandExecutor(channelManager, agentManager, updateInstaller)
+  const applicationLifecycle = options.applicationLifecycle ?? (options.configPath ? new SupervisorApplicationLifecycle(options.configPath) : undefined)
+  const commandExecutor = new CommandExecutor(channelManager, agentManager, updateInstaller, applicationLifecycle)
   let activeListener: HttpServer | undefined
 
   app.post('/api/message', async (request, response) => {
@@ -95,18 +97,22 @@ export function createCodexioApp(config: CodexioConfig, options: CodexioAppOptio
     }
   })
 
-  app.post('/api/agent/restart', async (request, response) => {
+  app.post('/api/server/restart', async (request, response) => {
     try {
       const authorization = request.header('authorization')
       if (authorization !== `Bearer ${config.server.token}`) {
-        Logger.warn('api agent restart unauthorized')
+        Logger.warn('api server restart unauthorized')
         response.status(401).json(Result.fail('unauthorized', '401'))
         return
       }
-      Logger.info('api agent restart requested')
-      response.json(await agentManager.restart())
+      if (!applicationLifecycle) {
+        response.json(Result.fail('Codexio supervisor 未运行，请用 start.cmd 启动后再重启。'))
+        return
+      }
+      Logger.info('api server restart requested')
+      response.json(await applicationLifecycle.restart())
     } catch (error) {
-      Logger.error('api agent restart failed', error)
+      Logger.error('api server restart failed', error)
       response.json(Result.fromError(error))
     }
   })
@@ -178,7 +184,6 @@ export function createCodexioApp(config: CodexioConfig, options: CodexioAppOptio
           .catch((error) => {
             Logger.error('update check failed', error)
           })
-        void agentManager.start()
       })
       const close = listener.close.bind(listener)
       listener.close = ((callback?: (error?: Error) => void) => {
@@ -457,4 +462,4 @@ function waitForListening(listener: HttpServer): Promise<void> {
   })
 }
 
-export { resolveAvailableServerPort, resolveRestartTargets }
+export { resolveAvailableServerPort }

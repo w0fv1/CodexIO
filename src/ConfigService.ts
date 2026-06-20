@@ -211,6 +211,7 @@ export class ConfigService {
     const resolved = resolveReferences(migrateConfig(document))
     const config = ConfigSchema.parse(resolved)
     config.workspace.path = normalizeWorkspacePath(config.workspace.path, dirname(this.configPath))
+    await ensureManagedWorkspace(config.workspace.path, this.configPath)
     if (config.server.token.trim().length === 0) {
       config.server.token = createToken()
       await this.save(config)
@@ -461,6 +462,20 @@ export function normalizeWorkspacePath(path: string, basePath = codexioRootPath)
     return trimmedPath
   }
   return resolve(basePath, trimmedPath)
+}
+
+async function ensureManagedWorkspace(path: string, configPath: string): Promise<void> {
+  const normalizedPath = resolve(path)
+  const managedPaths = [
+    join(codexioRootPath, '.codexio', 'workspace'),
+    normalizeWorkspacePath('codexio/.codexio/workspace', dirname(configPath))
+  ].map((item) => resolve(item))
+  if (!managedPaths.includes(normalizedPath)) {
+    return
+  }
+  await mkdir(normalizedPath, {
+    recursive: true
+  })
 }
 
 export function validateCodexioConfig(config: CodexioConfig): void {

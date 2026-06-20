@@ -44,7 +44,8 @@ export async function checkCodexioUpdate(config: CodexioConfig): Promise<string 
     `Codexio 有新版本 ${latest.version}，当前版本 ${localVersion}。`,
     `平台：${latest.platform}`,
     `文件：${latest.fileName}`,
-    `请到后台发布页面下载更新：${manageUrl}`
+    '发送 $update 或 ￥update 自动升级。',
+    `后台发布页面：${manageUrl}`
   ].join('\n')
 }
 

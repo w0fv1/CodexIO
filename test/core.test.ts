@@ -8,7 +8,8 @@ import { AgentManager } from '../src/agent/AgentManager.js'
 import { CodexAppServer } from '../src/agent/CodexAppServer.js'
 import { CodexAgent } from '../src/agent/CodexAgent.js'
 import { CodexSessionStore } from '../src/agent/CodexSessionStore.js'
-import { parseCommandInput } from '../src/controller/CommandExecutor.js'
+import { AgentLoginInProgressError } from '../src/agent/Agent.js'
+import { CommandExecutor, parseCommandInput } from '../src/controller/CommandExecutor.js'
 import { createEmailMessagePayload, createEmailSender, isAllowedEmailSender } from '../src/channel/EmailChannelAdapter.js'
 import { createFeishuMessagePayload } from '../src/channel/FeishuChannelAdapter.js'
 import { Logger } from '../src/component/Logger.js'
@@ -186,6 +187,45 @@ describe('core', () => {
     ])
   })
 
+  it('agent manager does not queue user messages behind an active login flow', async () => {
+    const manager = new AgentManager(ConfigSchema.parse({
+      agents: {
+        codex: {
+          enabled: true
+        },
+        claude: {
+          enabled: false
+        }
+      }
+    }), 'http://127.0.0.1:8787', {
+      send: async () => Result.success(null),
+      status: async () => Result.success(null)
+    }, {
+      agentFactory: () => ({
+        type: 'codex',
+        async login(): Promise<void> {},
+        async start(): Promise<void> {
+          throw new AgentLoginInProgressError('请先完成 Codex 登录。')
+        },
+        async receive(): Promise<void> {},
+        async clear(): Promise<void> {},
+        async stop(): Promise<void> {}
+      })
+    })
+
+    const first = await manager.receiveMessage('first')
+    const second = await manager.receiveMessage('second')
+
+    expect(first.isFailed).toBe(true)
+    expect(first.message).toBe('请先完成 Codex 登录。')
+    expect(second.isFailed).toBe(true)
+    expect(second.message).toBe('请先完成 Codex 登录。')
+    expect(manager.status()).toMatchObject({
+      status: 'loginRequired',
+      message: '请先完成 Codex 登录。'
+    })
+  })
+
   it('agents apply proxy env internally', async () => {
     const env = createAgentEnv(ConfigSchema.parse({
       proxy: {
@@ -239,10 +279,86 @@ describe('core', () => {
       name: 'update',
       args: []
     })
+    expect(parseCommandInput('￥help')).toEqual({
+      type: 'command',
+      name: 'help',
+      args: []
+    })
+    expect(parseCommandInput('￥?')).toEqual({
+      type: 'command',
+      name: '?',
+      args: []
+    })
     expect(parseCommandInput('hello')).toEqual({
       type: 'message',
       text: 'hello'
     })
+  })
+
+  it('command executor sends system feedback around update command', async () => {
+    const systemMessages: string[] = []
+    const executor = new CommandExecutor({
+      sendSystem: async (text: string) => {
+        systemMessages.push(text)
+        return Result.success(null)
+      },
+      displayUser: async () => Result.success(null),
+      clear: async () => Result.success(null)
+    } as unknown as import('../src/channel/ChannelManager.js').ChannelManager, {
+      receiveMessage: async () => Result.success({}),
+      clear: async () => Result.success({
+        action: 'clear'
+      })
+    } as unknown as AgentManager, {
+      update: async () => Result.success('Codexio 0.4.2 更新包已准备完成，正在安装并重启。')
+    })
+
+    const result = await executor.receive({
+      text: '$update',
+      source: 'web'
+    })
+
+    expect(result.isFailed).toBe(false)
+    expect(result.data).toEqual({
+      action: 'update'
+    })
+    expect(systemMessages).toEqual([
+      '正在执行：$update\n正在检查更新；如果发现新版本会自动安装并重启，如果已是最新版本会直接提示。',
+      '已执行：$update\nCodexio 0.4.2 更新包已准备完成，正在安装并重启。'
+    ])
+  })
+
+  it('command executor reports when update finds no newer version', async () => {
+    const systemMessages: string[] = []
+    const executor = new CommandExecutor({
+      sendSystem: async (text: string) => {
+        systemMessages.push(text)
+        return Result.success(null)
+      },
+      displayUser: async () => Result.success(null),
+      clear: async () => Result.success(null)
+    } as unknown as import('../src/channel/ChannelManager.js').ChannelManager, {
+      receiveMessage: async () => Result.success({}),
+      clear: async () => Result.success({
+        action: 'clear'
+      })
+    } as unknown as AgentManager, {
+      update: async () => Result.success('Codexio 已是最新版本 0.4.2。')
+    })
+
+    const result = await executor.receive({
+      text: '$update',
+      source: 'web'
+    })
+
+    expect(result.isFailed).toBe(false)
+    expect(result.data).toEqual({
+      action: 'update'
+    })
+    expect(systemMessages).toEqual([
+      '正在执行：$update\n正在检查更新；如果发现新版本会自动安装并重启，如果已是最新版本会直接提示。',
+      '已执行：$update\nCodexio 已是最新版本 0.4.2。'
+    ])
   })
 
   it('codex agent injects codexio runtime instruction', async () => {
@@ -386,42 +502,6 @@ describe('core', () => {
     })
   })
 
-  it('codex agent restart resumes the same persisted thread', async () => {
-    const { store } = await createTempSessionStoreWithPath()
-    const requests: Array<{
-      method: string
-      params: unknown
-    }> = []
-    const appServer = createCodexAppServerMock(requests)
-    const agent = new CodexAgent({
-      workspacePath: '.',
-      config: ConfigSchema.parse({}),
-      toolBaseUrl: 'http://127.0.0.1:8787',
-      send: async () => {},
-      sessionStore: store,
-      appServer
-    })
-
-    await agent.start(ConfigSchema.parse({}))
-    await agent.receive('hello')
-    await agent.restart()
-
-    expect(requests.map((request) => request.method)).toEqual([
-      'account/read',
-      'thread/start',
-      'turn/start',
-      'turn/interrupt',
-      'account/read',
-      'thread/resume'
-    ])
-    expect(requests.at(-1)?.params).toMatchObject({
-      threadId: 'thread-1'
-    })
-    await expect(store.read()).resolves.toMatchObject({
-      threadId: 'thread-1'
-    })
-  })
-
   it('codex agent clear overwrites the persisted thread with a new thread', async () => {
     const { store } = await createTempSessionStoreWithPath()
     const requests: Array<{
@@ -524,7 +604,7 @@ describe('core', () => {
     })
   })
 
-  it('codex agent starts device-code login when account is missing', async () => {
+  it('codex agent starts device-code login without waiting for completion when account is missing', async () => {
     const outbound: string[] = []
     const requests: Array<{
       method: string
@@ -576,14 +656,13 @@ describe('core', () => {
     })
     const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     try {
-      await agent.start(ConfigSchema.parse({}))
+      await expect(agent.start(ConfigSchema.parse({}))).rejects.toThrow(AgentLoginInProgressError)
     } finally {
       stdout.mockRestore()
     }
     expect(requests.map((request) => request.method)).toEqual([
       'account/read',
-      'account/login/start',
-      'thread/start'
+      'account/login/start'
     ])
     expect(requests[0].params).toEqual({
       refreshToken: false
@@ -593,7 +672,6 @@ describe('core', () => {
     })
     expect(outbound[0]).toContain('https://login.example.test/device')
     expect(outbound[0]).toContain('ABCD-EFGH')
-    expect(outbound[1]).toBe('Codex login completed.')
   })
 
   it('codex app-server ignores malformed JSON lines and times out pending requests', async () => {
@@ -627,6 +705,36 @@ describe('core', () => {
     await expect(server.request('never/replies', {})).rejects.toThrow('codex app-server request timed out: never/replies')
     expect(stderr.join('')).toContain('codex app-server sent invalid JSON')
     await server.stop()
+  })
+
+  it('codex app-server releases notification waiters when stopped', async () => {
+    const script = [
+      'const readline = require("node:readline");',
+      'const rl = readline.createInterface({ input: process.stdin });',
+      'rl.on("line", (line) => {',
+      '  const message = JSON.parse(line);',
+      '  if (message.method === "initialize") {',
+      '    process.stdout.write(JSON.stringify({ id: message.id, result: {} }) + "\\n");',
+      '  }',
+      '});'
+    ].join('\n')
+    const server = new CodexAppServer({
+      command: process.execPath,
+      args: [
+        '-e',
+        script
+      ],
+      cwd: '.',
+      env: process.env,
+      requestTimeoutMs: 500,
+      onNotification: () => {},
+      onStderr: () => {}
+    })
+    await server.start()
+    const waiter = server.waitForNotification('account/login/completed')
+    const waiterExpectation = expect(waiter).rejects.toThrow('codex app-server stopped')
+    await server.stop()
+    await waiterExpectation
   })
 
   it('migrates old config to one enabled agent', async () => {
@@ -700,6 +808,20 @@ describe('core', () => {
     const path = join(dir, 'config.yaml')
     const service = new ConfigService(path)
     const config = await service.init()
+    expect(existsSync(config.workspace.path)).toBe(true)
+  })
+
+  it('creates packaged managed workspace when loading default release config', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-package-'))
+    const path = join(dir, 'config.yaml')
+    await writeFile(path, [
+      'workspace:',
+      '  path: codexio/.codexio/workspace'
+    ].join('\n'), 'utf8')
+
+    const config = await new ConfigService(path).load()
+
+    expect(config.workspace.path).toBe(join(dir, 'codexio', '.codexio', 'workspace'))
     expect(existsSync(config.workspace.path)).toBe(true)
   })
 
@@ -802,6 +924,17 @@ describe('core', () => {
     expect(script).toContain('$preservedData = Join-Path $manifestData.updateRoot "preserved-codexio-data"')
     expect(script).toContain('$currentData = Join-Path $manifestData.installRoot "codexio\\.codexio"')
     expect(script).toContain('if ($item.Name -eq "release.json")')
+  })
+
+  it('updater terminates install-root processes and retries directory removal', () => {
+    const script = createUpdaterScript()
+    expect(script).toContain('Set-Location -LiteralPath $manifestData.updateRoot')
+    expect(script).toContain('function Stop-InstallRootProcess')
+    expect(script).toContain('function Copy-UpdateDirectoryContent')
+    expect(script).toContain('$_.ExecutablePath.StartsWith($installRoot')
+    expect(script).toContain('$_.CommandLine.Contains($installRoot)')
+    expect(script).toContain('for ($attempt = 1; $attempt -le 10; $attempt++)')
+    expect(script).toContain('Stop-InstallRootProcess')
   })
 
   it('loads channel credentials from config', () => {

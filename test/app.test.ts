@@ -2,13 +2,13 @@ import { describe, expect, it } from 'vitest'
 import { WebSocket } from 'ws'
 import { Server as HttpServer } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ConfigSchema } from '../src/ConfigService.js'
 import { codexioRootPath } from '../src/AppMetadata.js'
-import { createCodexioApp, resolveAvailableServerPort, resolveRestartTargets } from '../src/index.js'
-import { createServeProcessSpec } from '../src/component/ServerLifecycle.js'
+import { createCodexioApp, resolveAvailableServerPort } from '../src/index.js'
+import { createServeProcessSpec, restartServer, writeSupervisorState } from '../src/component/ServerLifecycle.js'
 import { webPageHtml } from '../src/channel/WebPage.js'
 import { TestAgent } from './TestAgent.js'
 
@@ -24,6 +24,14 @@ describe('server', () => {
     expect(webPageHtml).toContain('event.shiftKey')
     expect(webPageHtml).not.toContain('让 coding agent 通过统一通道工作')
     expect(webPageHtml).not.toContain('Codex CLI')
+    expect(webPageHtml).not.toContain('statusText')
+    expect(webPageHtml).not.toContain('Connected')
+    expect(webPageHtml).not.toContain('Connecting')
+    expect(webPageHtml).not.toContain('Disconnected')
+    expect(webPageHtml).not.toContain('WebSocket 已断开')
+    expect(webPageHtml).not.toContain('WebSocket 连接异常')
+    expect(webPageHtml.indexOf('>重连</button>')).toBeLessThan(webPageHtml.indexOf('@click="toggleTheme()"'))
+    expect(webPageHtml).toContain("if (message.type === 'system')")
   })
 
   it('receives web text', async () => {
@@ -93,6 +101,96 @@ describe('server', () => {
     await waitForWebSocketMessages(messages, 4)
     expect(messages[3]).toMatchObject({
       type: 'clear'
+    })
+    await closeWebSocket(socket)
+    await closeTestServer(listener)
+  })
+
+  it('shows system feedback for restart command', async () => {
+    const restarts: string[] = []
+    const restarted = await startTestServer({
+      restart: async () => {
+        restarts.push('restart')
+        return {
+          code: '1',
+          message: 'no error',
+          data: 'Codexio restart requested through supervisor 127.0.0.1:10000',
+          isFailed: false
+        }
+      }
+    })
+    const restartedSocket = await openWebSocket(restarted.baseUrl)
+    const restartedMessages = recordWebSocket(restartedSocket)
+    restartedSocket.send(JSON.stringify({
+      text: '$restart'
+    }))
+    await waitForWebSocketMessages(restartedMessages, 2)
+    expect(restartedMessages[0]).toMatchObject({
+      type: 'user',
+      text: '$restart'
+    })
+    expect(restartedMessages[1]).toMatchObject({
+      type: 'system',
+      text: '正在重启 Codexio，页面会自动重连。'
+    })
+    expect(restarts).toEqual([
+      'restart'
+    ])
+    await closeWebSocket(restartedSocket)
+    await closeTestServer(restarted.listener)
+  })
+
+  it('reports restart command failure when application lifecycle is unavailable', async () => {
+    const { baseUrl, listener } = await startTestServer(null)
+    const socket = await openWebSocket(baseUrl)
+    const messages = recordWebSocket(socket)
+    socket.send(JSON.stringify({
+      text: '$restart'
+    }))
+    await waitForWebSocketMessages(messages, 3)
+    expect(messages[0]).toMatchObject({
+      type: 'user',
+      text: '$restart'
+    })
+    expect(messages[1]).toMatchObject({
+      type: 'system',
+      text: '正在重启 Codexio，页面会自动重连。'
+    })
+    expect(messages[2]).toMatchObject({
+      type: 'system',
+      text: '执行失败：$restart\nCodexio supervisor 未运行，请用 start.cmd 启动后再重启。'
+    })
+    await closeWebSocket(socket)
+    await closeTestServer(listener)
+  })
+
+  it('shows command help for yuan help and question aliases', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    const socket = await openWebSocket(baseUrl)
+    const messages = recordWebSocket(socket)
+    socket.send(JSON.stringify({
+      text: '￥help'
+    }))
+    await waitForWebSocketMessages(messages, 2)
+    expect(messages[0]).toMatchObject({
+      type: 'user',
+      text: '￥help'
+    })
+    expect(messages[1]).toMatchObject({
+      type: 'system',
+      text: expect.stringContaining('$update / ￥update')
+    })
+    socket.send(JSON.stringify({
+      text: '￥?'
+    }))
+    await waitForWebSocketMessages(messages, 4)
+    expect(messages[2]).toMatchObject({
+      type: 'user',
+      text: '￥?'
+    })
+    expect(messages[3]).toMatchObject({
+      type: 'system',
+      text: expect.stringContaining('$help / ￥help / $? / ￥?')
     })
     await closeWebSocket(socket)
     await closeTestServer(listener)
@@ -184,14 +282,25 @@ describe('server', () => {
     await closeTestServer(listener)
   })
 
-  it('restarts the active agent through the authenticated admin endpoint', async () => {
-    const { baseUrl, listener } = await startTestServer()
-    const unauthorized = await fetch(`${baseUrl}/api/agent/restart`, {
+  it('restarts the application through the authenticated admin endpoint', async () => {
+    const restarts: string[] = []
+    const { baseUrl, listener } = await startTestServer({
+      restart: async () => {
+        restarts.push('restart')
+        return {
+          code: '1',
+          message: 'no error',
+          data: 'Codexio restart requested through supervisor 127.0.0.1:10000',
+          isFailed: false
+        }
+      }
+    })
+    const unauthorized = await fetch(`${baseUrl}/api/server/restart`, {
       method: 'POST'
     })
     expect(unauthorized.status).toBe(401)
 
-    const response = await fetch(`${baseUrl}/api/agent/restart`, {
+    const response = await fetch(`${baseUrl}/api/server/restart`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${testToken}`
@@ -204,7 +313,10 @@ describe('server', () => {
       }
     }
     expect(result.isFailed).toBe(false)
-    expect(result.data.action).toBe('restart')
+    expect(result.data).toBe('Codexio restart requested through supervisor 127.0.0.1:10000')
+    expect(restarts).toEqual([
+      'restart'
+    ])
     await closeTestServer(listener)
   })
 
@@ -450,53 +562,74 @@ describe('server', () => {
     }
   })
 
-  it('uses runtime server port before configured restart port', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'codexio-runtime-'))
-    const configPath = join(dir, 'config.yaml')
-    await writeFile(join(dir, 'server.json'), JSON.stringify({
-      pid: process.pid,
-      host: '127.0.0.1',
-      port: 8788,
-      startedAt: new Date().toISOString()
-    }), 'utf8')
-    const config = ConfigSchema.parse({
-      server: {
-        host: '127.0.0.1',
-        port: 8787,
-        token: testToken
-      },
-      agents: {
-        codex: {
-          enabled: false
-        },
-        claude: {
-          enabled: true
+  it('requests application restart through the running supervisor', async () => {
+    const token = 'supervisor-token'
+    const requested: string[] = []
+    const http = await new Promise<HttpServer>((resolve, reject) => {
+      const server = new HttpServer((request, response) => {
+        if (request.headers.authorization !== `Bearer ${token}`) {
+          response.statusCode = 401
+          response.end(JSON.stringify({
+            isFailed: true,
+            message: 'unauthorized'
+          }))
+          return
         }
-      },
-      channels: {
-        web: {
-          enabled: true
+        if (request.method === 'GET' && request.url === '/status') {
+          response.end(JSON.stringify({
+            isFailed: false,
+            data: {
+              pid: process.pid
+            }
+          }))
+          return
         }
-      },
-      workspace: {
-        path: '.'
-      }
+        if (request.method === 'POST' && request.url === '/restart') {
+          requested.push('restart')
+          response.end(JSON.stringify({
+            isFailed: false,
+            data: {
+              accepted: true,
+              action: 'restart'
+            }
+          }))
+          return
+        }
+        response.statusCode = 404
+        response.end(JSON.stringify({
+          isFailed: true,
+          message: 'not found'
+        }))
+      })
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => {
+        resolve(server)
+      })
     })
-
-    const targets = await resolveRestartTargets(configPath, config)
-
-    expect(targets).toEqual([
-      {
-        host: '127.0.0.1',
-        port: 8788,
-        source: 'runtime'
-      },
-      {
-        host: '127.0.0.1',
-        port: 8787,
-        source: 'config'
+    try {
+      const address = http.address()
+      if (!address || typeof address === 'string') {
+        throw new Error('supervisor address not found')
       }
-    ])
+      const dir = await mkdtemp(join(tmpdir(), 'codexio-supervisor-'))
+      const configPath = join(dir, 'config.yaml')
+      await writeSupervisorState(configPath, {
+        pid: process.pid,
+        host: '127.0.0.1',
+        port: address.port,
+        token,
+        startedAt: new Date().toISOString()
+      })
+
+      const state = await restartServer(configPath)
+
+      expect(state.port).toBe(address.port)
+      expect(requested).toEqual([
+        'restart'
+      ])
+    } finally {
+      await closeTestServer(http)
+    }
   })
 
   it('resolves source and built serve process commands without npm restart branching', () => {
@@ -529,7 +662,21 @@ describe('server', () => {
   })
 })
 
-async function startTestServer(): Promise<{
+async function startTestServer(applicationLifecycle: {
+  restart: () => Promise<{
+    code: string
+    message: string
+    data: string | null
+    isFailed: boolean
+  }>
+} | null = {
+  restart: async () => ({
+    code: '1',
+    message: 'no error',
+    data: 'Codexio restart requested through supervisor 127.0.0.1:10000',
+    isFailed: false
+  })
+}): Promise<{
   baseUrl: string
   listener: HttpServer
 }> {
@@ -557,7 +704,8 @@ async function startTestServer(): Promise<{
   const server = createCodexioApp(config, {
     agentFactory: () => new TestAgent(async (text) => {
       await server.channelManager.send(text)
-    })
+    }),
+    applicationLifecycle: applicationLifecycle ?? undefined
   })
   const listener = server.listen(0)
   await new Promise<void>((resolve) => listener.once('listening', resolve))

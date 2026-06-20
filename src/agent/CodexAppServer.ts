@@ -30,7 +30,10 @@ export class CodexAppServer {
   private readonly requestTimeoutMs: number
   private child?: ReturnType<typeof execa>
   private nextId = 1
-  private notificationWaiters = new Map<string, Array<() => void>>()
+  private notificationWaiters = new Map<string, Array<{
+    resolve: () => void
+    reject: (error: Error) => void
+  }>>()
   private pending = new Map<number, {
     resolve: (value: unknown) => void
     reject: (error: Error) => void
@@ -93,7 +96,7 @@ export class CodexAppServer {
         if (waiters) {
           this.notificationWaiters.delete(message.method)
           for (const waiter of waiters) {
-            waiter()
+            waiter.resolve()
           }
         }
         this.options.onNotification(message.method, message.params)
@@ -107,22 +110,17 @@ export class CodexAppServer {
       if (this.child === child) {
         this.child = undefined
       }
-      for (const request of this.pending.values()) {
-        clearTimeout(request.timeout)
-        request.reject(new Error(`codex app-server exited with code ${result.exitCode}`))
-      }
-      this.pending.clear()
+      const error = new Error(`codex app-server exited with code ${result.exitCode}`)
+      this.rejectPendingRequests(error)
+      this.rejectNotificationWaiters(error)
     }).catch((error) => {
       Logger.error('codex app-server failed', error)
       if (this.child === child) {
         this.child = undefined
       }
       const message = error instanceof Error ? error : new Error(String(error))
-      for (const request of this.pending.values()) {
-        clearTimeout(request.timeout)
-        request.reject(message)
-      }
-      this.pending.clear()
+      this.rejectPendingRequests(message)
+      this.rejectNotificationWaiters(message)
     })
     await this.request('initialize', {
       clientInfo: {
@@ -178,21 +176,49 @@ export class CodexAppServer {
   }
 
   async waitForNotification(method: string): Promise<void> {
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       const waiters = this.notificationWaiters.get(method) ?? []
-      waiters.push(resolve)
+      waiters.push({
+        resolve,
+        reject
+      })
       this.notificationWaiters.set(method, waiters)
     })
   }
 
   async stop(): Promise<void> {
+    const stopped = new Error('codex app-server stopped')
+    this.rejectNotificationWaiters(stopped)
+    this.rejectPendingRequests(stopped)
     if (!this.child) {
       return
     }
     Logger.info('codex app-server stopping')
     const child = this.child
     this.child = undefined
-    child.kill()
-    await child.catch(() => {})
+    child.kill('SIGTERM')
+    await Promise.race([
+      child.catch(() => {}),
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, 2000)
+      })
+    ])
+  }
+
+  private rejectPendingRequests(error: Error): void {
+    for (const request of this.pending.values()) {
+      clearTimeout(request.timeout)
+      request.reject(error)
+    }
+    this.pending.clear()
+  }
+
+  private rejectNotificationWaiters(error: Error): void {
+    for (const waiters of this.notificationWaiters.values()) {
+      for (const waiter of waiters) {
+        waiter.reject(error)
+      }
+    }
+    this.notificationWaiters.clear()
   }
 }

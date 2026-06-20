@@ -3,7 +3,7 @@ import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { execa } from 'execa'
 import { CodexioConfig } from '../ConfigService.js'
-import { Agent } from './Agent.js'
+import { Agent, AgentLoginInProgressError } from './Agent.js'
 import { createAgentEnv } from './AgentEnvironment.js'
 import { CodexAppServer } from './CodexAppServer.js'
 import { codexioRootPath } from '../AppMetadata.js'
@@ -30,6 +30,7 @@ export class CodexAgent implements Agent {
   private threadId?: string
   private activeTurnId?: string
   private appServer?: CodexAppServerHandle
+  private loginTask?: Promise<void>
   private readonly sessionStore: CodexSessionStoreHandle
   private readonly messageByItemId = new Map<string, string>()
 
@@ -54,14 +55,19 @@ export class CodexAgent implements Agent {
   }
 
   async start(_config: CodexioConfig): Promise<void> {
+    if (this.started) {
+      return
+    }
     Logger.info('codex agent starting', {
       cwd: this.options.workspacePath
     })
-    this.appServer = this.createAppServer()
-    await this.appServer.start()
-    this.started = true
+    if (!this.appServer) {
+      this.appServer = this.createAppServer()
+      await this.appServer.start()
+    }
     await this.ensureLoggedIn()
     await this.resumeOrStartThread()
+    this.started = true
     Logger.info('codex agent ready', {
       threadId: this.threadId
     })
@@ -153,28 +159,6 @@ export class CodexAgent implements Agent {
     }
   }
 
-  async restart(): Promise<void> {
-    Logger.info('codex agent restarting', {
-      threadId: this.threadId,
-      turnId: this.activeTurnId
-    })
-    await this.interruptActiveTurn()
-    await this.appServer?.stop()
-    this.activeTurnId = undefined
-    this.threadId = undefined
-    this.messageByItemId.clear()
-    this.appServer = undefined
-    this.started = false
-    this.appServer = this.createAppServer()
-    await this.appServer.start()
-    this.started = true
-    await this.ensureLoggedIn()
-    await this.resumeOrStartThread()
-    Logger.info('codex agent restarted', {
-      threadId: this.threadId
-    })
-  }
-
   async stop(): Promise<void> {
     Logger.info('codex agent stopping', {
       threadId: this.threadId,
@@ -185,6 +169,7 @@ export class CodexAgent implements Agent {
     this.activeTurnId = undefined
     this.threadId = undefined
     this.appServer = undefined
+    this.loginTask = undefined
     this.messageByItemId.clear()
     this.started = false
   }
@@ -287,6 +272,9 @@ export class CodexAgent implements Agent {
     if (!this.appServer) {
       throw new Error('codex app-server not started')
     }
+    if (this.loginTask) {
+      throw new AgentLoginInProgressError()
+    }
     const status = await this.appServer.request('account/read', {
       refreshToken: false
     })
@@ -312,11 +300,28 @@ export class CodexAgent implements Agent {
     ].join('\n')
     process.stdout.write(`${message}\n`)
     await this.options.send(message).catch(() => {})
-    await this.appServer.waitForNotification('account/login/completed')
-    const completedMessage = 'Codex login completed.'
-    process.stdout.write(`${completedMessage}\n`)
-    await this.options.send(completedMessage).catch(() => {})
-    Logger.info('codex login notification completed')
+    const appServer = this.appServer
+    const task = (async () => {
+      await appServer.waitForNotification('account/login/completed')
+      const completedMessage = 'Codex login completed.'
+      process.stdout.write(`${completedMessage}\n`)
+      await this.options.send(completedMessage).catch(() => {})
+    })()
+    this.loginTask = task
+    void task.then(() => {
+      if (this.loginTask === task) {
+        this.loginTask = undefined
+      }
+      Logger.info('codex login notification completed')
+    }, (error) => {
+      if (this.loginTask === task) {
+        this.loginTask = undefined
+      }
+      Logger.warn('codex login notification failed', {
+        error: error instanceof Error ? error.message : String(error)
+      })
+    })
+    throw new AgentLoginInProgressError()
   }
 
   private async handleNotification(method: string, params: unknown): Promise<void> {

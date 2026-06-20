@@ -14,8 +14,6 @@ export class TestAgent implements Agent {
     await this.send(`test: ${text}`)
   }
 
-  async restart(): Promise<void> {}
-
   async clear(): Promise<void> {}
 
   async stop(): Promise<void> {}

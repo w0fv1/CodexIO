@@ -3,6 +3,7 @@ import { ChannelReceiveResult } from '../channel/Channel.js'
 import { ChannelManager } from '../channel/ChannelManager.js'
 import { Result } from '../value/Result.js'
 import { Logger } from '../component/Logger.js'
+import { ApplicationLifecycle } from '../component/ApplicationLifecycle.js'
 
 export type UpdateHandler = {
   update: () => Promise<Result<string>>
@@ -28,6 +29,14 @@ const commandPrefixes = [
   '$',
   '￥'
 ]
+
+const commandHelpText = [
+  '可用命令：',
+  '$update / ￥update：自动下载并安装最新版本，然后重启 Codexio。',
+  '$restart / ￥restart：重启 Codexio 应用，使已更新或已修改的应用代码生效。',
+  '$clear / ￥clear：清空当前会话显示并重置 agent 会话。',
+  '$help / ￥help / $? / ￥?：显示这份命令说明。'
+].join('\n')
 
 export function parseCommandInput(text: string): ParsedInput {
   const trimmed = text.trim()
@@ -59,7 +68,8 @@ export class CommandExecutor {
   constructor(
     private readonly channelManager: ChannelManager,
     private readonly agentManager: AgentManager,
-    private readonly updateHandler?: UpdateHandler
+    private readonly updateHandler?: UpdateHandler,
+    private readonly applicationLifecycle?: ApplicationLifecycle
   ) {}
 
   async receive(input: CommandExecutorInput): Promise<Result<ChannelReceiveResult>> {
@@ -80,10 +90,16 @@ export class CommandExecutor {
       command: parsed.name,
       args: parsed.args
     })
+    if (parsed.name !== 'clear') {
+      const displayed = await this.channelManager.displayUser(input.text, input.source)
+      if (displayed.isFailed) {
+        return Result.fail<ChannelReceiveResult>(displayed.message)
+      }
+    }
     if (parsed.name === 'clear') {
       const cleared = await this.agentManager.clear()
       if (cleared.isFailed) {
-        return Result.fail<ChannelReceiveResult>(cleared.message)
+        return this.sendCommandFailure('$clear', cleared.message, input.source)
       }
       await this.channelManager.clear(input.source)
       Logger.info('command executor cleared conversation', {
@@ -94,11 +110,18 @@ export class CommandExecutor {
       })
     }
     if (parsed.name === 'restart') {
-      const restarted = await this.agentManager.restart()
-      if (restarted.isFailed) {
-        return Result.fail<ChannelReceiveResult>(restarted.message)
+      const started = await this.channelManager.sendSystem('正在重启 Codexio，页面会自动重连。', input.source)
+      if (started.isFailed) {
+        return Result.fail<ChannelReceiveResult>(started.message)
       }
-      Logger.info('command executor restarted agent', {
+      if (!this.applicationLifecycle) {
+        return this.sendCommandFailure('$restart', 'Codexio supervisor 未运行，请用 start.cmd 启动后再重启。', input.source)
+      }
+      const restarted = await this.applicationLifecycle.restart()
+      if (restarted.isFailed) {
+        return this.sendCommandFailure('$restart', restarted.message, input.source)
+      }
+      Logger.info('command executor requested application restart', {
         source: input.source
       })
       return Result.success({
@@ -106,18 +129,18 @@ export class CommandExecutor {
       })
     }
     if (parsed.name === 'update') {
+      const started = await this.channelManager.sendSystem('正在执行：$update\n正在检查更新；如果发现新版本会自动安装并重启，如果已是最新版本会直接提示。', input.source)
+      if (started.isFailed) {
+        return Result.fail<ChannelReceiveResult>(started.message)
+      }
       if (!this.updateHandler) {
-        return Result.fail<ChannelReceiveResult>('update is not available')
+        return this.sendCommandFailure('$update', 'update is not available', input.source)
       }
       const updated = await this.updateHandler.update()
       if (updated.isFailed) {
-        const sent = await this.channelManager.sendSystem(updated.message, input.source)
-        if (sent.isFailed) {
-          return Result.fail<ChannelReceiveResult>(sent.message)
-        }
-        return Result.fail<ChannelReceiveResult>(updated.message)
+        return this.sendCommandFailure('$update', updated.message, input.source)
       }
-      const sent = await this.channelManager.sendSystem(updated.data ?? updated.message, input.source)
+      const sent = await this.channelManager.sendSystem(`已执行：$update\n${updated.data ?? updated.message}`, input.source)
       if (sent.isFailed) {
         return Result.fail<ChannelReceiveResult>(sent.message)
       }
@@ -128,12 +151,27 @@ export class CommandExecutor {
         action: 'update'
       })
     }
+    if (parsed.name === 'help' || parsed.name === '?') {
+      const sent = await this.channelManager.sendSystem(commandHelpText, input.source)
+      if (sent.isFailed) {
+        return Result.fail<ChannelReceiveResult>(sent.message)
+      }
+      return Result.success({})
+    }
     const name = parsed.name.length > 0 ? parsed.name : '(empty)'
     Logger.warn('command executor unknown command', {
       source: input.source,
       command: name
     })
     const sent = await this.channelManager.sendSystem(`unknown command: ${name}`, input.source)
+    if (sent.isFailed) {
+      return Result.fail<ChannelReceiveResult>(sent.message)
+    }
+    return Result.success({})
+  }
+
+  private async sendCommandFailure(command: string, message: string, source: string): Promise<Result<ChannelReceiveResult>> {
+    const sent = await this.channelManager.sendSystem(`执行失败：${command}\n${message}`, source)
     if (sent.isFailed) {
       return Result.fail<ChannelReceiveResult>(sent.message)
     }

@@ -82,11 +82,6 @@ export class ClaudeAgent implements Agent {
     this.child.stdin?.write(`${text}\n`)
   }
 
-  async restart(): Promise<void> {
-    Logger.info('claude agent restart requested')
-    await this.clear()
-  }
-
   async clear(): Promise<void> {
     Logger.info('claude agent clearing')
     await this.stop()

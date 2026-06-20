@@ -346,6 +346,7 @@ Set-StrictMode -Version Latest
 $manifestData = Get-Content -Raw -LiteralPath $Manifest | ConvertFrom-Json
 $logPath = Join-Path $manifestData.updateRoot "updater\\update.log"
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $logPath) | Out-Null
+Set-Location -LiteralPath $manifestData.updateRoot
 
 function Write-UpdateLog {
     param([Parameter(Mandatory = $true)] [string] $Text)
@@ -379,6 +380,34 @@ function Write-UpdateSnapshot {
     Write-UpdateLog "$Label $Root => $($items -join ', ')"
 }
 
+function Stop-InstallRootProcess {
+    $installRoot = [System.IO.Path]::GetFullPath([string]$manifestData.installRoot).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $currentProcessId = $PID
+    $processes = @(Get-CimInstance Win32_Process | Where-Object {
+        $_.ProcessId -ne $currentProcessId -and (
+            ($null -ne $_.ExecutablePath -and $_.ExecutablePath.StartsWith($installRoot, [System.StringComparison]::OrdinalIgnoreCase)) -or
+            ($null -ne $_.CommandLine -and $_.CommandLine.Contains($installRoot))
+        )
+    })
+    foreach ($process in $processes) {
+        Write-UpdateLog "force stop install-root process pid=$($process.ProcessId) name=$($process.Name)"
+        Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    if ($processes.Count -eq 0) {
+        return
+    }
+    $deadline = [DateTimeOffset]::Now.AddSeconds(10)
+    while ([DateTimeOffset]::Now -lt $deadline) {
+        $alive = @(foreach ($process in $processes) {
+            Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue
+        })
+        if ($alive.Count -eq 0) {
+            return
+        }
+        Start-Sleep -Milliseconds 250
+    }
+}
+
 function Assert-InstallLayout {
     param(
         [Parameter(Mandatory = $true)] [string] $Root,
@@ -407,11 +436,44 @@ function Copy-UpdateItem {
     Assert-UpdatePath $Destination
 }
 
+function Copy-UpdateDirectoryContent {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Source,
+        [Parameter(Mandatory = $true)] [string] $Destination
+    )
+    Assert-UpdatePath $Source
+    if (-not (Test-Path -LiteralPath $Destination)) {
+        New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+    }
+    foreach ($item in Get-ChildItem -Force -LiteralPath $Destination) {
+        Remove-UpdateItem -Path $item.FullName
+    }
+    foreach ($item in Get-ChildItem -Force -LiteralPath $Source) {
+        $target = Join-Path $Destination $item.Name
+        Write-UpdateLog "copy $($item.FullName) -> $target"
+        Copy-Item -Recurse -Force -LiteralPath $item.FullName -Destination $target
+        Assert-UpdatePath $target
+    }
+}
+
 function Remove-UpdateItem {
     param([Parameter(Mandatory = $true)] [string] $Path)
+    for ($attempt = 1; $attempt -le 10; $attempt++) {
+        if (-not (Test-Path -LiteralPath $Path)) {
+            return
+        }
+        try {
+            Write-UpdateLog "remove $Path attempt=$attempt"
+            Remove-Item -Recurse -Force -LiteralPath $Path
+            return
+        } catch {
+            Write-UpdateLog "remove failed attempt=$attempt path=$Path error=$($_.Exception.Message)"
+            Stop-InstallRootProcess
+            Start-Sleep -Milliseconds (250 * $attempt)
+        }
+    }
     if (Test-Path -LiteralPath $Path) {
-        Write-UpdateLog "remove $Path"
-        Remove-Item -Recurse -Force -LiteralPath $Path
+        throw "remove failed: $Path"
     }
 }
 
@@ -447,6 +509,7 @@ function Stop-Codexio {
     if (Test-Path -LiteralPath $manifestData.supervisorStatePath) {
         Remove-Item -Force -LiteralPath $manifestData.supervisorStatePath -ErrorAction SilentlyContinue
     }
+    Stop-InstallRootProcess
     Write-UpdateLog "stop codexio completed"
 }
 
@@ -481,14 +544,15 @@ function Replace-Current {
         Write-UpdateLog "preserve runtime data: $currentData"
         Copy-Item -Recurse -Force -LiteralPath $currentData -Destination $preservedData
     }
-    foreach ($item in @("start.cmd", "restart.cmd", "update.cmd", "codexio")) {
+    foreach ($item in @("start.cmd", "restart.cmd", "update.cmd")) {
         $target = Join-Path $manifestData.installRoot $item
         Remove-UpdateItem -Path $target
     }
-    foreach ($item in @("start.cmd", "restart.cmd", "update.cmd", "codexio")) {
+    foreach ($item in @("start.cmd", "restart.cmd", "update.cmd")) {
         $source = Join-Path $manifestData.stageRoot $item
         Copy-UpdateItem -Source $source -Destination (Join-Path $manifestData.installRoot $item)
     }
+    Copy-UpdateDirectoryContent -Source (Join-Path $manifestData.stageRoot "codexio") -Destination (Join-Path $manifestData.installRoot "codexio")
     if (-not (Test-Path -LiteralPath $manifestData.configPath)) {
         Copy-UpdateItem -Source (Join-Path $manifestData.stageRoot "config.yaml") -Destination $manifestData.configPath
     }
@@ -520,14 +584,15 @@ function Replace-Current {
 
 function Restore-Backup {
     Write-UpdateLog "restore backup started"
-    foreach ($item in @("start.cmd", "restart.cmd", "update.cmd", "config.yaml", "codexio")) {
+    foreach ($item in @("start.cmd", "restart.cmd", "update.cmd", "config.yaml")) {
         $target = Join-Path $manifestData.installRoot $item
         Remove-UpdateItem -Path $target
     }
-    foreach ($item in @("start.cmd", "restart.cmd", "update.cmd", "config.yaml", "codexio")) {
+    foreach ($item in @("start.cmd", "restart.cmd", "update.cmd", "config.yaml")) {
         $source = Join-Path $manifestData.backupRoot $item
         Copy-UpdateItem -Source $source -Destination (Join-Path $manifestData.installRoot $item)
     }
+    Copy-UpdateDirectoryContent -Source (Join-Path $manifestData.backupRoot "codexio") -Destination (Join-Path $manifestData.installRoot "codexio")
     Assert-InstallLayout -Root $manifestData.installRoot -Platform $manifestData.platform
     Write-UpdateSnapshot -Label "install snapshot after rollback" -Root $manifestData.installRoot
     Write-UpdateLog "restore backup completed"

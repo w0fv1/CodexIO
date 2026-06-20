@@ -1,15 +1,13 @@
-import { execFile, spawn } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { createServer as createNetServer } from 'node:net'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, join, relative } from 'node:path'
-import { argv, execPath, pid } from 'node:process'
-import { promisify } from 'node:util'
+import { argv, execPath } from 'node:process'
 import { z } from 'zod'
 import { codexioRootPath } from '../AppMetadata.js'
-import { CodexioConfig, ConfigService, validateCodexioConfig } from '../ConfigService.js'
+import { ConfigService } from '../ConfigService.js'
 
-const execFileAsync = promisify(execFile)
 const require = createRequire(import.meta.url)
 
 const RuntimeServerStateSchema = z.object({
@@ -30,12 +28,6 @@ const SupervisorStateSchema = z.object({
 export type RuntimeServerState = z.infer<typeof RuntimeServerStateSchema>
 export type SupervisorState = z.infer<typeof SupervisorStateSchema>
 
-export type RestartTarget = {
-  host: string
-  port: number
-  source: 'runtime' | 'config'
-}
-
 export type ServeProcessSpec = {
   command: string
   args: string[]
@@ -46,57 +38,51 @@ export type ServeProcessSpecOptions = {
   autoPort?: boolean
 }
 
-export async function startServer(configPath?: string): Promise<SupervisorState> {
-  const service = new ConfigService(configPath)
-  const supervisor = await readRunningSupervisorState(service.path)
-  if (supervisor) {
+type SupervisorAction = 'restart' | 'stop'
+
+export class SupervisorClient {
+  private readonly service: ConfigService
+
+  constructor(configPath?: string) {
+    this.service = new ConfigService(configPath)
+  }
+
+  async restart(): Promise<SupervisorState> {
+    const supervisor = await this.requireRunning()
+    await requestSupervisor(supervisor, 'restart')
     return supervisor
   }
-  throw new Error('codexio supervisor is not running. Start codexio with pnpm run dev or pnpm run start.')
+
+  async stop(): Promise<boolean> {
+    const supervisor = await readRunningSupervisorState(this.service.path)
+    if (!supervisor) {
+      await this.clearState()
+      return false
+    }
+    await requestSupervisor(supervisor, 'stop')
+    return true
+  }
+
+  async requireRunning(): Promise<SupervisorState> {
+    const supervisor = await readRunningSupervisorState(this.service.path)
+    if (!supervisor) {
+      throw new Error('Codexio supervisor 未运行，请用 start.cmd 启动后再重启。')
+    }
+    return supervisor
+  }
+
+  async clearState(): Promise<void> {
+    await removeSupervisorState(this.service.path)
+    await removeRuntimeServerState(this.service.path)
+  }
 }
 
 export async function stopServer(configPath?: string): Promise<boolean> {
-  const service = new ConfigService(configPath)
-  const supervisor = await readRunningSupervisorState(service.path)
-  if (!supervisor) {
-    await removeSupervisorState(service.path)
-    await removeRuntimeServerState(service.path)
-    return false
-  }
-  await requestSupervisor(supervisor, 'stop')
-  return true
+  return new SupervisorClient(configPath).stop()
 }
 
 export async function restartServer(configPath?: string): Promise<SupervisorState> {
-  const service = new ConfigService(configPath)
-  const supervisor = await readRunningSupervisorState(service.path)
-  if (!supervisor) {
-    throw new Error('codexio supervisor is not running. Start codexio with pnpm run dev or pnpm run start.')
-  }
-  await requestSupervisor(supervisor, 'restart')
-  return supervisor
-}
-
-export async function resolveRestartTargets(configPath: string, config: CodexioConfig): Promise<RestartTarget[]> {
-  const targets: RestartTarget[] = []
-  const runtime = await readRuntimeServerState(configPath)
-  if (runtime && isProcessAlive(runtime.pid)) {
-    targets.push({
-      host: runtime.host,
-      port: runtime.port,
-      source: 'runtime'
-    })
-  }
-  const configTarget: RestartTarget = {
-    host: config.server.host,
-    port: config.server.port,
-    source: 'config'
-  }
-  const alreadyIncluded = targets.some((target) => target.host === configTarget.host && target.port === configTarget.port)
-  if (!alreadyIncluded) {
-    targets.push(configTarget)
-  }
-  return targets
+  return new SupervisorClient(configPath).restart()
 }
 
 export async function resolveAvailableServerPort(host: string, preferredPort: number): Promise<number> {
@@ -112,37 +98,19 @@ export async function resolveAvailableServerPort(host: string, preferredPort: nu
 }
 
 export async function writeRuntimeServerState(configPath: string, state: RuntimeServerState): Promise<void> {
-  const path = runtimeServerStatePath(configPath)
-  await mkdir(dirname(path), {
-    recursive: true
-  })
-  await writeFile(path, JSON.stringify(RuntimeServerStateSchema.parse(state), null, 2), 'utf8')
+  await writeState(runtimeServerStatePath(configPath), RuntimeServerStateSchema.parse(state))
 }
 
 export async function readRuntimeServerState(configPath: string): Promise<RuntimeServerState | undefined> {
-  try {
-    const text = await readFile(runtimeServerStatePath(configPath), 'utf8')
-    return RuntimeServerStateSchema.parse(JSON.parse(text))
-  } catch {
-    return undefined
-  }
+  return readState(runtimeServerStatePath(configPath), RuntimeServerStateSchema)
 }
 
 export async function writeSupervisorState(configPath: string, state: SupervisorState): Promise<void> {
-  const path = supervisorStatePath(configPath)
-  await mkdir(dirname(path), {
-    recursive: true
-  })
-  await writeFile(path, JSON.stringify(SupervisorStateSchema.parse(state), null, 2), 'utf8')
+  await writeState(supervisorStatePath(configPath), SupervisorStateSchema.parse(state))
 }
 
 export async function readSupervisorState(configPath: string): Promise<SupervisorState | undefined> {
-  try {
-    const text = await readFile(supervisorStatePath(configPath), 'utf8')
-    return SupervisorStateSchema.parse(JSON.parse(text))
-  } catch {
-    return undefined
-  }
+  return readState(supervisorStatePath(configPath), SupervisorStateSchema)
 }
 
 export async function readRunningSupervisorState(configPath: string): Promise<SupervisorState | undefined> {
@@ -150,8 +118,7 @@ export async function readRunningSupervisorState(configPath: string): Promise<Su
   if (!state || !isProcessAlive(state.pid)) {
     return undefined
   }
-  const ready = await isSupervisorReady(state)
-  if (!ready) {
+  if (!await isSupervisorReady(state)) {
     return undefined
   }
   return state
@@ -220,9 +187,7 @@ export async function waitForRuntimeServerStarted(configPath: string): Promise<R
     if (state && isProcessAlive(state.pid) && await isServerReady(state)) {
       return state
     }
-    await new Promise((resolveWait) => {
-      setTimeout(resolveWait, 200)
-    })
+    await delay(200)
   }
   throw new Error('codexio server did not become ready')
 }
@@ -234,165 +199,29 @@ export async function waitForRuntimeServerStopped(configPath: string): Promise<v
     if (!state || !isProcessAlive(state.pid)) {
       return
     }
-    const available = await isServerPortAvailable(state.host, state.port)
-    if (available) {
+    if (await isServerPortAvailable(state.host, state.port)) {
       return
     }
-    await new Promise((resolveWait) => {
-      setTimeout(resolveWait, 100)
-    })
+    await delay(100)
   }
 }
 
-async function ensureRunningServerStopped(target: RestartTarget, token: string): Promise<boolean> {
-  try {
-    await requestServerStop(target, token)
-    try {
-      await waitForServerStopped(target)
-      return true
-    } catch {
-      const terminated = await terminateCodexioPortOwner(target)
-      if (!terminated) {
-        throw new Error(`server did not stop: ${target.host}:${target.port}`)
-      }
-      await waitForServerStopped(target)
-      return true
-    }
-  } catch {
-    const terminated = await terminateCodexioPortOwner(target)
-    if (terminated) {
-      await waitForServerStopped(target)
-      return true
-    }
-    return false
-  }
-}
-
-async function requestServerStop(target: RestartTarget, token: string): Promise<void> {
-  const url = `http://${target.host}:${target.port}/api/server/stop`
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`
-    }
+async function writeState(path: string, value: unknown): Promise<void> {
+  await mkdir(dirname(path), {
+    recursive: true
   })
-  const result = await response.json() as {
-    isFailed?: boolean
-    message?: string
-  }
-  if (!response.ok || result.isFailed) {
-    throw new Error(result.message ?? `server stop failed: HTTP ${response.status}`)
-  }
+  await writeFile(path, JSON.stringify(value, null, 2), 'utf8')
 }
 
-async function waitForServerStopped(target: RestartTarget): Promise<void> {
-  const startedAt = Date.now()
-  while (Date.now() - startedAt < 5000) {
-    const available = await isServerPortAvailable(target.host, target.port)
-    if (available) {
-      return
-    }
-    await new Promise((resolveWait) => {
-      setTimeout(resolveWait, 100)
-    })
-  }
-  throw new Error(`server did not stop: ${target.host}:${target.port}`)
-}
-
-async function isCodexioServer(target: RestartTarget): Promise<boolean> {
+async function readState<T>(path: string, schema: z.ZodType<T>): Promise<T | undefined> {
   try {
-    const response = await fetch(`http://${target.host}:${target.port}/api/status`)
-    if (!response.ok) {
-      return false
-    }
-    const result = await response.json() as {
-      isFailed?: boolean
-      data?: {
-        status?: unknown
-      }
-    }
-    return result.isFailed === false && typeof result.data?.status === 'string'
+    return schema.parse(JSON.parse(await readFile(path, 'utf8')))
   } catch {
-    return false
+    return undefined
   }
 }
 
-async function isServerReady(state: RuntimeServerState): Promise<boolean> {
-  return isCodexioServer({
-    host: state.host,
-    port: state.port,
-    source: 'runtime'
-  })
-}
-
-async function terminateCodexioPortOwner(target: RestartTarget): Promise<boolean> {
-  const codexioServer = await isCodexioServer(target)
-  if (!codexioServer) {
-    return false
-  }
-  return terminateServerPortOwner(target)
-}
-
-async function terminateServerPortOwner(target: RestartTarget): Promise<boolean> {
-  if (process.platform !== 'win32') {
-    return false
-  }
-  const processId = await findWindowsTcpListenPid(target.host, target.port)
-  if (!processId || processId === pid) {
-    return false
-  }
-  await execFileAsync('taskkill', [
-    '/PID',
-    String(processId),
-    '/T',
-    '/F'
-  ])
-  return true
-}
-
-async function findWindowsTcpListenPid(host: string, port: number): Promise<number | undefined> {
-  const result = await execFileAsync('netstat', [
-    '-ano',
-    '-p',
-    'tcp'
-  ])
-  const normalizedHost = host === 'localhost' ? '127.0.0.1' : host
-  const localAddresses = [
-    `${normalizedHost}:${port}`,
-    `0.0.0.0:${port}`,
-    `[::]:${port}`
-  ]
-  for (const line of result.stdout.split(/\r?\n/)) {
-    const columns = line.trim().split(/\s+/)
-    if (columns.length < 5) {
-      continue
-    }
-    if (columns[0] !== 'TCP') {
-      continue
-    }
-    if (columns[3] !== 'LISTENING') {
-      continue
-    }
-    if (!localAddresses.includes(columns[1])) {
-      continue
-    }
-    const processId = Number.parseInt(columns[4], 10)
-    if (Number.isFinite(processId)) {
-      return processId
-    }
-  }
-  return undefined
-}
-
-function runtimeServerStatePath(configPath: string): string {
-  return join(dirname(configPath), 'server.json')
-}
-
-function supervisorStatePath(configPath: string): string {
-  return join(dirname(configPath), 'supervisor.json')
-}
-
-async function requestSupervisor(state: SupervisorState, action: 'restart' | 'stop'): Promise<void> {
+async function requestSupervisor(state: SupervisorState, action: SupervisorAction): Promise<void> {
   const response = await fetch(`http://${state.host}:${state.port}/${action}`, {
     method: 'POST',
     headers: {
@@ -430,6 +259,32 @@ async function isSupervisorReady(state: SupervisorState): Promise<boolean> {
   }
 }
 
+async function isServerReady(state: RuntimeServerState): Promise<boolean> {
+  try {
+    const response = await fetch(`http://${state.host}:${state.port}/api/status`)
+    if (!response.ok) {
+      return false
+    }
+    const result = await response.json() as {
+      isFailed?: boolean
+      data?: {
+        pid?: unknown
+      }
+    }
+    return result.isFailed === false && result.data?.pid === state.pid
+  } catch {
+    return false
+  }
+}
+
+function runtimeServerStatePath(configPath: string): string {
+  return join(dirname(configPath), 'server.json')
+}
+
+function supervisorStatePath(configPath: string): string {
+  return join(dirname(configPath), 'supervisor.json')
+}
+
 function isServerPortAvailable(host: string, port: number): Promise<boolean> {
   return new Promise((resolveAvailable, reject) => {
     const probe = createNetServer()
@@ -460,4 +315,10 @@ function isProcessAlive(processId: number): boolean {
   } catch {
     return false
   }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolveDelay) => {
+    setTimeout(resolveDelay, milliseconds)
+  })
 }

@@ -48,6 +48,8 @@ describe('update checker', () => {
     expect(fetchMock).toHaveBeenCalledWith(new URL('https://next.firco.cn/api/download/release/codexio/latest?platform=windows-x64-pnpm'))
     expect(message).toContain(nextVersion)
     expect(message).toContain('https://next.firco.cn/manage/nfirco/release')
+    expect(message).toContain('$update')
+    expect(message).toContain('￥update')
     expect(message).not.toContain('fileUrl')
   })
 

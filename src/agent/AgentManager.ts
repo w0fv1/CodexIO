@@ -2,7 +2,7 @@ import { CodexioConfig } from '../ConfigService.js'
 import { Result } from '../value/Result.js'
 import { ClaudeAgent } from './ClaudeAgent.js'
 import { CodexAgent } from './CodexAgent.js'
-import { Agent } from './Agent.js'
+import { Agent, AgentLoginInProgressError } from './Agent.js'
 import { Logger } from '../component/Logger.js'
 
 const receiveConfirmationStarts = [
@@ -38,7 +38,7 @@ export function createReceiveConfirmation(): string {
 }
 
 export type AgentManagerState = {
-  status: 'idle' | 'starting' | 'ready' | 'failed' | 'stopped'
+  status: 'idle' | 'starting' | 'ready' | 'loginRequired' | 'failed' | 'stopped'
   agent: string | null
   message: string
 }
@@ -49,7 +49,7 @@ export type AgentManagerCallbacks = {
 }
 
 export type AgentReceiveResult = {
-  action?: 'clear' | 'restart'
+  action?: 'clear'
 }
 
 export type AgentFactory = () => Agent
@@ -95,7 +95,8 @@ export class AgentManager {
     }
     this.startTask = (async () => {
       try {
-        const agent = this.createAgent()
+        const agent = this.agent ?? this.createAgent()
+        this.agent = agent
         Logger.info('agent starting', {
           agent: agent.type
         })
@@ -117,7 +118,21 @@ export class AgentManager {
         return Result.success(null)
       } catch (error) {
         const failed = Result.fromError(error)
+        if (error instanceof AgentLoginInProgressError) {
+          Logger.warn('agent login required', {
+            message: failed.message
+          })
+          await this.setState({
+            status: 'loginRequired',
+            agent: this.agent?.type ?? null,
+            message: failed.message
+          })
+          return Result.fail(failed.message)
+        }
         Logger.error('agent start failed', error)
+        await this.agent?.stop().catch((stopError) => {
+          Logger.warn('agent stop after start failure failed', stopError)
+        })
         this.agent = undefined
         await this.setState({
           status: 'failed',
@@ -144,19 +159,9 @@ export class AgentManager {
     return task
   }
 
-  async restart(): Promise<Result<AgentReceiveResult>> {
-    const task = this.receiveQueue.then(() => this.restartNow(), () => this.restartNow())
-    this.receiveQueue = task.then(() => {}, () => {})
-    return task
-  }
-
   private async receiveMessageNow(text: string): Promise<Result<AgentReceiveResult>> {
     if (text.trim().length === 0) {
       return Result.fail('text is required')
-    }
-    const received = await this.callbacks.send(createReceiveConfirmation())
-    if (received.isFailed) {
-      return Result.fail<AgentReceiveResult>(received.message)
     }
     const started = await this.start()
     if (started.isFailed) {
@@ -164,6 +169,10 @@ export class AgentManager {
     }
     if (!this.agent) {
       return Result.fail<AgentReceiveResult>('agent not started')
+    }
+    const received = await this.callbacks.send(createReceiveConfirmation())
+    if (received.isFailed) {
+      return Result.fail<AgentReceiveResult>(received.message)
     }
     try {
       Logger.info('agent receive started', {
@@ -183,6 +192,20 @@ export class AgentManager {
   }
 
   private async clearNow(): Promise<Result<AgentReceiveResult>> {
+    if (this.state.status !== 'ready') {
+      await this.agent?.stop().catch((error) => {
+        Logger.warn('agent stop during clear reset failed', error)
+      })
+      this.agent = undefined
+      await this.setState({
+        status: 'idle',
+        agent: null,
+        message: 'agent idle'
+      })
+      return Result.success({
+        action: 'clear'
+      })
+    }
     const started = await this.start()
     if (started.isFailed) {
       return Result.fail<AgentReceiveResult>(started.message)
@@ -201,28 +224,6 @@ export class AgentManager {
     })
     return Result.success({
       action: 'clear'
-    })
-  }
-
-  private async restartNow(): Promise<Result<AgentReceiveResult>> {
-    const started = await this.start()
-    if (started.isFailed) {
-      return Result.fail<AgentReceiveResult>(started.message)
-    }
-    if (!this.agent) {
-      return Result.fail<AgentReceiveResult>('agent not started')
-    }
-    Logger.info('agent restart requested', {
-      agent: this.agent.type
-    })
-    await this.agent.restart()
-    await this.setState({
-      status: 'ready',
-      agent: this.agent.type,
-      message: 'agent restarted'
-    })
-    return Result.success({
-      action: 'restart'
     })
   }
 
