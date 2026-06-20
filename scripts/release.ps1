@@ -117,6 +117,16 @@ function Invoke-CheckedCommand {
     }
 }
 
+function New-HttpCommandOptions {
+    param([Parameter(Mandatory)] [string] $CommandName)
+    $options = @{}
+    $command = Get-Command $CommandName -ErrorAction Stop
+    if ($command.Parameters.ContainsKey("NoProxy")) {
+        $options.NoProxy = $true
+    }
+    return $options
+}
+
 function Read-AdminApiHeaders {
     Import-Module (Join-Path $RepoRoot "script\NfircoBackendApiCredential.psm1") -Force
     $adminApiCredential = Read-NfircoBackendApiCredential -RepoRoot $RepoRoot
@@ -132,7 +142,8 @@ function Invoke-NfircoApi {
         [Parameter(Mandatory)] [hashtable] $Headers
     )
     $json = $Body | ConvertTo-Json -Depth 8
-    $response = Invoke-RestMethod -Uri $Uri -Method Post -Headers $Headers -ContentType "application/json; charset=utf-8" -Body $json -TimeoutSec 60 -NoProxy
+    $requestOptions = New-HttpCommandOptions -CommandName "Invoke-RestMethod"
+    $response = Invoke-RestMethod -Uri $Uri -Method Post -Headers $Headers -ContentType "application/json; charset=utf-8" -Body $json -TimeoutSec 60 @requestOptions
     if ($null -eq $response) {
         throw "Nfirco API returned empty response"
     }
@@ -452,31 +463,40 @@ function New-PnpmCommandFile {
     )
     $text = @"
 @echo off
-echo [codexio] $Action Codexio
+setlocal
+set "CODEXIO_LOG_DIR=%~dp0.codexio\log"
+if not exist "%CODEXIO_LOG_DIR%" mkdir "%CODEXIO_LOG_DIR%"
+for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd-HHmmss"') do set "CODEXIO_COMMAND_LOG=%CODEXIO_LOG_DIR%\command-$Action-%%i.log"
+call :log "[codexio] $Action Codexio"
 cd /d %~dp0
-echo [codexio] working directory: %CD%
-echo [codexio] checking production dependencies
+call :log "[codexio] working directory: %CD%"
+call :log "[codexio] command log: %CODEXIO_COMMAND_LOG%"
+call :log "[codexio] checking production dependencies"
 if not exist codexio\node_modules\@openai\codex\bin\codex.js goto install
 if not exist codexio\node_modules\@openai\codex-win32-x64\package.json goto install
 if not exist codexio\node_modules\@anthropic-ai\claude-code\cli-wrapper.cjs goto install
 if not exist codexio\node_modules\@anthropic-ai\claude-code-win32-x64\package.json goto install
-echo [codexio] dependencies are ready
+call :log "[codexio] dependencies are ready"
 goto start
 :install
-echo [codexio] dependencies are missing, installing production dependencies
+call :log "[codexio] dependencies are missing, installing production dependencies"
 call "%~dp0codexio\nodew.cmd" pnpm install --prod --dir "%~dp0codexio" --config.node-linker=hoisted
 if errorlevel 1 goto failed
-echo [codexio] dependencies installed
+call :log "[codexio] dependencies installed"
 :start
-echo [codexio] running $Action
+call :log "[codexio] running $Action"
 call "%~dp0codexio\nodew.cmd" codexio\dist\index.js $Command --config "%~dp0config.yaml"
 if errorlevel 1 goto failed
-echo [codexio] $Action done
-goto end
+call :log "[codexio] $Action done"
+exit /b 0
 :failed
-echo [codexio] command failed
-:end
+call :log "[codexio] command failed"
 pause
+exit /b 1
+:log
+echo %~1
+>>"%CODEXIO_COMMAND_LOG%" echo %~1
+exit /b 0
 "@
     Write-Utf8File -Path $Path -Text $text.Replace("`n", "`r`n")
 }
@@ -615,7 +635,8 @@ function Publish-Package {
         throw "Nfirco API did not return uploadUrl"
     }
     Write-Step "upload package to OSS: $Platform"
-    Invoke-WebRequest -Uri $uploadData.uploadUrl -Method Put -InFile $ArchivePath -ContentType "application/zip" -UseBasicParsing -TimeoutSec 900 -NoProxy | Out-Null
+    $requestOptions = New-HttpCommandOptions -CommandName "Invoke-WebRequest"
+    Invoke-WebRequest -Uri $uploadData.uploadUrl -Method Put -InFile $ArchivePath -ContentType "application/zip" -UseBasicParsing -TimeoutSec 900 @requestOptions | Out-Null
     Write-Step "complete release record: $Platform"
     Invoke-NfircoApi -Uri $completeUri -Body @{ platform = $Platform } -Headers $Headers | Out-Null
     Write-Step "package published: $Platform"

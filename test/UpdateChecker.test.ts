@@ -1,7 +1,7 @@
 import { rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { codexioRootPath } from '../src/AppMetadata.js'
+import { codexioRootPath, readCodexioVersion } from '../src/AppMetadata.js'
 import { ConfigSchema } from '../src/ConfigService.js'
 import { checkCodexioUpdate } from '../src/component/UpdateChecker.js'
 
@@ -16,15 +16,21 @@ describe('update checker', () => {
   })
 
   it('prompts newer packaged release without download url', async () => {
+    const currentVersionParts = readCodexioVersion().split('.').map((value) => Number.parseInt(value, 10))
+    const nextVersion = [
+      currentVersionParts[0],
+      currentVersionParts[1],
+      currentVersionParts[2] + 1
+    ].join('.')
     await writeFile(releasePath, JSON.stringify({
       platform: 'windows-x64-pnpm'
     }), 'utf8')
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       isf: false,
       data: {
-        version: '0.4.1',
+        version: nextVersion,
         platform: 'windows-x64-pnpm',
-        fileName: 'codexio-0.4.1-windows-x64-pnpm.zip',
+        fileName: `codexio-${nextVersion}-windows-x64-pnpm.zip`,
         fileSizeBytes: 111580,
         sha256: 'hash',
         managePath: '/manage/nfirco/release'
@@ -40,7 +46,7 @@ describe('update checker', () => {
     }))
 
     expect(fetchMock).toHaveBeenCalledWith(new URL('https://next.firco.cn/api/download/release/codexio/latest?platform=windows-x64-pnpm'))
-    expect(message).toContain('0.4.1')
+    expect(message).toContain(nextVersion)
     expect(message).toContain('https://next.firco.cn/manage/nfirco/release')
     expect(message).not.toContain('fileUrl')
   })

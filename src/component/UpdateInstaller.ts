@@ -56,6 +56,13 @@ export class UpdateInstaller {
       if (compareVersion(latest.version, currentVersion) <= 0) {
         return Result.success(`Codexio 已是最新版本 ${currentVersion}。`)
       }
+      Logger.info('codexio update release found', {
+        fromVersion: currentVersion,
+        toVersion: latest.version,
+        platform: latest.platform,
+        fileName: latest.fileName,
+        fileSizeBytes: latest.fileSizeBytes
+      })
       const installRoot = dirname(codexioRootPath)
       const updateRoot = join(installRoot, '.codexio', 'update')
       const downloadRoot = join(updateRoot, 'download')
@@ -76,6 +83,9 @@ export class UpdateInstaller {
         recursive: true
       })
       const archivePath = join(downloadRoot, latest.fileName)
+      Logger.info('codexio update download started', {
+        archivePath
+      })
       await this.downloadRelease(latest, archivePath)
       const actualSha256 = await sha256File(archivePath)
       if (actualSha256.toLowerCase() !== latest.sha256.toLowerCase()) {
@@ -84,9 +94,16 @@ export class UpdateInstaller {
         })
         return Result.fail(`更新包校验失败：${actualSha256}`)
       }
+      Logger.info('codexio update archive verified', {
+        archivePath,
+        sha256: actualSha256
+      })
       await expandZip(archivePath, stageParent)
       const stageRoot = join(stageParent, 'codexio')
       await validateStage(stageRoot, latest.platform)
+      Logger.info('codexio update stage validated', {
+        stageRoot
+      })
       const manifest: UpdateManifest = {
         platform: latest.platform,
         fromVersion: currentVersion,
@@ -104,13 +121,20 @@ export class UpdateInstaller {
       const updaterPath = join(updaterRoot, 'update.ps1')
       await writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8')
       await writeFile(updaterPath, createUpdaterScript(), 'utf8')
+      Logger.info('codexio update updater prepared', {
+        manifestPath,
+        updaterPath,
+        installRoot,
+        updateRoot
+      })
       await startUpdater(updaterPath, manifestPath)
       Logger.info('codexio update installer started', {
         fromVersion: currentVersion,
         toVersion: latest.version,
-        platform: latest.platform
+        platform: latest.platform,
+        logPath: join(updaterRoot, 'update.log')
       })
-      return Result.success(`Codexio ${latest.version} 更新包已准备完成，正在安装并重启。`)
+      return Result.success(`Codexio ${latest.version} 更新包已准备完成，正在安装并重启。日志：${join(updaterRoot, 'update.log')}`)
     } catch (error) {
       Logger.error('codexio update failed', error)
       const failed = Result.fromError(error)
@@ -244,7 +268,7 @@ async function startUpdater(updaterPath: string, manifestPath: string): Promise<
   if (process.platform !== 'win32') {
     throw new Error(`update platform is not supported: ${process.platform}`)
   }
-  const launcher = '& { param([string] $PowerShellPath, [string] $UpdaterPath, [string] $ManifestPath) Start-Process -FilePath $PowerShellPath -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $UpdaterPath, "-Manifest", $ManifestPath) -WindowStyle Minimized }'
+  const launcher = '& { param([string] $PowerShellPath, [string] $UpdaterPath, [string] $ManifestPath) Start-Process -FilePath $PowerShellPath -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $UpdaterPath, "-Manifest", $ManifestPath) -WindowStyle Hidden }'
   await new Promise<void>((resolveStart, reject) => {
     const child = spawn(powershellPath(), [
       '-NoProfile',
@@ -329,9 +353,73 @@ function Write-UpdateLog {
     Add-Content -LiteralPath $logPath -Value $line
 }
 
+function Assert-UpdatePath {
+    param([Parameter(Mandatory = $true)] [string] $Path)
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "required path is missing: $Path"
+    }
+}
+
+function Write-UpdateSnapshot {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Label,
+        [Parameter(Mandatory = $true)] [string] $Root
+    )
+    if (-not (Test-Path -LiteralPath $Root)) {
+        Write-UpdateLog "$Label missing: $Root"
+        return
+    }
+    $items = @(Get-ChildItem -Force -LiteralPath $Root | ForEach-Object {
+        if ($_.PSIsContainer) {
+            "$($_.Name)/"
+        } else {
+            "$($_.Name)"
+        }
+    })
+    Write-UpdateLog "$Label $Root => $($items -join ', ')"
+}
+
+function Assert-InstallLayout {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Root,
+        [Parameter(Mandatory = $true)] [string] $Platform
+    )
+    foreach ($item in @("start.cmd", "restart.cmd", "update.cmd", "config.yaml", "codexio\\dist\\index.js", "codexio\\.codexio\\release.json")) {
+        Assert-UpdatePath (Join-Path $Root $item)
+    }
+    if ($Platform -eq "windows-x64-pnpm") {
+        Assert-UpdatePath (Join-Path $Root "codexio\\nodew.cmd")
+        Assert-UpdatePath (Join-Path $Root "codexio\\runtime\\pnpm\\bin\\pnpm.cjs")
+    }
+    if ($Platform -eq "windows-x64-standalone") {
+        Assert-UpdatePath (Join-Path $Root "codexio\\runtime\\node\\node.exe")
+    }
+}
+
+function Copy-UpdateItem {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Source,
+        [Parameter(Mandatory = $true)] [string] $Destination
+    )
+    Assert-UpdatePath $Source
+    Write-UpdateLog "copy $Source -> $Destination"
+    Copy-Item -Recurse -Force -LiteralPath $Source -Destination $Destination
+    Assert-UpdatePath $Destination
+}
+
+function Remove-UpdateItem {
+    param([Parameter(Mandatory = $true)] [string] $Path)
+    if (Test-Path -LiteralPath $Path) {
+        Write-UpdateLog "remove $Path"
+        Remove-Item -Recurse -Force -LiteralPath $Path
+    }
+}
+
 function Stop-Codexio {
+    Write-UpdateLog "stop codexio started"
     if (Test-Path -LiteralPath $manifestData.supervisorStatePath) {
         $state = Get-Content -Raw -LiteralPath $manifestData.supervisorStatePath | ConvertFrom-Json
+        Write-UpdateLog "request supervisor stop: $($state.host):$($state.port) pid=$($state.pid)"
         try {
             Invoke-RestMethod -Method Post -Uri "http://$($state.host):$($state.port)/stop" -Headers @{ Authorization = "Bearer $($state.token)" } -TimeoutSec 10 | Out-Null
         } catch {
@@ -347,8 +435,11 @@ function Stop-Codexio {
         }
         $remaining = Get-Process -Id $state.pid -ErrorAction SilentlyContinue
         if ($null -ne $remaining) {
+            Write-UpdateLog "force stop supervisor pid=$($state.pid)"
             Stop-Process -Id $state.pid -Force -ErrorAction SilentlyContinue
         }
+    } else {
+        Write-UpdateLog "supervisor state not found"
     }
     if (Test-Path -LiteralPath $manifestData.serverStatePath) {
         Remove-Item -Force -LiteralPath $manifestData.serverStatePath -ErrorAction SilentlyContinue
@@ -356,19 +447,22 @@ function Stop-Codexio {
     if (Test-Path -LiteralPath $manifestData.supervisorStatePath) {
         Remove-Item -Force -LiteralPath $manifestData.supervisorStatePath -ErrorAction SilentlyContinue
     }
+    Write-UpdateLog "stop codexio completed"
 }
 
 function Backup-Current {
+    Write-UpdateLog "backup current started"
     New-Item -ItemType Directory -Force -Path $manifestData.backupRoot | Out-Null
-    foreach ($item in @("start.cmd", "restart.cmd", "update.cmd", "codexio")) {
+    foreach ($item in @("start.cmd", "restart.cmd", "update.cmd", "config.yaml", "codexio")) {
         $source = Join-Path $manifestData.installRoot $item
-        if (Test-Path -LiteralPath $source) {
-            Copy-Item -Recurse -Force -LiteralPath $source -Destination (Join-Path $manifestData.backupRoot $item)
-        }
+        Copy-UpdateItem -Source $source -Destination (Join-Path $manifestData.backupRoot $item)
     }
+    Write-UpdateSnapshot -Label "backup snapshot" -Root $manifestData.backupRoot
+    Write-UpdateLog "backup current completed"
 }
 
 function Replace-Current {
+    Write-UpdateLog "replace current started"
     $preservedNode = Join-Path $manifestData.updateRoot "preserved-node"
     $preservedData = Join-Path $manifestData.updateRoot "preserved-codexio-data"
     $currentNode = Join-Path $manifestData.installRoot "codexio\\runtime\\node"
@@ -376,6 +470,7 @@ function Replace-Current {
         if (Test-Path -LiteralPath $preservedNode) {
             Remove-Item -Recurse -Force -LiteralPath $preservedNode
         }
+        Write-UpdateLog "preserve node runtime: $currentNode"
         Copy-Item -Recurse -Force -LiteralPath $currentNode -Destination $preservedNode
     }
     $currentData = Join-Path $manifestData.installRoot "codexio\\.codexio"
@@ -383,26 +478,24 @@ function Replace-Current {
         if (Test-Path -LiteralPath $preservedData) {
             Remove-Item -Recurse -Force -LiteralPath $preservedData
         }
+        Write-UpdateLog "preserve runtime data: $currentData"
         Copy-Item -Recurse -Force -LiteralPath $currentData -Destination $preservedData
     }
     foreach ($item in @("start.cmd", "restart.cmd", "update.cmd", "codexio")) {
         $target = Join-Path $manifestData.installRoot $item
-        if (Test-Path -LiteralPath $target) {
-            Remove-Item -Recurse -Force -LiteralPath $target
-        }
+        Remove-UpdateItem -Path $target
     }
     foreach ($item in @("start.cmd", "restart.cmd", "update.cmd", "codexio")) {
         $source = Join-Path $manifestData.stageRoot $item
-        if (Test-Path -LiteralPath $source) {
-            Copy-Item -Recurse -Force -LiteralPath $source -Destination (Join-Path $manifestData.installRoot $item)
-        }
+        Copy-UpdateItem -Source $source -Destination (Join-Path $manifestData.installRoot $item)
     }
     if (-not (Test-Path -LiteralPath $manifestData.configPath)) {
-        Copy-Item -Force -LiteralPath (Join-Path $manifestData.stageRoot "config.yaml") -Destination $manifestData.configPath
+        Copy-UpdateItem -Source (Join-Path $manifestData.stageRoot "config.yaml") -Destination $manifestData.configPath
     }
     $newNode = Join-Path $manifestData.installRoot "codexio\\runtime\\node"
     if ($manifestData.platform -eq "windows-x64-pnpm" -and (Test-Path -LiteralPath $preservedNode) -and -not (Test-Path -LiteralPath $newNode)) {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $newNode) | Out-Null
+        Write-UpdateLog "restore preserved node runtime: $newNode"
         Copy-Item -Recurse -Force -LiteralPath $preservedNode -Destination $newNode
     }
     $newData = Join-Path $manifestData.installRoot "codexio\\.codexio"
@@ -416,31 +509,38 @@ function Replace-Current {
             if (Test-Path -LiteralPath $target) {
                 Remove-Item -Recurse -Force -LiteralPath $target
             }
+            Write-UpdateLog "restore runtime data item: $($item.Name)"
             Copy-Item -Recurse -Force -LiteralPath $item.FullName -Destination $target
         }
     }
+    Assert-InstallLayout -Root $manifestData.installRoot -Platform $manifestData.platform
+    Write-UpdateSnapshot -Label "install snapshot after replace" -Root $manifestData.installRoot
+    Write-UpdateLog "replace current completed"
 }
 
 function Restore-Backup {
-    foreach ($item in @("start.cmd", "restart.cmd", "update.cmd", "codexio")) {
+    Write-UpdateLog "restore backup started"
+    foreach ($item in @("start.cmd", "restart.cmd", "update.cmd", "config.yaml", "codexio")) {
         $target = Join-Path $manifestData.installRoot $item
-        if (Test-Path -LiteralPath $target) {
-            Remove-Item -Recurse -Force -LiteralPath $target
-        }
+        Remove-UpdateItem -Path $target
     }
-    foreach ($item in @("start.cmd", "restart.cmd", "update.cmd", "codexio")) {
+    foreach ($item in @("start.cmd", "restart.cmd", "update.cmd", "config.yaml", "codexio")) {
         $source = Join-Path $manifestData.backupRoot $item
-        if (Test-Path -LiteralPath $source) {
-            Copy-Item -Recurse -Force -LiteralPath $source -Destination (Join-Path $manifestData.installRoot $item)
-        }
+        Copy-UpdateItem -Source $source -Destination (Join-Path $manifestData.installRoot $item)
     }
+    Assert-InstallLayout -Root $manifestData.installRoot -Platform $manifestData.platform
+    Write-UpdateSnapshot -Label "install snapshot after rollback" -Root $manifestData.installRoot
+    Write-UpdateLog "restore backup completed"
 }
 
 function Start-Codexio {
+    Assert-UpdatePath $manifestData.startCommand
+    Write-UpdateLog "start codexio: $($manifestData.startCommand)"
     Start-Process -FilePath $manifestData.startCommand -WorkingDirectory $manifestData.installRoot
 }
 
 function Wait-CodexioStarted {
+    Write-UpdateLog "wait codexio started"
     $deadline = [DateTimeOffset]::Now.AddSeconds(60)
     while ([DateTimeOffset]::Now -lt $deadline) {
         if ((Test-Path -LiteralPath $manifestData.supervisorStatePath) -and (Test-Path -LiteralPath $manifestData.serverStatePath)) {
@@ -450,6 +550,7 @@ function Wait-CodexioStarted {
                 $supervisorResponse = Invoke-RestMethod -Method Get -Uri "http://$($state.host):$($state.port)/status" -Headers @{ Authorization = "Bearer $($state.token)" } -TimeoutSec 5
                 $serverResponse = Invoke-RestMethod -Method Get -Uri "http://$($serverState.host):$($serverState.port)/api/status" -TimeoutSec 5
                 if ($supervisorResponse.isFailed -eq $false -and $supervisorResponse.data.pid -eq $state.pid -and $serverResponse.isFailed -eq $false -and $serverResponse.data.pid -eq $serverState.pid) {
+                    Write-UpdateLog "codexio started: supervisor=$($state.pid) server=$($serverState.pid)"
                     return
                 }
             } catch {
@@ -463,6 +564,12 @@ function Wait-CodexioStarted {
 
 try {
     Write-UpdateLog "update started: $($manifestData.fromVersion) -> $($manifestData.toVersion)"
+    Write-UpdateLog "installRoot=$($manifestData.installRoot)"
+    Write-UpdateLog "stageRoot=$($manifestData.stageRoot)"
+    Write-UpdateSnapshot -Label "install snapshot before update" -Root $manifestData.installRoot
+    Write-UpdateSnapshot -Label "stage snapshot before update" -Root $manifestData.stageRoot
+    Assert-InstallLayout -Root $manifestData.installRoot -Platform $manifestData.platform
+    Assert-InstallLayout -Root $manifestData.stageRoot -Platform $manifestData.platform
     Start-Sleep -Seconds 2
     Stop-Codexio
     Backup-Current
