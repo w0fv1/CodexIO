@@ -3,10 +3,11 @@ import { createServer as createNetServer } from 'node:net'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, join, relative } from 'node:path'
-import { argv, execPath } from 'node:process'
+import { argv, execPath, pid } from 'node:process'
 import { z } from 'zod'
 import { codexioRootPath } from '../AppMetadata.js'
 import { Configer } from '../config/Configer.js'
+import { CodexioConfig } from '../ConfigService.js'
 
 const require = createRequire(import.meta.url)
 
@@ -32,10 +33,12 @@ export type ServeProcessSpec = {
   command: string
   args: string[]
   cwd: string
+  env?: NodeJS.ProcessEnv
 }
 
 export type ServeProcessSpecOptions = {
   autoPort?: boolean
+  supervisorPid?: number
 }
 
 type SupervisorAction = 'restart' | 'stop'
@@ -56,10 +59,12 @@ export class SupervisorClient {
   async stop(): Promise<boolean> {
     const supervisor = await readRunningSupervisorState(this.configer.path)
     if (!supervisor) {
+      const runtimeStopped = await stopRuntimeServer(this.configer)
       await this.clearState()
-      return false
+      return runtimeStopped
     }
     await requestSupervisor(supervisor, 'stop')
+    await waitForSupervisorStopped(this.configer.path)
     return true
   }
 
@@ -83,6 +88,24 @@ export async function stopServer(configPath?: string): Promise<boolean> {
 
 export async function restartServer(configPath?: string): Promise<SupervisorState> {
   return new SupervisorClient(configPath).restart()
+}
+
+async function stopRuntimeServer(configer: Configer): Promise<boolean> {
+  const config = await configer.read()
+  const state = await readRuntimeServerState(configer.path)
+  const targets = uniqueRuntimeTargets([
+    state,
+    {
+      host: config.server.host,
+      port: config.server.port
+    }
+  ])
+  for (const target of targets) {
+    if (await requestRuntimeServerStop(target, config)) {
+      return true
+    }
+  }
+  return false
 }
 
 export async function resolveAvailableServerPort(host: string, preferredPort: number): Promise<number> {
@@ -115,7 +138,11 @@ export async function readSupervisorState(configPath: string): Promise<Superviso
 
 export async function readRunningSupervisorState(configPath: string): Promise<SupervisorState | undefined> {
   const state = await readSupervisorState(configPath)
-  if (!state || !isProcessAlive(state.pid)) {
+  if (!state) {
+    return undefined
+  }
+  if (!isProcessAlive(state.pid)) {
+    await removeSupervisorState(configPath)
     return undefined
   }
   if (!await isSupervisorReady(state)) {
@@ -155,7 +182,8 @@ export function createServeProcessSpec(configPath: string, entryPath = argv[1], 
         relative(codexioRootPath, entryPath),
         ...serveArgs
       ],
-      cwd: codexioRootPath
+      cwd: codexioRootPath,
+      ...createServeProcessEnvField(options)
     }
   }
   if (!entryPath) {
@@ -167,7 +195,8 @@ export function createServeProcessSpec(configPath: string, entryPath = argv[1], 
       entryPath,
       ...serveArgs
     ],
-    cwd: codexioRootPath
+    cwd: codexioRootPath,
+    ...createServeProcessEnvField(options)
   }
 }
 
@@ -175,6 +204,7 @@ export function spawnServeProcess(configPath: string, options: ServeProcessSpecO
   const spec = createServeProcessSpec(configPath, argv[1], options)
   return spawn(spec.command, spec.args, {
     cwd: spec.cwd,
+    env: spec.env,
     stdio: 'inherit',
     windowsHide: false
   })
@@ -200,6 +230,22 @@ export async function waitForRuntimeServerStopped(configPath: string): Promise<v
       return
     }
     if (await isServerPortAvailable(state.host, state.port)) {
+      return
+    }
+    await delay(100)
+  }
+}
+
+export async function waitForSupervisorStopped(configPath: string): Promise<void> {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < 5000) {
+    const state = await readSupervisorState(configPath)
+    if (!state || !isProcessAlive(state.pid)) {
+      await removeSupervisorState(configPath)
+      return
+    }
+    if (await isServerPortAvailable(state.host, state.port)) {
+      await removeSupervisorState(configPath)
       return
     }
     await delay(100)
@@ -234,6 +280,31 @@ async function requestSupervisor(state: SupervisorState, action: SupervisorActio
   }
   if (!response.ok || result.isFailed) {
     throw new Error(result.message ?? `supervisor ${action} failed: HTTP ${response.status}`)
+  }
+}
+
+async function requestRuntimeServerStop(target: Pick<RuntimeServerState, 'host' | 'port'>, config: CodexioConfig): Promise<boolean> {
+  try {
+    const status = await fetch(`http://${target.host}:${target.port}/api/status`)
+    if (!status.ok) {
+      return false
+    }
+    const statusResult = await status.json() as {
+      isFailed?: boolean
+    }
+    if (statusResult.isFailed !== false) {
+      return false
+    }
+    await fetch(`http://${target.host}:${target.port}/api/server/stop`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${config.server.token}`
+      }
+    })
+    await waitForRuntimeServerStoppedByTarget(target)
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -312,13 +383,57 @@ function isServerPortAvailable(host: string, port: number): Promise<boolean> {
   })
 }
 
-function isProcessAlive(processId: number): boolean {
+async function waitForRuntimeServerStoppedByTarget(target: Pick<RuntimeServerState, 'host' | 'port'>): Promise<void> {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < 5000) {
+    if (await isServerPortAvailable(target.host, target.port)) {
+      return
+    }
+    await delay(100)
+  }
+}
+
+function uniqueRuntimeTargets(targets: Array<Pick<RuntimeServerState, 'host' | 'port'> | undefined>): Array<Pick<RuntimeServerState, 'host' | 'port'>> {
+  const seen = new Set<string>()
+  const result: Array<Pick<RuntimeServerState, 'host' | 'port'>> = []
+  for (const target of targets) {
+    if (!target) {
+      continue
+    }
+    const key = `${target.host}:${target.port}`
+    if (seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    result.push(target)
+  }
+  return result
+}
+
+export function isProcessAlive(processId: number): boolean {
   try {
     process.kill(processId, 0)
     return true
   } catch {
     return false
   }
+}
+
+function createServeProcessEnv(options: ServeProcessSpecOptions): NodeJS.ProcessEnv | undefined {
+  if (!options.supervisorPid) {
+    return undefined
+  }
+  return {
+    ...process.env,
+    CODEXIO_SUPERVISOR_PID: String(options.supervisorPid)
+  }
+}
+
+function createServeProcessEnvField(options: ServeProcessSpecOptions): Pick<ServeProcessSpec, 'env'> | Record<string, never> {
+  const env = createServeProcessEnv(options)
+  return env ? {
+    env
+  } : {}
 }
 
 function delay(milliseconds: number): Promise<void> {

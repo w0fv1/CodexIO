@@ -1,19 +1,17 @@
-import { Channel, ChannelMessage, ChannelStartInput } from './Channel.js'
+import { CodexioConfig } from '../ConfigService.js'
+import { Channel, ChannelMessage } from './Channel.js'
 import { Result } from '../value/Result.js'
 import { Logger } from '../component/Logger.js'
 import { createFeishuWebhookText } from './ChannelUtil.js'
 
-export type FeishuWebhookChannelConfig = {
-  enabled?: boolean
-  url?: string
-}
+type FeishuWebhookChannelConfig = CodexioConfig['channels']['feishuWebhook']
 
 export class FeishuWebhookChannel implements Channel {
   readonly type = 'feishuWebhook'
+  private config?: FeishuWebhookChannelConfig
 
-  constructor(private readonly config?: FeishuWebhookChannelConfig) {}
-
-  start(_input: ChannelStartInput): void {
+  start(config: CodexioConfig): void {
+    this.config = config.channels.feishuWebhook
     if (!this.config?.url || this.config.url.trim().length === 0) {
       throw new Error('feishu webhook url is required')
     }
@@ -24,8 +22,8 @@ export class FeishuWebhookChannel implements Channel {
     if (!this.config?.url || this.config.url.trim().length === 0) {
       return Result.fail('feishu webhook url is required')
     }
-    if (message.text.trim().length === 0) {
-      return Result.fail('text is required')
+    if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
+      return Result.fail('text or file is required')
     }
     const text = createFeishuWebhookText(message)
     try {

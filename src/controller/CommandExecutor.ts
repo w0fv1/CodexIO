@@ -1,5 +1,5 @@
 import { AgentManager } from '../agent/AgentManager.js'
-import { ChannelReceiveResult } from '../channel/Channel.js'
+import { ChannelFile, ChannelReceiveResult } from '../channel/Channel.js'
 import { ChannelManager } from '../channel/ChannelManager.js'
 import { Result } from '../value/Result.js'
 import { Logger } from '../component/Logger.js'
@@ -23,6 +23,7 @@ type ParsedInput =
 export type CommandExecutorInput = {
   text: string
   source: string
+  files?: ChannelFile[]
 }
 
 const commandPrefixes = [
@@ -79,11 +80,17 @@ export class CommandExecutor {
         source: input.source,
         length: parsed.text.length
       })
-      const displayed = await this.channelManager.displayUser(parsed.text, input.source)
+      const displayed = await this.channelManager.displayUser({
+        text: parsed.text,
+        files: input.files
+      }, input.source)
       if (displayed.isFailed) {
         return Result.fail<ChannelReceiveResult>(displayed.message)
       }
-      return this.agentManager.receiveMessage(parsed.text)
+      return this.agentManager.receiveMessage({
+        text: parsed.text,
+        files: input.files
+      })
     }
     Logger.info('command executor received command', {
       source: input.source,
@@ -91,7 +98,10 @@ export class CommandExecutor {
       args: parsed.args
     })
     if (parsed.name !== 'clear') {
-      const displayed = await this.channelManager.displayUser(input.text, input.source)
+      const displayed = await this.channelManager.displayUser({
+        text: input.text,
+        files: input.files
+      }, input.source)
       if (displayed.isFailed) {
         return Result.fail<ChannelReceiveResult>(displayed.message)
       }

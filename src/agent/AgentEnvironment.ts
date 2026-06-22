@@ -11,14 +11,28 @@ type ProxyEnv = {
   noProxy: string
 }
 
-export function createAgentEnv(config: CodexioConfig): NodeJS.ProcessEnv {
-  mkdirSync(codexHomePath, {
-    recursive: true
-  })
+export type AgentEnvOptions = {
+  codexio?: {
+    apiUrl: string
+    token: string
+  }
+}
+
+export function createAgentEnv(config: CodexioConfig, options: AgentEnvOptions = {}): NodeJS.ProcessEnv {
   const env = {
     ...process.env
   }
-  env.CODEX_HOME = codexHomePath
+  if (options.codexio) {
+    env.CODEXIO_API_URL = options.codexio.apiUrl
+    env.CODEXIO_TOKEN = options.codexio.token
+  }
+  const bundledCodex = config.agents.codex?.bundled ?? true
+  if (bundledCodex) {
+    mkdirSync(codexHomePath, {
+      recursive: true
+    })
+    env.CODEX_HOME = codexHomePath
+  }
   if (config.proxy.enabled) {
     const proxyEnv = {
       httpProxy: `http://${config.proxy.host}:${config.proxy.port}`,
@@ -37,9 +51,13 @@ export function createAgentEnv(config: CodexioConfig): NodeJS.ProcessEnv {
     env.all_proxy = proxyEnv.httpProxy
     env.NO_PROXY = proxyEnv.noProxy
     env.no_proxy = proxyEnv.noProxy
-    syncCodexConfig(proxyEnv)
+    if (bundledCodex) {
+      syncCodexConfig(proxyEnv, options)
+    }
   } else {
-    syncCodexConfig(undefined)
+    if (bundledCodex) {
+      syncCodexConfig(undefined, options)
+    }
   }
   const binPaths = [
     join(process.cwd(), 'node_modules', '.bin'),
@@ -50,8 +68,8 @@ export function createAgentEnv(config: CodexioConfig): NodeJS.ProcessEnv {
   return env
 }
 
-export function syncCodexConfig(proxyEnv: ProxyEnv | undefined): void {
-  const set = proxyEnv ? {
+export function syncCodexConfig(proxyEnv: ProxyEnv | undefined, options: AgentEnvOptions = {}): void {
+  const set: Record<string, string> = proxyEnv ? {
     HTTP_PROXY: proxyEnv.httpProxy,
     http_proxy: proxyEnv.httpProxy,
     HTTPS_PROXY: proxyEnv.httpProxy,
@@ -61,6 +79,10 @@ export function syncCodexConfig(proxyEnv: ProxyEnv | undefined): void {
     NO_PROXY: proxyEnv.noProxy,
     no_proxy: proxyEnv.noProxy
   } : {}
+  if (options.codexio) {
+    set.CODEXIO_API_URL = options.codexio.apiUrl
+    set.CODEXIO_TOKEN = options.codexio.token
+  }
   const entries = Object.entries(set).map(([key, value]) => `${JSON.stringify(key)} = ${JSON.stringify(value)}`)
   const text = [
     '[shell_environment_policy]',

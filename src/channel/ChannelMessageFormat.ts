@@ -4,6 +4,16 @@ export function normalizeChannelMessageText(message: ChannelMessage): string {
   if (message.role === 'system' && message.text === 'clear') {
     return '已开始新对话'
   }
+  const fileText = (message.files ?? [])
+    .map((file) => file.url ?? file.path)
+    .filter((value) => value.trim().length > 0)
+    .join('\n')
+  if (message.text.trim().length > 0 && fileText.length > 0) {
+    return `${message.text}\n\n${fileText}`
+  }
+  if (fileText.length > 0) {
+    return fileText
+  }
   return message.text
 }
 

@@ -7,7 +7,7 @@ pnpm install
 pnpm dev
 ```
 
-开发预览启动后打开 `http://127.0.0.1:8787`。
+开发预览启动后打开 Web 通道地址 `http://127.0.0.1:8788`。
 
 登录当前启用的 agent：
 
@@ -34,7 +34,7 @@ pnpm run stop
 pnpm run restart
 ```
 
-默认配置写入项目内 `.codexio/config.yaml`，也可以通过 `--config <path>` 指定配置文件。默认启用 `web` 通道，可启用 `feishu` 长连接通道、`feishuWebhook` 单向通道和 `email` 邮件通道。配置里的 `server.token` 是 agent 写入 `/api/message` 的内部 token，空值会在启动或初始化配置时自动生成并写回。
+默认配置写入项目内 `.codexio/config.yaml`，也可以通过 `--config <path>` 指定配置文件。默认启用 `web` 通道，可启用 `feishu` 长连接通道、`feishuWebhook` 单向通道和 `email` 邮件通道。`server` 是内部 API 服务，`channels.web` 是网页通道服务。配置里的 `server.token` 是 agent 写入 `/api/message` 的内部 token，空值会在启动或初始化配置时自动生成并写回。
 默认 workspace 是项目内 `.codexio/workspace`。`workspace.path` 支持绝对路径、相对配置文件所在目录的路径，也支持 `~` 和 `~/Desktop` 这类用户目录路径。
 `pnpm run dev` 和 `pnpm run start` 会启动 Codexio supervisor，并在同一个终端里运行 Codexio host。日志会输出在当前终端，按 `Ctrl+C` 会停止 supervisor 和 host。
 `pnpm bundle` 生成未来 exe 使用的单文件 Node bundle，产物不入库。
@@ -42,6 +42,15 @@ pnpm run restart
 Codex 当前对话 ID 保存在 `.codexio/session.json`；进程重启后会恢复该 thread。`pnpm run restart` 会请求 supervisor 重启 Codexio host，日志继续输出在启动 supervisor 的终端。`$ restart` 或 `￥ restart` 只重启 agent 子进程并保留当前对话，`$ clear` 或 `￥ clear` 会开启新对话。
 Codex 子进程的 stdout/stderr 会同步输出到启动 codexio 的终端。
 内置 agent 默认按完全访问模式运行：Codex 使用 `danger-full-access` 和 `never` approval，Claude 使用 `bypassPermissions`。
+
+Codex 默认使用 Codexio 随包携带的 `@openai/codex`。如需接入本机公共 Codex CLI，并共享 Codex App、VS Code Codex 使用的账号和配置，把 `agents.codex.bundled` 改为 `false`：
+
+```yaml
+agents:
+  codex:
+    enabled: true
+    bundled: false
+```
 
 Feishu 开放平台通道只绑定一个群组或私聊会话。启动后，用户先在飞书里给机器人发一条消息，终端会输出 `feishu chat connected: <chat_id>`。需要启动后立即使用固定会话时，把这个值写入配置：
 
@@ -91,7 +100,7 @@ channels:
 
 `idle: true` 时邮件通道使用 IMAP IDLE 长连接等待新邮件，`pollSeconds` 是 IDLE 重启和异常重试间隔；`idle: false` 时才按 `pollSeconds` 做纯轮询。
 
-Host 会先启动 HTTP 和 channel，再异步启动 agent。Codex 未登录时，登录链接会通过已启动的通道发出；新打开的网页会恢复最近 20 条临时消息。
+Host 会先启动内部 API 和 channel，再异步启动 agent。Codex 未登录时，登录链接会通过已启动的通道发出。
 
 正式安装包启动时会自动检查 Codexio 最新版本。检查只读取公开版本元数据，不下载文件、不自动安装；发现新版本时，会提示到 `https://next.firco.cn/manage/nfirco/release` 后台发布页面下载。
 

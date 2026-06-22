@@ -1,91 +1,82 @@
-import { Server as HttpServer } from 'node:http'
-import { Express } from 'express'
 import { CodexioConfig } from '../ConfigService.js'
 import { Result } from '../value/Result.js'
-import { Channel, ChannelMessage, ChannelReceiveResult, ChannelStartInput } from './Channel.js'
+import { Channel, ChannelInput, ChannelMessage, ChannelReceiveResult } from './Channel.js'
 import { EmailChannel } from './EmailChannel.js'
 import { FeishuChannel } from './FeishuChannel.js'
 import { FeishuWebhookChannel } from './FeishuWebhookChannel.js'
 import { WebChannel } from './WebChannel.js'
 import { Logger } from '../component/Logger.js'
-
-const messageHistoryLimit = 20
+import { FileStore } from '../component/FileStore.js'
+import { normalizeChannelMessageFiles } from './ChannelMessageFiles.js'
 
 export class ChannelManager {
-  private readonly web = new WebChannel()
+  private readonly web: WebChannel
   private feishu: FeishuChannel
   private feishuWebhook: FeishuWebhookChannel
   private email: EmailChannel
   private readonly channels = new Map<string, Channel>()
-  private readonly messages: ChannelMessage[] = []
-  private app?: Express
-  private handleReceive?: (text: string, source: string) => Promise<Result<ChannelReceiveResult>>
 
-  constructor(private config: CodexioConfig) {
-    this.feishu = new FeishuChannel(config.channels.feishu)
-    this.feishuWebhook = new FeishuWebhookChannel(config.channels.feishuWebhook)
-    this.email = new EmailChannel(config.channels.email)
-    for (const adapter of [
+  constructor(
+    private config: CodexioConfig,
+    private readonly fileStore = new FileStore(),
+    private readonly handleReceive: (input: ChannelInput, source: string) => Promise<Result<ChannelReceiveResult>>
+  ) {
+    this.web = new WebChannel(fileStore, (input) => this.receive(input, this.web.type))
+    this.feishu = new FeishuChannel((input) => this.receive(input, this.feishu.type))
+    this.feishuWebhook = new FeishuWebhookChannel()
+    this.email = new EmailChannel((input) => this.receive(input, this.email.type))
+    this.registerConfiguredChannels(config, [
       this.web,
       this.feishu,
       this.feishuWebhook,
       this.email
-    ]) {
-      const channelConfig = config.channels[adapter.type]
-      if (channelConfig?.enabled) {
-        this.channels.set(adapter.type, adapter)
-      }
-    }
+    ])
   }
 
-  start(app: Express, receive: (text: string, source: string) => Promise<Result<ChannelReceiveResult>>): void {
-    this.app = app
-    this.handleReceive = receive
+  start(config = this.config): void {
+    this.config = config
     for (const channel of this.channels.values()) {
-      channel.start(this.createStartInput(channel))
+      channel.start(config)
     }
   }
 
-  attach(server: HttpServer): void {
-    if (this.channels.has(this.web.type)) {
-      this.web.attach(server)
+  async receive(input: ChannelInput, source = 'unknown'): Promise<Result<ChannelReceiveResult>> {
+    if (input.text.trim().length === 0 && (!input.files || input.files.length === 0)) {
+      return Result.fail('text or file is required')
     }
+    return this.handleReceive(input, source)
   }
 
-  async receive(text: string, source = 'unknown'): Promise<Result<ChannelReceiveResult>> {
-    if (text.trim().length === 0) {
-      return Result.fail('text is required')
-    }
-    if (!this.handleReceive) {
-      return Result.fail('channel manager not started')
-    }
-    return this.handleReceive(text, source)
-  }
-
-  async displayUser(text: string, source = 'unknown'): Promise<Result<null>> {
-    if (text.trim().length === 0) {
-      return Result.fail('text is required')
+  async displayUser(input: ChannelInput, source = 'unknown'): Promise<Result<null>> {
+    if (input.text.trim().length === 0 && (!input.files || input.files.length === 0)) {
+      return Result.fail('text or file is required')
     }
     Logger.info('user message received', {
       source,
-      text
+      text: input.text,
+      files: input.files?.length ?? 0
     })
     return this.display({
       role: 'user',
-      text,
+      text: input.text,
       createdAt: Date.now(),
-      source
+      source,
+      files: input.files
     })
   }
 
-  async send(text: string): Promise<Result<null>> {
-    if (text.trim().length === 0) {
-      return Result.fail('text is required')
+  async send(input: ChannelInput | string): Promise<Result<null>> {
+    const messageInput = typeof input === 'string' ? {
+      text: input
+    } : input
+    if (messageInput.text.trim().length === 0 && (!messageInput.files || messageInput.files.length === 0)) {
+      return Result.fail('text or file is required')
     }
     return this.display({
       role: 'agent' as const,
-      text,
-      createdAt: Date.now()
+      text: messageInput.text,
+      createdAt: Date.now(),
+      files: messageInput.files
     })
   }
 
@@ -106,7 +97,6 @@ export class ChannelManager {
   }
 
   async clear(source = 'unknown'): Promise<Result<null>> {
-    this.messages.length = 0
     return this.broadcast({
       role: 'system',
       text: 'clear',
@@ -145,9 +135,9 @@ export class ChannelManager {
         this.channels.delete(channel.type)
       }
     }
-    this.feishu = new FeishuChannel(config.channels.feishu)
-    this.feishuWebhook = new FeishuWebhookChannel(config.channels.feishuWebhook)
-    this.email = new EmailChannel(config.channels.email)
+    this.feishu = new FeishuChannel((input) => this.receive(input, this.feishu.type))
+    this.feishuWebhook = new FeishuWebhookChannel()
+    this.email = new EmailChannel((input) => this.receive(input, this.email.type))
     for (const channel of [
       this.feishu,
       this.feishuWebhook,
@@ -158,13 +148,11 @@ export class ChannelManager {
         continue
       }
       this.channels.set(channel.type, channel)
-      if (this.app && this.handleReceive) {
-        try {
-          channel.start(this.createStartInput(channel))
-        } catch (error) {
-          const failed = Result.fromError(error)
-          failures.push(`${channel.type}: ${failed.message}`)
-        }
+      try {
+        channel.start(config)
+      } catch (error) {
+        const failed = Result.fromError(error)
+        failures.push(`${channel.type}: ${failed.message}`)
       }
     }
     if (failures.length > 0) {
@@ -178,31 +166,8 @@ export class ChannelManager {
     if (this.channels.size === 0) {
       return Result.fail('channel not found')
     }
-    this.messages.push(message)
-    if (this.messages.length > messageHistoryLimit) {
-      this.messages.splice(0, this.messages.length - messageHistoryLimit)
-    }
-    const result = await this.broadcast(message)
-    if (result.isFailed) {
-      const index = this.messages.indexOf(message)
-      if (index >= 0) {
-        this.messages.splice(index, 1)
-      }
-    }
-    return result
-  }
-
-  private createStartInput(channel: Channel): ChannelStartInput {
-    if (!this.app) {
-      throw new Error('channel manager not started')
-    }
-    return {
-      app: this.app,
-      displayHistory: () => [...this.messages],
-      receive: async (text) => {
-        return this.receive(text, channel.type)
-      }
-    }
+    const normalized = await normalizeChannelMessageFiles(message, this.fileStore)
+    return this.broadcast(normalized)
   }
 
   private async broadcast(message: ChannelMessage): Promise<Result<null>> {
@@ -227,5 +192,14 @@ export class ChannelManager {
       })
     }
     return Result.success(null)
+  }
+
+  private registerConfiguredChannels(config: CodexioConfig, channels: Channel[]): void {
+    for (const channel of channels) {
+      const channelConfig = config.channels[channel.type]
+      if (channelConfig?.enabled) {
+        this.channels.set(channel.type, channel)
+      }
+    }
   }
 }

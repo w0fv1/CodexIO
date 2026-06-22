@@ -1,10 +1,16 @@
 import { CodexioConfig } from '../ConfigService.js'
+import { ChannelFile } from '../channel/Channel.js'
+
+export type AgentInput = {
+  text: string
+  files?: ChannelFile[]
+}
 
 export interface Agent {
   type: string
   login(): Promise<void>
   start(config: CodexioConfig): Promise<void>
-  receive(text: string): Promise<void>
+  receive(input: AgentInput): Promise<void>
   clear(): Promise<void>
   stop(): Promise<void>
 }

@@ -1,16 +1,21 @@
 import { Server as HttpServer } from 'node:http'
+import express from 'express'
+import multer from 'multer'
 import { WebSocket, WebSocketServer } from 'ws'
 import { z } from 'zod'
-import { Channel, ChannelMessage, ChannelStartInput } from './Channel.js'
+import { CodexioConfig } from '../ConfigService.js'
+import { Channel, ChannelFile, ChannelInput, ChannelMessage, ChannelReceiveResult } from './Channel.js'
 import { renderMarkdownHtml, shouldRenderMarkdown } from '../component/Markdown.js'
 import { webPageHtml } from './WebPage.js'
 import { Result } from '../value/Result.js'
 import { Logger } from '../component/Logger.js'
+import { FileStore } from '../component/FileStore.js'
 
 const WebSocketInputSchema = z.union([
   z.string(),
   z.object({
-    text: z.string()
+    text: z.string().default(''),
+    files: z.array(z.string()).default([])
   })
 ])
 
@@ -19,6 +24,7 @@ type WebChannelMessage = {
   text: string
   createdAt: number
   html?: string
+  files?: ChannelFile[]
 }
 
 export class WebChannel implements Channel {
@@ -27,15 +33,69 @@ export class WebChannel implements Channel {
   private readonly server = new WebSocketServer({
     noServer: true
   })
-  private input?: ChannelStartInput
+  private listener?: HttpServer
   private attached?: HttpServer
   private stopped = false
 
-  start(input: ChannelStartInput): void {
-    this.input = input
+  constructor(
+    private readonly fileStore: FileStore,
+    private readonly receive: (input: ChannelInput) => Promise<Result<ChannelReceiveResult>>
+  ) {}
+
+  start(config: CodexioConfig): void {
+    const webConfig = config.channels.web
+    if (!webConfig?.enabled) {
+      return
+    }
+    const app = express()
+    const upload = multer({
+      storage: multer.memoryStorage(),
+      limits: {
+        fileSize: 20 * 1024 * 1024
+      }
+    })
     Logger.info('web channel ready')
-    input.app.get('/', (_request, response) => {
+    app.get('/', (_request, response) => {
       response.type('html').send(webPageHtml)
+    })
+    app.get('/config', (_request, response) => {
+      response.redirect(`http://${config.server.host}:${config.server.port}/config`)
+    })
+    app.post('/api/files', upload.single('file'), async (request, response) => {
+      try {
+        if (!request.file) {
+          response.json(Result.fail('file is required'))
+          return
+        }
+        const file = await this.fileStore.importBuffer({
+          buffer: request.file.buffer,
+          name: request.file.originalname,
+          mime: request.file.mimetype
+        })
+        response.json(Result.success({
+          file
+        }))
+      } catch (error) {
+        Logger.error('web file upload failed', error)
+        response.json(Result.fromError(error))
+      }
+    })
+    app.get('/api/files/:id', async (request, response) => {
+      try {
+        const id = String(request.params.id ?? '').trim()
+        if (id.length === 0) {
+          response.status(404).json(Result.fail('file not found'))
+          return
+        }
+        const file = this.fileStore.resolve(id)
+        response.type(file.mime).send(await this.fileStore.read(file.id))
+      } catch (error) {
+        Logger.warn('web file read failed', {
+          id: request.params.id,
+          message: error instanceof Error ? error.message : String(error)
+        })
+        response.status(404).json(Result.fail('file not found'))
+      }
     })
     this.server.on('connection', (socket) => {
       this.sockets.add(socket)
@@ -45,15 +105,6 @@ export class WebChannel implements Channel {
       socket.send(JSON.stringify({
         type: 'ready'
       }))
-      const history = input.displayHistory()
-      setImmediate(() => {
-        if (socket.readyState !== WebSocket.OPEN) {
-          return
-        }
-        for (const message of history) {
-          socket.send(JSON.stringify(this.toWebMessage(message)))
-        }
-      })
       socket.on('message', async (data) => {
         const raw = data.toString()
         let body: unknown = raw
@@ -66,23 +117,33 @@ export class WebChannel implements Channel {
           Logger.warn('web socket input invalid')
           socket.send(JSON.stringify({
             type: 'error',
-            message: 'text is required'
-          }))
-          return
-        }
-        if (!this.input) {
-          Logger.warn('web channel input missing')
-          socket.send(JSON.stringify({
-            type: 'error',
-            message: 'web channel not started'
+            message: 'text or file is required'
           }))
           return
         }
         const text = typeof parsed.data === 'string' ? parsed.data : parsed.data.text
+        let files: ChannelFile[] = []
+        try {
+          files = typeof parsed.data === 'string' ? [] : this.fileStore.resolveMany(parsed.data.files)
+        } catch (error) {
+          const result = Result.fromError(error)
+          Logger.warn('web socket file resolve failed', {
+            message: result.message
+          })
+          socket.send(JSON.stringify({
+            type: 'error',
+            message: result.message
+          }))
+          return
+        }
         Logger.info('web message received', {
-          length: text.length
+          length: text.length,
+          files: files.length
         })
-        const result = await this.input.receive(text)
+        const result = await this.receive({
+          text,
+          files
+        })
         if (result.isFailed) {
           Logger.warn('web message receive failed', {
             message: result.message
@@ -100,6 +161,8 @@ export class WebChannel implements Channel {
         })
       })
     })
+    this.listener = app.listen(webConfig.port, webConfig.host)
+    this.attach(this.listener)
   }
 
   attach(server: HttpServer): void {
@@ -131,8 +194,8 @@ export class WebChannel implements Channel {
   }
 
   async send(message: ChannelMessage): Promise<Result<null>> {
-    if (message.text.trim().length === 0) {
-      return Result.fail('text is required')
+    if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
+      return Result.fail('text or file is required')
     }
     if (message.role === 'system' && message.text === 'clear') {
       for (const socket of this.sockets) {
@@ -166,6 +229,24 @@ export class WebChannel implements Channel {
       this.stopped = true
       this.server.close()
     }
+    await new Promise<void>((resolve, reject) => {
+      if (!this.listener) {
+        resolve()
+        return
+      }
+      this.listener.close((error) => {
+        this.listener = undefined
+        if (error) {
+          reject(error)
+          return
+        }
+        resolve()
+      })
+    }).catch((error) => {
+      Logger.warn('web channel listener stop failed', {
+        message: error instanceof Error ? error.message : String(error)
+      })
+    })
     return Result.success(null)
   }
 
@@ -174,6 +255,9 @@ export class WebChannel implements Channel {
       type: message.role,
       text: message.text,
       createdAt: message.createdAt
+    }
+    if (message.files && message.files.length > 0) {
+      data.files = message.files
     }
     if (message.role !== 'user' && shouldRenderMarkdown(message.text)) {
       data.html = renderMarkdownHtml(message.text)

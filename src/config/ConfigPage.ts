@@ -40,6 +40,7 @@ export const configPageHtml = String.raw`
     const importFile = document.getElementById('importFile')
     let config = {}
     let descriptors = []
+    let actions = []
     let values = {}
 
     const getValue = (object, path) => path.split('.').reduce((current, key) => current == null ? undefined : current[key], object)
@@ -77,9 +78,30 @@ export const configPageHtml = String.raw`
       for (const group of groups) {
         const section = document.createElement('section')
         section.className = 'rounded-lg border border-slate-800 bg-slate-900/60 p-4'
-        section.innerHTML = '<h2 class="mb-4 text-base font-medium text-slate-100"></h2><div class="grid gap-4 md:grid-cols-2"></div>'
+        section.innerHTML = '<div class="mb-4 flex flex-wrap items-center justify-between gap-3"><h2 class="text-base font-medium text-slate-100"></h2><div data-actions class="flex flex-wrap items-center gap-2"></div></div><div data-fields class="grid gap-4 md:grid-cols-2"></div>'
         section.querySelector('h2').textContent = group
-        const grid = section.querySelector('div')
+        const actionHost = section.querySelector('[data-actions]')
+        for (const action of actions.filter((item) => item.group === group)) {
+          const button = document.createElement('button')
+          button.type = 'button'
+          button.className = 'rounded-md border border-blue-500/70 px-3 py-2 text-sm text-blue-100 hover:bg-blue-950 disabled:cursor-not-allowed disabled:opacity-50'
+          button.textContent = action.label
+          button.addEventListener('click', async () => {
+            button.disabled = true
+            const response = await fetch('/api/config/actions/' + encodeURIComponent(action.id), {
+              method: 'POST'
+            })
+            const result = await response.json()
+            button.disabled = false
+            if (result.isFailed) {
+              showStatus(result.message, 'error')
+              return
+            }
+            showStatus(result.data && result.data.message ? result.data.message : result.message)
+          })
+          actionHost.append(button)
+        }
+        const grid = section.querySelector('[data-fields]')
         for (const field of descriptors.filter((item) => item.group === group)) {
           const row = document.createElement('label')
           row.className = 'grid gap-2'
@@ -122,6 +144,7 @@ export const configPageHtml = String.raw`
       }
       config = result.data.config
       descriptors = result.data.descriptor
+      actions = result.data.actions || []
       render()
     }
     save.addEventListener('click', async () => {

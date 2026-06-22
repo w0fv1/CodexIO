@@ -12,6 +12,7 @@ import {
   removeRuntimeServerState,
   removeSupervisorState,
   spawnServeProcess,
+  stopServer,
   waitForRuntimeServerStarted,
   waitForRuntimeServerStopped,
   writeSupervisorState
@@ -21,6 +22,7 @@ export type SupervisorOptions = {
   configPath?: string
   initConfig?: boolean
   autoPort?: boolean
+  replaceRunning?: boolean
 }
 
 type SupervisorAction = 'restart' | 'stop'
@@ -31,7 +33,15 @@ export async function runSupervisor(options: SupervisorOptions = {}): Promise<vo
   validateCodexioConfig(config)
   const running = await readRunningSupervisorState(configer.path)
   if (running) {
-    throw new Error(`codexio supervisor is already running on ${running.host}:${running.port}`)
+    if (!options.replaceRunning) {
+      throw new Error(`codexio supervisor is already running on ${running.host}:${running.port}`)
+    }
+    Logger.info('codexio supervisor replacing running instance', {
+      host: running.host,
+      port: running.port,
+      pid: running.pid
+    })
+    await stopServer(configer.path)
   }
   const supervisor = new Supervisor(configer.path, config.server.token, Boolean(options.autoPort))
   await supervisor.run()
@@ -151,7 +161,8 @@ class Supervisor {
       return
     }
     const child = spawnServeProcess(this.configPath, {
-      autoPort: this.autoPort
+      autoPort: this.autoPort,
+      supervisorPid: pid
     })
     this.child = child
     this.childExit = new Promise<void>((resolve) => {

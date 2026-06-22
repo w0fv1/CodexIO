@@ -9,11 +9,14 @@ proxy:
 agents:
   codex:
     enabled: true
+    bundled: true
   claude:
     enabled: false
 channels:
   web:
     enabled: true
+    host: 127.0.0.1
+    port: 8788
   feishu:
     enabled: false
     appId: ''

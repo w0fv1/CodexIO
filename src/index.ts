@@ -5,10 +5,12 @@ import { argv, pid, stdout as output } from 'node:process'
 import { pathToFileURL } from 'node:url'
 import express from 'express'
 import cors from 'cors'
+import multer from 'multer'
 import { Command } from 'commander'
 import { z } from 'zod'
 import { asFunction, asValue, createContainer } from 'awilix'
 import { ChannelManager } from './channel/ChannelManager.js'
+import { ChannelFile } from './channel/Channel.js'
 import { AgentManager } from './agent/AgentManager.js'
 import { CodexioConfig, ConfigSchema, validateCodexioConfig } from './ConfigService.js'
 import { Configer } from './config/Configer.js'
@@ -16,6 +18,7 @@ import { Result } from './value/Result.js'
 import { readCodexioVersion } from './AppMetadata.js'
 import { checkCodexioUpdate } from './component/UpdateChecker.js'
 import { UpdateInstaller } from './component/UpdateInstaller.js'
+import { FileStore } from './component/FileStore.js'
 import { AgentFactory } from './agent/AgentManager.js'
 import { CommandExecutor, UpdateHandler } from './controller/CommandExecutor.js'
 import { Logger } from './component/Logger.js'
@@ -23,16 +26,29 @@ import { runSupervisor } from './component/Supervisor.js'
 import { ApplicationLifecycle, SupervisorApplicationLifecycle } from './component/ApplicationLifecycle.js'
 import { configFieldDescriptors, resolveConfigEffects } from './config/ConfigDescriptor.js'
 import { configPageHtml } from './config/ConfigPage.js'
+import { ConfigAction, configActionDescriptors, defaultConfigActions, executeConfigAction } from './config/ConfigAction.js'
 import {
   removeRuntimeServerState,
   resolveAvailableServerPort,
   restartServer,
   stopServer,
-  writeRuntimeServerState
+  writeRuntimeServerState,
+  isProcessAlive
 } from './component/ServerLifecycle.js'
 
 const AgentMessageBodySchema = z.object({
-  text: z.string().refine((value) => value.trim().length > 0)
+  text: z.string().default(''),
+  files: z.array(z.object({
+    path: z.string().min(1)
+  })).default([])
+}).refine((value) => value.text.trim().length > 0 || value.files.length > 0)
+
+const WebSocketFileParamsSchema = z.object({
+  id: z.string().min(1)
+})
+
+const ConfigActionParamsSchema = z.object({
+  id: z.string().min(1)
 })
 
 const ConfigPatchBodySchema = z.object({
@@ -47,6 +63,7 @@ export type CodexioServer = {
   app: express.Express
   channelManager: ChannelManager
   agentManager: AgentManager
+  fileStore: FileStore
   listen: (port?: number, host?: string) => HttpServer
   stop: () => Promise<Result<null>>
 }
@@ -56,6 +73,7 @@ export type CodexioAppOptions = {
   configPath?: string
   configer?: Configer
   applicationLifecycle?: ApplicationLifecycle
+  configActions?: ConfigAction[]
 }
 
 export function createCodexioApp(config: CodexioConfig, options: CodexioAppOptions = {}): CodexioServer {
@@ -65,12 +83,19 @@ export function createCodexioApp(config: CodexioConfig, options: CodexioAppOptio
   app.use(express.json({
     limit: '1mb'
   }))
+  const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+      fileSize: 20 * 1024 * 1024
+    }
+  })
 
   const configer = options.configer ?? new Configer(options.configPath)
   const updateHandler = options.configPath ? {
     update: async () => new UpdateInstaller(await configer.read(), configer.path).update()
   } : undefined
   const applicationLifecycle = options.applicationLifecycle ?? (options.configPath ? new SupervisorApplicationLifecycle(configer.path) : undefined)
+  const configActions = options.configActions ?? defaultConfigActions
   const container = createAppContainer({
     app,
     config,
@@ -81,8 +106,46 @@ export function createCodexioApp(config: CodexioConfig, options: CodexioAppOptio
   })
   const channelManager = container.resolve('channelManager')
   const agentManager = container.resolve('agentManager')
-  const commandExecutor = container.resolve('commandExecutor')
+  const fileStore = container.resolve('fileStore')
   let activeListener: HttpServer | undefined
+
+  app.post('/api/files', upload.single('file'), async (request, response) => {
+    try {
+      if (!request.file) {
+        response.json(Result.fail('file is required'))
+        return
+      }
+      const file = await fileStore.importBuffer({
+        buffer: request.file.buffer,
+        name: request.file.originalname,
+        mime: request.file.mimetype
+      })
+      response.json(Result.success({
+        file
+      }))
+    } catch (error) {
+      Logger.error('api file upload failed', error)
+      response.json(Result.fromError(error))
+    }
+  })
+
+  app.get('/api/files/:id', async (request, response) => {
+    try {
+      const params = WebSocketFileParamsSchema.safeParse(request.params)
+      if (!params.success) {
+        response.status(404).json(Result.fail('file not found'))
+        return
+      }
+      const file = fileStore.resolve(params.data.id)
+      response.type(file.mime).send(await fileStore.read(file.id))
+    } catch (error) {
+      Logger.warn('api file read failed', {
+        id: request.params.id,
+        message: error instanceof Error ? error.message : String(error)
+      })
+      response.status(404).json(Result.fail('file not found'))
+    }
+  })
 
   app.post('/api/message', async (request, response) => {
     try {
@@ -95,19 +158,28 @@ export function createCodexioApp(config: CodexioConfig, options: CodexioAppOptio
       const body = AgentMessageBodySchema.safeParse(request.body)
       if (!body.success) {
         Logger.warn('api message invalid body')
-        response.json(Result.fail('text is required'))
+        response.json(Result.fail('text or file is required'))
         return
       }
+      const files: ChannelFile[] = []
+      for (const file of body.data.files) {
+        files.push(await fileStore.importPath(file.path))
+      }
       Logger.info('api message received', {
-        length: body.data.text.length
+        length: body.data.text.length,
+        files: files.length
       })
-      const sent = await channelManager.send(body.data.text)
+      const sent = await channelManager.send({
+        text: body.data.text,
+        files
+      })
       if (sent.isFailed) {
         response.json(sent)
         return
       }
       response.json(Result.success({
-        sent: true
+        sent: true,
+        files
       }))
     } catch (error) {
       Logger.error('api message failed', error)
@@ -172,10 +244,33 @@ export function createCodexioApp(config: CodexioConfig, options: CodexioAppOptio
     try {
       response.json(Result.success({
         config: await configer.read(),
-        descriptor: configFieldDescriptors
+        descriptor: configFieldDescriptors,
+        actions: configActionDescriptors(configActions)
       }))
     } catch (error) {
       Logger.error('api config read failed', error)
+      response.json(Result.fromError(error))
+    }
+  })
+
+  app.post('/api/config/actions/:id', async (request, response) => {
+    try {
+      const params = ConfigActionParamsSchema.safeParse(request.params)
+      if (!params.success) {
+        response.status(404).json(Result.fail('config action not found', '404'))
+        return
+      }
+      const result = await executeConfigAction(params.data.id, {
+        config: await configer.read(),
+        fileStore
+      }, configActions)
+      if (result.code === '404') {
+        response.status(404).json(result)
+        return
+      }
+      response.json(result)
+    } catch (error) {
+      Logger.error('api config action failed', error)
       response.json(Result.fromError(error))
     }
   })
@@ -269,15 +364,13 @@ export function createCodexioApp(config: CodexioConfig, options: CodexioAppOptio
     }))
   })
 
-  channelManager.start(app, async (text, source) => commandExecutor.receive({
-    text,
-    source
-  }))
+  channelManager.start(config)
 
   return {
     app,
     channelManager,
     agentManager,
+    fileStore,
     listen: (port?: number, host?: string) => {
       let listener: HttpServer
       if (port !== undefined && host) {
@@ -288,7 +381,6 @@ export function createCodexioApp(config: CodexioConfig, options: CodexioAppOptio
         listener = app.listen()
       }
       activeListener = listener
-      channelManager.attach(listener)
       listener.once('listening', () => {
         void channelManager.sendSystem('Codexio server started.')
         void checkCodexioUpdate(config)
@@ -366,6 +458,7 @@ type AppCradle = {
   applicationLifecycle?: ApplicationLifecycle
   channelManager: ChannelManager
   agentManager: AgentManager
+  fileStore: FileStore
   updateHandler?: UpdateHandler
   commandExecutor: CommandExecutor
 }
@@ -385,7 +478,15 @@ function createAppContainer(input: {
     configer: asValue(input.configer),
     agentFactory: asValue(input.agentFactory),
     applicationLifecycle: asValue(input.applicationLifecycle),
-    channelManager: asFunction(({ config }) => new ChannelManager(config)).singleton(),
+    fileStore: asFunction(() => new FileStore()).singleton(),
+    channelManager: asFunction(({ config, fileStore }) => new ChannelManager(config, fileStore, async (input, source) => {
+      const commandExecutor = container.resolve('commandExecutor')
+      return commandExecutor.receive({
+        text: input.text,
+        source,
+        files: input.files
+      })
+    })).singleton(),
     agentManager: asFunction(({ config, channelManager, agentFactory }) => new AgentManager(config, `http://${config.server.host}:${config.server.port}`, {
       send: async (text) => channelManager.send(text),
       system: async (text) => channelManager.sendSystem(text),
@@ -474,7 +575,8 @@ program
     await runSupervisor({
       configPath: getConfigPath(command),
       initConfig: true,
-      autoPort: true
+      autoPort: true,
+      replaceRunning: true
     })
   })
 
@@ -579,11 +681,16 @@ async function serve(config?: CodexioConfig, configPath?: string, options: Serve
   })
   output.write(`codexio listening on http://${serverConfig.server.host}:${serverConfig.server.port}\n`)
   let stopping = false
+  let supervisorWatch: NodeJS.Timeout | undefined
   const stop = () => {
     if (stopping) {
       return
     }
     stopping = true
+    if (supervisorWatch) {
+      clearInterval(supervisorWatch)
+      supervisorWatch = undefined
+    }
     Logger.info('codexio server stopping', {
       pid
     })
@@ -596,6 +703,19 @@ async function serve(config?: CodexioConfig, configPath?: string, options: Serve
           }
         })
     })
+  }
+  const supervisorPid = Number(process.env.CODEXIO_SUPERVISOR_PID)
+  if (Number.isInteger(supervisorPid) && supervisorPid > 0) {
+    supervisorWatch = setInterval(() => {
+      if (isProcessAlive(supervisorPid)) {
+        return
+      }
+      Logger.warn('codexio supervisor disappeared', {
+        supervisorPid
+      })
+      stop()
+    }, 1000)
+    supervisorWatch.unref()
   }
   process.once('SIGINT', stop)
   process.once('SIGTERM', stop)

@@ -1,7 +1,7 @@
 import { execa } from 'execa'
 import { createRequire } from 'node:module'
 import { CodexioConfig } from '../ConfigService.js'
-import { Agent } from './Agent.js'
+import { Agent, AgentInput } from './Agent.js'
 import { createAgentEnv } from './AgentEnvironment.js'
 import { Logger } from '../component/Logger.js'
 
@@ -72,13 +72,16 @@ export class ClaudeAgent implements Agent {
     Logger.info('claude agent ready')
   }
 
-  async receive(text: string): Promise<void> {
+  async receive(input: AgentInput): Promise<void> {
     if (!this.child) {
       throw new Error('agent not started')
     }
     Logger.info('claude receive started', {
-      length: text.length
+      length: input.text.length,
+      files: input.files?.length ?? 0
     })
+    const fileText = (input.files ?? []).map((file) => file.path).join('\n')
+    const text = fileText.length > 0 ? `${input.text}\n\nFiles:\n${fileText}` : input.text
     this.child.stdin?.write(`${text}\n`)
   }
 

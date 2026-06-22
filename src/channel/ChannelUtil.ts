@@ -16,6 +16,10 @@ export type FeishuMessagePayload = {
   content: string
 }
 
+export type FeishuImage = {
+  imageKey: string
+}
+
 export function createEmailSender(from: string | undefined, user: string | undefined): string | EmailAddress | undefined {
   const trimmedFrom = from?.trim()
   const trimmedUser = user?.trim()
@@ -62,18 +66,30 @@ export function createEmailMessagePayload(message: ChannelMessage): EmailMessage
   }
 }
 
-export function createFeishuMessagePayload(message: ChannelMessage): FeishuMessagePayload {
-  const text = normalizeChannelMessageText(message)
-  const content: Array<Array<Record<string, string>>> = [
-    [
+export function createFeishuMessagePayload(message: ChannelMessage, images: FeishuImage[] = []): FeishuMessagePayload {
+  const text = normalizeChannelMessageText({
+    ...message,
+    files: undefined
+  })
+  const content: Array<Array<Record<string, string>>> = []
+  if (text.trim().length > 0) {
+    content.push([
       {
         tag: 'md',
         text
       }
-    ]
-  ]
+    ])
+  }
+  for (const image of images) {
+    content.push([
+      {
+        tag: 'img',
+        image_key: image.imageKey
+      }
+    ])
+  }
   const suffix = roleSuffix(message)
-  if (suffix) {
+  if (suffix && content.length > 0) {
     content.push([
       {
         tag: 'text',
@@ -92,5 +108,13 @@ export function createFeishuMessagePayload(message: ChannelMessage): FeishuMessa
 }
 
 export function createFeishuWebhookText(message: ChannelMessage): string {
-  return formatTextWithRoleSuffix(message)
+  let text = message.text
+  if (text.trim().length === 0 && message.files && message.files.length > 0) {
+    text = `已收到文件：${message.files.map((file) => file.name).join('、')}`
+  }
+  return formatTextWithRoleSuffix({
+    ...message,
+    text,
+    files: undefined
+  })
 }

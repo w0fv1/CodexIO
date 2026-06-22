@@ -1,33 +1,28 @@
 import * as Lark from '@larksuiteoapi/node-sdk'
 import { z } from 'zod'
-import { Channel, ChannelMessage, ChannelStartInput } from './Channel.js'
+import { CodexioConfig } from '../ConfigService.js'
+import { Channel, ChannelInput, ChannelMessage, ChannelReceiveResult } from './Channel.js'
 import { Result } from '../value/Result.js'
 import { Logger } from '../component/Logger.js'
-import { createFeishuMessagePayload } from './ChannelUtil.js'
+import { FeishuMessageSender } from './FeishuMessageSender.js'
 
 const FeishuTextContentSchema = z.object({
   text: z.string()
 })
 
-export type FeishuChannelConfig = {
-  enabled?: boolean
-  appId?: string
-  appSecret?: string
-  chatId?: string
-  ws?: string
-}
+type FeishuChannelConfig = CodexioConfig['channels']['feishu']
 
 export class FeishuChannel implements Channel {
   readonly type = 'feishu'
-  private input?: ChannelStartInput
-  private client?: Lark.Client
+  private config?: FeishuChannelConfig
   private wsClient?: Lark.WSClient
+  private sender?: FeishuMessageSender
   private chatId = ''
 
-  constructor(private readonly config?: FeishuChannelConfig) {}
+  constructor(private readonly receive: (input: ChannelInput) => Promise<Result<ChannelReceiveResult>>) {}
 
-  start(input: ChannelStartInput): void {
-    this.input = input
+  start(config: CodexioConfig): void {
+    this.config = config.channels.feishu
     if (!this.config?.appId || !this.config.appSecret) {
       throw new Error('feishu appId and appSecret are required')
     }
@@ -35,11 +30,8 @@ export class FeishuChannel implements Channel {
       chatId: this.config.chatId?.trim() ?? '',
       wsEnabled: Boolean(this.config.ws?.trim())
     })
-    this.client = new Lark.Client({
-      appId: this.config.appId,
-      appSecret: this.config.appSecret
-    })
     this.chatId = this.config.chatId?.trim() ?? ''
+    this.sender = new FeishuMessageSender(this.config)
     this.wsClient = new Lark.WSClient({
       appId: this.config.appId,
       appSecret: this.config.appSecret,
@@ -73,6 +65,7 @@ export class FeishuChannel implements Channel {
               Logger.info('feishu chat connected', {
                 chatId: data.message.chat_id
               })
+              this.sender?.updateChatId(data.message.chat_id)
             }
             if (data.message.chat_id !== this.chatId) {
               Logger.info('feishu chat ignored', {
@@ -107,21 +100,13 @@ export class FeishuChannel implements Channel {
             for (const mention of data.message.mentions ?? []) {
               text = text.replaceAll(mention.key, '')
             }
-            if (!this.input) {
-              Logger.warn('feishu channel input missing')
-              await this.send({
-                role: 'system',
-                text: 'feishu channel not started',
-                createdAt: Date.now(),
-                source: this.type
-              })
-              return
-            }
             Logger.info('feishu message received', {
               chatId: data.message.chat_id,
               length: text.length
             })
-            void this.input.receive(text).then(async (result) => {
+            void this.receive({
+              text
+            }).then(async (result) => {
               if (result.isFailed) {
                 Logger.warn('feishu message receive failed', {
                   message: result.message
@@ -164,47 +149,23 @@ export class FeishuChannel implements Channel {
     if (message.role === 'user' && message.source === this.type) {
       return Result.success(null)
     }
-    if (message.text.trim().length === 0) {
-      return Result.fail('text is required')
+    if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
+      return Result.fail('text or file is required')
     }
-    if (!this.client) {
+    if (!this.sender) {
       return Result.fail('feishu client not ready')
     }
     if (this.chatId.length === 0) {
       return Result.fail('feishu chat not ready')
     }
-    try {
-      const payload = createFeishuMessagePayload(message)
-      Logger.info('feishu send started', {
-        role: message.role,
-        source: message.source ?? null,
-        length: message.text.length
-      })
-      await this.client.im.v1.message.create({
-        params: {
-          receive_id_type: 'chat_id'
-        },
-        data: {
-          receive_id: this.chatId,
-          msg_type: payload.msgType,
-          content: payload.content
-        }
-      })
-      Logger.info('feishu send completed', {
-        role: message.role
-      })
-    } catch (error) {
-      Logger.error('feishu send failed', error)
-      return Result.fromError(error)
-    }
-    return Result.success(null)
+    return this.sender.send(message)
   }
 
   async stop(): Promise<Result<null>> {
     Logger.info('feishu channel stopping')
     this.wsClient?.close()
     this.wsClient = undefined
-    this.client = undefined
+    this.sender = undefined
     return Result.success(null)
   }
 }

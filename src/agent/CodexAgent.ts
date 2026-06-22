@@ -3,17 +3,41 @@ import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { execa } from 'execa'
 import { CodexioConfig } from '../ConfigService.js'
-import { Agent, AgentLoginInProgressError } from './Agent.js'
+import { Agent, AgentInput, AgentLoginInProgressError } from './Agent.js'
 import { createAgentEnv } from './AgentEnvironment.js'
 import { CodexAppServer } from './CodexAppServer.js'
 import { codexioRootPath } from '../AppMetadata.js'
 import { CodexSessionStore } from './CodexSessionStore.js'
 import { Logger } from '../component/Logger.js'
+import { isImageFile } from '../component/FileStore.js'
 
 const codexEntryPath = createRequire(import.meta.url).resolve('@openai/codex/bin/codex.js')
 
+export type CodexCommand = {
+  command: string
+  args: string[]
+}
+
+export function createCodexCommand(config: CodexioConfig, args: string[]): CodexCommand {
+  if (config.agents.codex?.bundled ?? true) {
+    return {
+      command: process.execPath,
+      args: [
+        codexEntryPath,
+        ...args
+      ]
+    }
+  }
+  return {
+    command: 'codex',
+    args
+  }
+}
+
 type CodexAppServerHandle = Pick<CodexAppServer, 'start' | 'request' | 'waitForNotification' | 'stop'>
 type CodexSessionStoreHandle = Pick<CodexSessionStore, 'read' | 'write' | 'clear'>
+
+const codexLoginInProgressMessage = '请先完成 Codex 登录。'
 
 export type CodexAgentOptions = {
   workspacePath: string
@@ -21,6 +45,8 @@ export type CodexAgentOptions = {
   toolBaseUrl: string
   send: (text: string) => Promise<void>
   system?: (text: string) => Promise<void>
+  onLoginRequired?: (message: string) => Promise<void>
+  onLoginCompleted?: () => Promise<void>
   appServer?: CodexAppServerHandle
   sessionStore?: CodexSessionStoreHandle
 }
@@ -43,11 +69,11 @@ export class CodexAgent implements Agent {
     Logger.info('codex login started', {
       cwd: this.options.workspacePath
     })
-    await execa(process.execPath, [
-      codexEntryPath,
+    const command = createCodexCommand(this.options.config, [
       'login',
       '--device-auth'
-    ], {
+    ])
+    await execa(command.command, command.args, {
       cwd: this.options.workspacePath,
       env: createAgentEnv(this.options.config),
       stdio: 'inherit'
@@ -75,15 +101,21 @@ export class CodexAgent implements Agent {
   }
 
   private createAppServer(): CodexAppServerHandle {
+    const command = createCodexCommand(this.options.config, [
+      'app-server',
+      '--stdio'
+    ])
+    const env = createAgentEnv(this.options.config, {
+      codexio: {
+        apiUrl: this.options.toolBaseUrl,
+        token: this.options.config.server.token
+      }
+    })
     return this.options.appServer ?? new CodexAppServer({
-      command: process.execPath,
-      args: [
-        codexEntryPath,
-        'app-server',
-        '--stdio'
-      ],
+      command: command.command,
+      args: command.args,
       cwd: this.options.workspacePath,
-      env: createAgentEnv(this.options.config),
+      env,
       onNotification: (method, params) => {
         void this.handleNotification(method, params)
       },
@@ -96,7 +128,7 @@ export class CodexAgent implements Agent {
     })
   }
 
-  async receive(text: string): Promise<void> {
+  async receive(input: AgentInput): Promise<void> {
     if (!this.started) {
       throw new Error('agent not started')
     }
@@ -106,29 +138,43 @@ export class CodexAgent implements Agent {
     if (!this.threadId || !this.appServer) {
       throw new Error('codex app-server not started')
     }
-    const input = [
+    const genericFiles = (input.files ?? []).filter((file) => !isImageFile(file))
+    const text = genericFiles.length > 0
+      ? `${input.text}\n\nFiles:\n${genericFiles.map((file) => file.path).join('\n')}`
+      : input.text
+    const turnInput: Array<Record<string, unknown>> = [
       {
         type: 'text',
         text,
         text_elements: []
       }
     ]
+    for (const file of input.files ?? []) {
+      if (isImageFile(file)) {
+        turnInput.push({
+          type: 'localImage',
+          path: file.path,
+          detail: 'auto'
+        })
+      }
+    }
     if (this.activeTurnId) {
       Logger.info('codex turn steered', {
         threadId: this.threadId,
         turnId: this.activeTurnId,
-        length: text.length
+        length: input.text.length,
+        files: input.files?.length ?? 0
       })
       await this.appServer.request('turn/steer', {
         threadId: this.threadId,
         expectedTurnId: this.activeTurnId,
-        input
+        input: turnInput
       })
       return
     }
     const response = await this.appServer.request('turn/start', {
       threadId: this.threadId,
-      input
+      input: turnInput
     })
     if (!response || typeof response !== 'object') {
       throw new Error('codex turn response not found')
@@ -141,7 +187,8 @@ export class CodexAgent implements Agent {
     Logger.info('codex turn started', {
       threadId: this.threadId,
       turnId: this.activeTurnId,
-      length: text.length
+      length: input.text.length,
+      files: input.files?.length ?? 0
     })
   }
 
@@ -276,14 +323,37 @@ export class CodexAgent implements Agent {
     if (this.loginTask) {
       throw new AgentLoginInProgressError()
     }
-    const status = await this.appServer.request('account/read', {
-      refreshToken: false
-    })
+    let status: unknown
+    try {
+      status = await this.appServer.request('account/read', {
+        refreshToken: true
+      })
+    } catch (error) {
+      if (this.isAuthenticationInvalidated(error)) {
+        await this.requireLogin()
+      }
+      throw error
+    }
     if (status && typeof status === 'object' && (status as Record<string, unknown>).account) {
       Logger.info('codex account ready')
       return
     }
+    await this.requireLogin()
+  }
+
+  private async requireLogin(): Promise<never> {
     Logger.warn('codex login required')
+    await this.startDeviceLogin()
+    throw new AgentLoginInProgressError(codexLoginInProgressMessage)
+  }
+
+  private async startDeviceLogin(): Promise<void> {
+    if (!this.appServer) {
+      throw new Error('codex app-server not started')
+    }
+    if (this.loginTask) {
+      return
+    }
     const login = await this.appServer.request('account/login/start', {
       type: 'chatgptDeviceCode'
     })
@@ -295,9 +365,10 @@ export class CodexAgent implements Agent {
       throw new Error('codex login URL not found')
     }
     const message = [
-      'Codex login required.',
-      `Open: ${data.verificationUrl}`,
-      `Code: ${data.userCode}`
+      'Codex 登录已失效，请重新登录。',
+      `打开：${data.verificationUrl}`,
+      `验证码：${data.userCode}`,
+      '登录完成后 Codexio 会自动恢复。'
     ].join('\n')
     process.stdout.write(`${message}\n`)
     await (this.options.system ?? this.options.send)(message).catch(() => {})
@@ -307,8 +378,11 @@ export class CodexAgent implements Agent {
       const completedMessage = 'Codex login completed.'
       process.stdout.write(`${completedMessage}\n`)
       await (this.options.system ?? this.options.send)(completedMessage).catch(() => {})
+      await this.restartAfterLogin()
+      await this.options.onLoginCompleted?.()
     })()
     this.loginTask = task
+    await this.options.onLoginRequired?.(codexLoginInProgressMessage)
     void task.then(() => {
       if (this.loginTask === task) {
         this.loginTask = undefined
@@ -322,7 +396,55 @@ export class CodexAgent implements Agent {
         error: error instanceof Error ? error.message : String(error)
       })
     })
-    throw new AgentLoginInProgressError()
+  }
+
+  private async restartAfterLogin(): Promise<void> {
+    const shouldRestart = this.started
+    await this.stop()
+    if (shouldRestart) {
+      await this.start(this.options.config)
+    }
+  }
+
+  private isAuthenticationInvalidated(error: unknown): boolean {
+    const values = this.collectAuthenticationErrorValues(error).join('\n').toLowerCase()
+    return [
+      'refresh_token_invalidated',
+      'token_invalidated',
+      'refresh token was revoked',
+      'authentication token has been invalidated',
+      'session has ended',
+      'please log out and sign in again',
+      'please try signing in again'
+    ].some((value) => values.includes(value))
+  }
+
+  private collectAuthenticationErrorValues(value: unknown): string[] {
+    if (!value) {
+      return []
+    }
+    if (typeof value === 'string') {
+      return [
+        value
+      ]
+    }
+    if (value instanceof Error) {
+      return [
+        value.message,
+        value.name,
+        value.stack ?? ''
+      ].filter((item) => item.length > 0)
+    }
+    if (typeof value !== 'object') {
+      return [
+        String(value)
+      ]
+    }
+    const result: string[] = []
+    for (const item of Object.values(value as Record<string, unknown>)) {
+      result.push(...this.collectAuthenticationErrorValues(item))
+    }
+    return result
   }
 
   private async handleNotification(method: string, params: unknown): Promise<void> {
@@ -396,8 +518,13 @@ export class CodexAgent implements Agent {
     if (method === 'error') {
       const error = data.error
       if (error && typeof error === 'object' && typeof (error as Record<string, unknown>).message === 'string') {
-        Logger.error('codex notification error', new Error((error as Record<string, string>).message))
-        await (this.options.system ?? this.options.send)((error as Record<string, string>).message)
+        const message = (error as Record<string, string>).message
+        Logger.error('codex notification error', new Error(message))
+        if (this.isAuthenticationInvalidated(error)) {
+          await this.startDeviceLogin()
+          return
+        }
+        await (this.options.system ?? this.options.send)(message)
       }
     }
   }

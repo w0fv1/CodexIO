@@ -1,8 +1,18 @@
-import { Express } from 'express'
+import { CodexioConfig } from '../ConfigService.js'
 import { Result } from '../value/Result.js'
+import { StoredFile } from '../component/FileStore.js'
 
 export type ChannelReceiveResult = {
   action?: 'clear' | 'restart' | 'update'
+}
+
+export type ChannelType = keyof CodexioConfig['channels']
+
+export type ChannelFile = StoredFile
+
+export type ChannelInput = {
+  text: string
+  files?: ChannelFile[]
 }
 
 export type ChannelMessage = {
@@ -10,17 +20,12 @@ export type ChannelMessage = {
   text: string
   createdAt: number
   source?: string
-}
-
-export type ChannelStartInput = {
-  app: Express
-  displayHistory: () => ChannelMessage[]
-  receive: (text: string) => Promise<Result<ChannelReceiveResult>>
+  files?: ChannelFile[]
 }
 
 export interface Channel {
-  type: string
-  start(input: ChannelStartInput): void
+  type: ChannelType
+  start(config: CodexioConfig): void
   send(message: ChannelMessage): Promise<Result<null>>
   stop(): Promise<Result<null>>
 }

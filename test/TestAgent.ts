@@ -1,5 +1,5 @@
 import { CodexioConfig } from '../src/ConfigService.js'
-import { Agent } from '../src/agent/Agent.js'
+import { Agent, AgentInput } from '../src/agent/Agent.js'
 
 export class TestAgent implements Agent {
   readonly type = 'test'
@@ -10,8 +10,8 @@ export class TestAgent implements Agent {
 
   async start(_config: CodexioConfig): Promise<void> {}
 
-  async receive(text: string): Promise<void> {
-    await this.send(`test: ${text}`)
+  async receive(input: AgentInput): Promise<void> {
+    await this.send(`test: ${input.text}`)
   }
 
   async clear(): Promise<void> {}

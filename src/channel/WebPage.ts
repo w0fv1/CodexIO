@@ -34,6 +34,7 @@ export const webPageHtml = `<!doctype html>
     .theme-dark .agent-bubble{border-color:#1e293b;background:#0f172a;color:#e2e8f0}
     .message-actions{opacity:0;transition:opacity 140ms ease}
     .message-row:hover .message-actions,.message-row:focus-within .message-actions{opacity:1}
+    .message-image{max-width:min(320px,100%);max-height:320px;border-radius:10px;object-fit:contain}
     .tool-button{display:grid;cursor:pointer;place-items:center;width:32px;height:32px;border:1px solid #e2e8f0;border-radius:10px;background:rgba(255,255,255,.8);color:#64748b;box-shadow:0 1px 2px rgba(15,23,42,.06);transition:background-color 140ms ease,border-color 140ms ease,color 140ms ease,transform 120ms ease}
     .tool-button:hover{background:#fff;border-color:#cbd5e1;color:#0f172a}
     .tool-button:active{transform:translateY(1px)}
@@ -42,7 +43,9 @@ export const webPageHtml = `<!doctype html>
     .app-footer{background:#f1f5f9}
     .theme-dark .app-footer{background:#020617}
     .composer-card{border-color:#cbd5e1;background:#fff;box-shadow:0 10px 18px rgba(148,163,184,.34)}
+    .composer-card.drag-active{border-color:#2563eb;box-shadow:0 0 0 4px rgba(37,99,235,.1),0 10px 18px rgba(148,163,184,.34)}
     .theme-dark .composer-card{border-color:#334155;background:#0f172a;box-shadow:0 14px 26px rgba(0,0,0,.32)}
+    .theme-dark .composer-card.drag-active{border-color:#3b82f6;box-shadow:0 0 0 4px rgba(59,130,246,.18),0 14px 26px rgba(0,0,0,.32)}
     .composer-input{color:#020617}
     .theme-dark .composer-input{color:#f8fafc}
     .composer-input::placeholder{color:#94a3b8}
@@ -147,12 +150,32 @@ export const webPageHtml = `<!doctype html>
             ></div>
             <template x-if="message.type === 'user'">
               <div class="flex max-w-[88%] items-start gap-2 sm:max-w-[78%]">
-                <div class="user-bubble whitespace-pre-wrap break-words rounded-2xl rounded-br-md px-4 py-2.5 text-sm leading-6 shadow-sm" x-text="message.text"></div>
                 <div class="message-actions shrink-0 pt-1">
                   <button type="button" class="tool-button" :aria-label="copiedId === message.id ? '已复制' : '复制消息'" :title="copiedId === message.id ? '已复制' : '复制消息'" @click="copyMessage(message)">
                     <svg x-cloak x-show="copiedId !== message.id" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
                     <svg x-cloak x-show="copiedId === message.id" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
                   </button>
+                </div>
+                <div class="user-bubble rounded-2xl rounded-br-md px-4 py-2.5 text-sm leading-6 shadow-sm">
+                  <div x-show="message.text" class="whitespace-pre-wrap break-words" x-text="message.text"></div>
+                  <div x-show="message.files && message.files.length" class="mt-2 grid gap-2">
+                    <template x-for="file in message.files || []" :key="file.id">
+                      <div>
+                        <template x-if="isImageFile(file)">
+                          <img class="message-image bg-white/10" :src="file.url" :alt="file.name || 'image'">
+                        </template>
+                        <template x-if="!isImageFile(file)">
+                          <a class="flex max-w-full items-center gap-2 rounded-lg bg-white/15 px-2.5 py-2 text-white no-underline" :href="file.url" target="_blank" rel="noopener">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="size-5 shrink-0 opacity-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg>
+                            <span class="min-w-0">
+                              <span class="block truncate font-medium" x-text="file.name || 'file'"></span>
+                              <span class="block text-xs opacity-80" x-text="formatFileSize(file.size)"></span>
+                            </span>
+                          </a>
+                        </template>
+                      </div>
+                    </template>
+                  </div>
                 </div>
               </div>
             </template>
@@ -161,6 +184,24 @@ export const webPageHtml = `<!doctype html>
                 <div class="agent-bubble break-words rounded-2xl rounded-bl-md border px-4 py-2.5 text-sm leading-6 shadow-sm">
                   <div x-show="message.html" class="markdown-body" x-html="message.html"></div>
                   <div x-show="!message.html" class="whitespace-pre-wrap" x-text="message.text"></div>
+                  <div x-show="message.files && message.files.length" class="mt-2 grid gap-2">
+                    <template x-for="file in message.files || []" :key="file.id">
+                      <div>
+                        <template x-if="isImageFile(file)">
+                          <img class="message-image bg-slate-100 dark:bg-slate-800" :src="file.url" :alt="file.name || 'image'">
+                        </template>
+                        <template x-if="!isImageFile(file)">
+                          <a class="flex max-w-full items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-slate-700 no-underline dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200" :href="file.url" target="_blank" rel="noopener">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="size-5 shrink-0 text-slate-500 dark:text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg>
+                            <span class="min-w-0">
+                              <span class="block truncate font-medium" x-text="file.name || 'file'"></span>
+                              <span class="block text-xs text-slate-500 dark:text-slate-400" x-text="formatFileSize(file.size)"></span>
+                            </span>
+                          </a>
+                        </template>
+                      </div>
+                    </template>
+                  </div>
                 </div>
                 <div class="message-actions shrink-0 pt-1">
                   <button type="button" class="tool-button" :aria-label="copiedId === message.id ? '已复制' : '复制消息'" :title="copiedId === message.id ? '已复制' : '复制消息'" @click="copyMessage(message)">
@@ -177,25 +218,61 @@ export const webPageHtml = `<!doctype html>
 
     <footer class="app-footer px-3 pb-3 pt-2 sm:px-6 sm:pb-5">
       <form id="form" class="mx-auto max-w-5xl" @submit.prevent="send()">
-        <div class="composer-card rounded-2xl border p-2 transition focus-within:border-blue-500 focus-within:ring-4 focus-within:ring-blue-500/10">
+        <div
+          class="composer-card rounded-2xl border p-2 transition focus-within:border-blue-500 focus-within:ring-4 focus-within:ring-blue-500/10"
+          :class="{ 'drag-active': dragActive }"
+          @paste="handlePaste($event)"
+          @dragenter.prevent="handleDragEnter($event)"
+          @dragover.prevent="handleDragOver($event)"
+          @dragleave.prevent="handleDragLeave($event)"
+          @drop.prevent="handleDrop($event)"
+        >
           <div class="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
-            <textarea
-              id="text"
-              x-ref="text"
-              x-model="draft"
-              class="composer-input thin-scrollbar max-h-40 min-h-14 resize-none overflow-y-auto border-0 bg-transparent px-2 py-2 text-sm leading-6 outline-none"
-              placeholder="输入消息，Enter 发送"
-              rows="1"
-              required
-              @input="resizeInput()"
-              @keydown.enter="handleEnter($event)"
-            ></textarea>
-            <button
-              id="send"
-              type="submit"
-              class="send-button h-10 rounded-xl px-5 text-sm font-semibold transition active:translate-y-px disabled:cursor-not-allowed"
-              :disabled="!connected || draft.trim().length === 0"
-            >发送</button>
+            <div class="min-w-0">
+              <textarea
+                id="text"
+                x-ref="text"
+                x-model="draft"
+                class="composer-input thin-scrollbar max-h-40 min-h-14 w-full resize-none overflow-y-auto border-0 bg-transparent px-2 py-2 text-sm leading-6 outline-none"
+                placeholder="输入消息，Enter 发送"
+                rows="1"
+                @input="resizeInput()"
+                @keydown.enter="handleEnter($event)"
+              ></textarea>
+              <div x-show="draftFiles.length" class="flex flex-wrap gap-2 px-2 pb-1">
+                <template x-for="file in draftFiles" :key="file.id">
+                  <div class="relative h-16 overflow-hidden rounded-lg border border-slate-200 bg-slate-100 dark:border-slate-700 dark:bg-slate-800" :class="isImageFile(file) ? 'w-16' : 'w-48 max-w-full'">
+                    <template x-if="isImageFile(file)">
+                      <img class="size-full object-cover" :src="file.url" :alt="file.name || 'image'">
+                    </template>
+                    <template x-if="!isImageFile(file)">
+                      <div class="flex size-full min-w-0 items-center gap-2 px-2 pr-7">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="size-5 shrink-0 text-slate-500 dark:text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg>
+                        <span class="min-w-0 text-xs leading-4">
+                          <span class="block truncate font-medium text-slate-700 dark:text-slate-200" x-text="file.name || 'file'"></span>
+                          <span class="block text-slate-500 dark:text-slate-400" x-text="formatFileSize(file.size)"></span>
+                        </span>
+                      </div>
+                    </template>
+                    <button type="button" class="absolute right-1 top-1 grid size-5 place-items-center rounded-full bg-black/60 text-white" aria-label="移除文件" title="移除文件" @click="removeDraftFile(file.id)">
+                      <svg xmlns="http://www.w3.org/2000/svg" class="size-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                    </button>
+                  </div>
+                </template>
+              </div>
+            </div>
+            <div class="flex items-center justify-end gap-2">
+              <input x-ref="file" type="file" multiple class="hidden" @change="uploadFiles($event)">
+              <button type="button" class="tool-button" aria-label="上传文件" title="上传文件" :disabled="!connected || uploading" @click="$refs.file.click()">
+                <svg xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m16 6-8.4 8.4a2 2 0 0 0 2.8 2.8l8.4-8.4a4 4 0 1 0-5.6-5.6L4.8 11.6a6 6 0 1 0 8.4 8.4L21 12.2"/></svg>
+              </button>
+              <button
+                id="send"
+                type="submit"
+                class="send-button h-10 rounded-xl px-5 text-sm font-semibold transition active:translate-y-px disabled:cursor-not-allowed"
+                :disabled="!connected || (draft.trim().length === 0 && draftFiles.length === 0)"
+              >发送</button>
+            </div>
           </div>
         </div>
       </form>
@@ -215,8 +292,11 @@ export const webPageHtml = `<!doctype html>
         socket: null,
         messages: [],
         draft: '',
+        draftFiles: [],
         connected: false,
         connecting: false,
+        uploading: false,
+        dragActive: false,
         reconnectTimer: null,
         autoScroll: true,
         copiedId: null,
@@ -313,7 +393,7 @@ export const webPageHtml = `<!doctype html>
             return
           }
           if (message.type === 'user') {
-            this.append('user', message.text || '')
+            this.append('user', message.text || '', null, message.files || [])
             return
           }
           if (message.type === 'system') {
@@ -321,12 +401,12 @@ export const webPageHtml = `<!doctype html>
             return
           }
           if (message.type === 'agent') {
-            this.append('agent', message.text || '', message.html)
+            this.append('agent', message.text || '', message.html, message.files || [])
           }
         },
         send() {
           const value = this.draft.trim()
-          if (!value) {
+          if (!value && this.draftFiles.length === 0) {
             return
           }
           if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
@@ -334,20 +414,23 @@ export const webPageHtml = `<!doctype html>
             return
           }
           this.socket.send(JSON.stringify({
-            text: value
+            text: value,
+            files: this.draftFiles.map((file) => file.id)
           }))
           this.draft = ''
+          this.draftFiles = []
           this.$nextTick(() => {
             this.resizeInput()
             this.$refs.text.focus()
           })
         },
-        append(type, text, html) {
+        append(type, text, html, files) {
           this.messages.push({
             id: this.nextId++,
             type,
             text,
-            html
+            html,
+            files: files || []
           })
           if (this.autoScroll) {
             this.$nextTick(() => {
@@ -375,6 +458,94 @@ export const webPageHtml = `<!doctype html>
           } catch {
             this.append('error', '复制失败')
           }
+        },
+        async uploadFiles(event) {
+          const files = Array.from(event.target.files || [])
+          event.target.value = ''
+          await this.uploadSelectedFiles(files)
+        },
+        async uploadSelectedFiles(files) {
+          if (this.uploading) {
+            return
+          }
+          const selectedFiles = Array.from(files || [])
+          if (selectedFiles.length === 0) {
+            return
+          }
+          this.uploading = true
+          try {
+            for (const file of selectedFiles) {
+              const form = new FormData()
+              form.append('file', file)
+              const response = await fetch('/api/files', {
+                method: 'POST',
+                body: form
+              })
+              const result = await response.json()
+              if (result.isFailed) {
+                this.append('error', result.message || '上传失败')
+                continue
+              }
+              this.draftFiles.push(result.data.file)
+            }
+          } catch {
+            this.append('error', '上传失败')
+          } finally {
+            this.uploading = false
+            this.$nextTick(() => {
+              this.$refs.text.focus()
+            })
+          }
+        },
+        isImageFile(file) {
+          return Boolean(file && typeof file.mime === 'string' && file.mime.toLowerCase().startsWith('image/'))
+        },
+        formatFileSize(size) {
+          const bytes = Number(size)
+          if (!Number.isFinite(bytes) || bytes <= 0) {
+            return '0 B'
+          }
+          const units = ['B', 'KB', 'MB', 'GB']
+          let value = bytes
+          let unit = 0
+          while (value >= 1024 && unit < units.length - 1) {
+            value = value / 1024
+            unit += 1
+          }
+          return (unit === 0 ? String(value) : value.toFixed(value >= 10 ? 1 : 2)) + ' ' + units[unit]
+        },
+        async handlePaste(event) {
+          const files = Array.from(event.clipboardData && event.clipboardData.files || [])
+          if (files.length === 0) {
+            return
+          }
+          event.preventDefault()
+          await this.uploadSelectedFiles(files)
+        },
+        handleDragEnter(event) {
+          if (Array.from(event.dataTransfer && event.dataTransfer.items || []).some((item) => item.kind === 'file')) {
+            this.dragActive = true
+          }
+        },
+        handleDragOver(event) {
+          if (event.dataTransfer) {
+            event.dataTransfer.dropEffect = 'copy'
+          }
+          if (Array.from(event.dataTransfer && event.dataTransfer.items || []).some((item) => item.kind === 'file')) {
+            this.dragActive = true
+          }
+        },
+        handleDragLeave(event) {
+          if (!event.currentTarget.contains(event.relatedTarget)) {
+            this.dragActive = false
+          }
+        },
+        async handleDrop(event) {
+          this.dragActive = false
+          await this.uploadSelectedFiles(Array.from(event.dataTransfer && event.dataTransfer.files || []))
+        },
+        removeDraftFile(id) {
+          this.draftFiles = this.draftFiles.filter((file) => file.id !== id)
         },
         copyWithFallback(text) {
           const element = document.createElement('textarea')

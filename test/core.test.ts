@@ -6,16 +6,19 @@ import { describe, expect, it, vi } from 'vitest'
 import { codexConfigPath, codexHomePath, createAgentEnv } from '../src/agent/AgentEnvironment.js'
 import { AgentManager } from '../src/agent/AgentManager.js'
 import { CodexAppServer } from '../src/agent/CodexAppServer.js'
-import { CodexAgent } from '../src/agent/CodexAgent.js'
+import { CodexAgent, createCodexCommand } from '../src/agent/CodexAgent.js'
 import { CodexSessionStore } from '../src/agent/CodexSessionStore.js'
 import { AgentLoginInProgressError } from '../src/agent/Agent.js'
 import { codexioRootPath } from '../src/AppMetadata.js'
 import { CommandExecutor, parseCommandInput } from '../src/controller/CommandExecutor.js'
+import { FeishuChannel } from '../src/channel/FeishuChannel.js'
+import { FeishuMessageSender } from '../src/channel/FeishuMessageSender.js'
 import { createEmailMessagePayload, createEmailSender, createFeishuMessagePayload, createFeishuWebhookText, isAllowedEmailSender } from '../src/channel/ChannelUtil.js'
 import { Logger } from '../src/component/Logger.js'
 import { renderMarkdownHtml } from '../src/component/Markdown.js'
 import { runtimeServerStatePath, supervisorStatePath } from '../src/component/ServerLifecycle.js'
 import { createUpdaterScript } from '../src/component/UpdateInstaller.js'
+import { FileStore } from '../src/component/FileStore.js'
 import { Configer, diffConfigPaths } from '../src/config/Configer.js'
 import { ConfigSchema, ConfigService, normalizeWorkspacePath, validateCodexioConfig } from '../src/ConfigService.js'
 import { Result } from '../src/value/Result.js'
@@ -92,10 +95,57 @@ describe('core', () => {
       outbound.push(text)
     })
     await agent.start(ConfigSchema.parse({}))
-    await agent.receive('hello')
+    await agent.receive({
+      text: 'hello'
+    })
     expect(outbound).toEqual([
       'test: hello'
     ])
+  })
+
+  it('imports local images through file store', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-file-store-'))
+    const source = join(dir, 'source.png')
+    await writeFile(source, pngBytes())
+    const store = new FileStore({
+      rootPath: join(dir, 'store')
+    })
+
+    const file = await store.importPath(source)
+    const saved = await readFile(file.path)
+
+    expect(file).toMatchObject({
+      mime: 'image/png',
+      name: 'source.png',
+      size: pngBytes().length,
+      url: expect.stringMatching(/^\/api\/files\//)
+    })
+    expect(file.sha256).toHaveLength(64)
+    expect(saved.equals(pngBytes())).toBe(true)
+  })
+
+  it('imports generic files through file store', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-file-store-generic-'))
+    const store = new FileStore({
+      rootPath: join(dir, 'store')
+    })
+
+    const file = await store.importBuffer({
+      buffer: Buffer.from('hello file', 'utf8'),
+      name: 'note.txt',
+      mime: 'text/plain'
+    })
+    const saved = await readFile(file.path, 'utf8')
+
+    expect(file).toMatchObject({
+      mime: 'text/plain',
+      name: 'note.txt',
+      size: 'hello file'.length,
+      url: expect.stringMatching(/^\/api\/files\//)
+    })
+    expect(file.path.endsWith('.txt')).toBe(true)
+    expect(file.sha256).toHaveLength(64)
+    expect(saved).toBe('hello file')
   })
 
   it('selected agent exposes login lifecycle', async () => {
@@ -140,7 +190,9 @@ describe('core', () => {
         outbound.push(text)
       })
     })
-    const result = await manager.receiveMessage('hello')
+    const result = await manager.receiveMessage({
+      text: 'hello'
+    })
     expect(result.isFailed).toBe(false)
     expect(outbound).toEqual([
       expect.any(String),
@@ -176,8 +228,12 @@ describe('core', () => {
       })
     })
     const [first, second] = await Promise.all([
-      manager.receiveMessage('first'),
-      manager.receiveMessage('second')
+      manager.receiveMessage({
+        text: 'first'
+      }),
+      manager.receiveMessage({
+        text: 'second'
+      })
     ])
     expect(first.isFailed).toBe(false)
     expect(second.isFailed).toBe(false)
@@ -215,8 +271,12 @@ describe('core', () => {
       })
     })
 
-    const first = await manager.receiveMessage('first')
-    const second = await manager.receiveMessage('second')
+    const first = await manager.receiveMessage({
+      text: 'first'
+    })
+    const second = await manager.receiveMessage({
+      text: 'second'
+    })
 
     expect(first.isFailed).toBe(true)
     expect(first.message).toBe('请先完成 Codex 登录。')
@@ -239,13 +299,20 @@ describe('core', () => {
         host: '127.0.0.1',
         port: 8787
       }
-    }))
+    }), {
+      codexio: {
+        apiUrl: 'http://127.0.0.1:8787',
+        token: 'runtime-token'
+      }
+    })
     expect(env.HTTP_PROXY).toBe('http://proxy.local:8080')
     expect(env.HTTPS_PROXY).toBe('http://proxy.local:8080')
     expect(env.ALL_PROXY).toBe('http://proxy.local:8080')
     expect(env.NO_PROXY).toContain('127.0.0.1')
     expect(env.NO_PROXY).toContain('localhost')
     expect(env.no_proxy).toBe(env.NO_PROXY)
+    expect(env.CODEXIO_API_URL).toBe('http://127.0.0.1:8787')
+    expect(env.CODEXIO_TOKEN).toBe('runtime-token')
     expect(env.CODEX_HOME).toContain('.codexio')
     expect(env.CODEX_HOME).toContain('codex')
     expect(existsSync(codexHomePath)).toBe(true)
@@ -253,6 +320,55 @@ describe('core', () => {
     expect(codexConfig).toContain('[shell_environment_policy]')
     expect(codexConfig).toContain('"HTTPS_PROXY" = "http://proxy.local:8080"')
     expect(codexConfig).toContain('"NO_PROXY" = "localhost,127.0.0.1,::1"')
+    expect(codexConfig).toContain('"CODEXIO_API_URL" = "http://127.0.0.1:8787"')
+    expect(codexConfig).toContain('"CODEXIO_TOKEN" = "runtime-token"')
+  })
+
+  it('resolves bundled codex command by default', () => {
+    const command = createCodexCommand(ConfigSchema.parse({}), [
+      'app-server',
+      '--stdio'
+    ])
+
+    expect(command.command).toBe(process.execPath)
+    expect(command.args.at(-2)).toBe('app-server')
+    expect(command.args.at(-1)).toBe('--stdio')
+    expect(command.args[0]).toContain('@openai')
+  })
+
+  it('resolves public codex command when bundled is disabled', () => {
+    const previousCodexHome = process.env.CODEX_HOME
+    process.env.CODEX_HOME = 'C:\\Users\\test\\.codex'
+    try {
+      const config = ConfigSchema.parse({
+        agents: {
+          codex: {
+            enabled: true,
+            bundled: false
+          }
+        }
+      })
+      const command = createCodexCommand(config, [
+        'app-server',
+        '--stdio'
+      ])
+      const env = createAgentEnv(config)
+
+      expect(command).toEqual({
+        command: 'codex',
+        args: [
+          'app-server',
+          '--stdio'
+        ]
+      })
+      expect(env.CODEX_HOME).toBe('C:\\Users\\test\\.codex')
+    } finally {
+      if (previousCodexHome === undefined) {
+        delete process.env.CODEX_HOME
+      } else {
+        process.env.CODEX_HOME = previousCodexHome
+      }
+    }
   })
 
   it('parses chat commands with dollar and yuan prefixes', () => {
@@ -404,12 +520,16 @@ describe('core', () => {
     const threadStart = requests.find((request) => request.method === 'thread/start')
     expect(threadStart?.params).toMatchObject({
       ephemeral: false,
-      developerInstructions: expect.stringContaining('http://127.0.0.1:8787/api/message')
+      developerInstructions: expect.stringContaining('$apiUrl/api/message')
     })
     const developerInstructions = (threadStart?.params as Record<string, unknown>).developerInstructions
-    expect(developerInstructions).toContain('Bearer test-token')
+    expect(developerInstructions).toContain('Bearer $token')
+    expect(developerInstructions).toContain('"test-token"')
+    expect(developerInstructions).toContain('CODEXIO_API_URL')
+    expect(developerInstructions).toContain('http://127.0.0.1:8787')
     expect(developerInstructions).toContain('[System.Text.Encoding]::UTF8.GetBytes')
     expect(developerInstructions).toContain('application/json; charset=utf-8')
+    expect(developerInstructions).toContain('Never send local images as Markdown image links')
     expect(developerInstructions).not.toContain('${toolBaseUrl}')
     expect(developerInstructions).not.toContain('${token}')
   })
@@ -584,8 +704,12 @@ describe('core', () => {
       appServer
     })
     await agent.start(ConfigSchema.parse({}))
-    await agent.receive('first')
-    await agent.receive('second')
+    await agent.receive({
+      text: 'first'
+    })
+    await agent.receive({
+      text: 'second'
+    })
     await agent.clear()
     expect(requests.map((request) => request.method)).toEqual([
       'account/read',
@@ -603,6 +727,91 @@ describe('core', () => {
     expect(requests[3].params).toMatchObject({
       threadId: 'thread-1',
       expectedTurnId: 'turn-1'
+    })
+  })
+
+  it('codex agent sends local image inputs to app-server', async () => {
+    const requests: Array<{
+      method: string
+      params: unknown
+    }> = []
+    const agent = new CodexAgent({
+      workspacePath: '.',
+      config: ConfigSchema.parse({}),
+      toolBaseUrl: 'http://127.0.0.1:8787',
+      send: async () => {},
+      sessionStore: await createTempSessionStore(),
+      appServer: createCodexAppServerMock(requests)
+    })
+    await agent.start(ConfigSchema.parse({}))
+    await agent.receive({
+      text: 'look',
+      files: [
+        {
+          id: 'file-1',
+          mime: 'image/png',
+          name: 'a.png',
+          size: 1,
+          sha256: '0'.repeat(64),
+          path: 'C:\\tmp\\a.png',
+          url: '/api/files/file-1'
+        }
+      ]
+    })
+
+    expect(requests.find((request) => request.method === 'turn/start')?.params).toMatchObject({
+      input: [
+        {
+          type: 'text',
+          text: 'look',
+          text_elements: []
+        },
+        {
+          type: 'localImage',
+          path: 'C:\\tmp\\a.png',
+          detail: 'auto'
+        }
+      ]
+    })
+  })
+
+  it('codex agent sends generic file inputs as local paths', async () => {
+    const requests: Array<{
+      method: string
+      params: unknown
+    }> = []
+    const agent = new CodexAgent({
+      workspacePath: '.',
+      config: ConfigSchema.parse({}),
+      toolBaseUrl: 'http://127.0.0.1:8787',
+      send: async () => {},
+      sessionStore: await createTempSessionStore(),
+      appServer: createCodexAppServerMock(requests)
+    })
+    await agent.start(ConfigSchema.parse({}))
+    await agent.receive({
+      text: 'read this',
+      files: [
+        {
+          id: 'file-1',
+          mime: 'text/plain',
+          name: 'note.txt',
+          size: 10,
+          sha256: '0'.repeat(64),
+          path: 'C:\\tmp\\note.txt',
+          url: '/api/files/file-1'
+        }
+      ]
+    })
+
+    expect(requests.find((request) => request.method === 'turn/start')?.params).toMatchObject({
+      input: [
+        {
+          type: 'text',
+          text: 'read this\n\nFiles:\nC:\\tmp\\note.txt',
+          text_elements: []
+        }
+      ]
     })
   })
 
@@ -643,6 +852,7 @@ describe('core', () => {
       },
       async waitForNotification(method: string): Promise<void> {
         expect(method).toBe('account/login/completed')
+        await new Promise(() => {})
       },
       async stop(): Promise<void> {}
     }
@@ -667,13 +877,263 @@ describe('core', () => {
       'account/login/start'
     ])
     expect(requests[0].params).toEqual({
-      refreshToken: false
+      refreshToken: true
     })
     expect(requests[1].params).toEqual({
       type: 'chatgptDeviceCode'
     })
     expect(outbound[0]).toContain('https://login.example.test/device')
     expect(outbound[0]).toContain('ABCD-EFGH')
+  })
+
+  it('codex agent starts device-code login when account refresh is invalidated', async () => {
+    const outbound: string[] = []
+    const states: string[] = []
+    const requests: Array<{
+      method: string
+      params: unknown
+    }> = []
+    const appServer = {
+      async start(): Promise<void> {},
+      async request(method: string, params: unknown): Promise<unknown> {
+        requests.push({
+          method,
+          params
+        })
+        if (method === 'account/read') {
+          throw new Error('401 Unauthorized: refresh_token_invalidated')
+        }
+        if (method === 'account/login/start') {
+          return {
+            type: 'chatgptDeviceCode',
+            verificationUrl: 'https://login.example.test/device',
+            userCode: 'WXYZ-1234'
+          }
+        }
+        return {}
+      },
+      async waitForNotification(): Promise<void> {
+        await new Promise(() => {})
+      },
+      async stop(): Promise<void> {}
+    }
+    const agent = new CodexAgent({
+      workspacePath: '.',
+      config: ConfigSchema.parse({}),
+      toolBaseUrl: 'http://127.0.0.1:8787',
+      send: async (text) => {
+        outbound.push(text)
+      },
+      onLoginRequired: async (message) => {
+        states.push(message)
+      },
+      sessionStore: await createTempSessionStore(),
+      appServer
+    })
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    try {
+      await expect(agent.start(ConfigSchema.parse({}))).rejects.toThrow(AgentLoginInProgressError)
+    } finally {
+      stdout.mockRestore()
+    }
+
+    expect(requests.map((request) => request.method)).toEqual([
+      'account/read',
+      'account/login/start'
+    ])
+    expect(requests[0].params).toEqual({
+      refreshToken: true
+    })
+    expect(outbound[0]).toContain('Codex 登录已失效，请重新登录。')
+    expect(outbound[0]).toContain('https://login.example.test/device')
+    expect(outbound[0]).toContain('WXYZ-1234')
+    expect(states).toEqual([
+      '请先完成 Codex 登录。'
+    ])
+  })
+
+  it('codex agent turns runtime token invalidation into one login flow', async () => {
+    const outbound: string[] = []
+    const states: string[] = []
+    const requests: Array<{
+      method: string
+      params: unknown
+    }> = []
+    const appServer = {
+      async start(): Promise<void> {},
+      async request(method: string, params: unknown): Promise<unknown> {
+        requests.push({
+          method,
+          params
+        })
+        if (method === 'account/read') {
+          return {
+            account: {}
+          }
+        }
+        if (method === 'account/login/start') {
+          return {
+            type: 'chatgptDeviceCode',
+            verificationUrl: 'https://login.example.test/device',
+            userCode: 'RUNTIME-1'
+          }
+        }
+        if (method === 'thread/start') {
+          return {
+            thread: {
+              id: 'thread-1'
+            }
+          }
+        }
+        return {}
+      },
+      async waitForNotification(): Promise<void> {
+        await new Promise(() => {})
+      },
+      async stop(): Promise<void> {}
+    }
+    const agent = new CodexAgent({
+      workspacePath: '.',
+      config: ConfigSchema.parse({}),
+      toolBaseUrl: 'http://127.0.0.1:8787',
+      send: async (text) => {
+        outbound.push(text)
+      },
+      onLoginRequired: async (message) => {
+        states.push(message)
+      },
+      sessionStore: await createTempSessionStore(),
+      appServer
+    })
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    try {
+      await agent.start(ConfigSchema.parse({}))
+      const handleNotification = (agent as unknown as {
+        handleNotification: (method: string, params: unknown) => Promise<void>
+      }).handleNotification.bind(agent)
+      await handleNotification('error', {
+        error: {
+          message: 'Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.',
+          code: 'refresh_token_invalidated'
+        }
+      })
+      await handleNotification('error', {
+        error: {
+          message: 'Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.',
+          code: 'refresh_token_invalidated'
+        }
+      })
+    } finally {
+      stdout.mockRestore()
+    }
+
+    expect(requests.map((request) => request.method)).toEqual([
+      'account/read',
+      'thread/start',
+      'account/login/start'
+    ])
+    expect(outbound).toHaveLength(1)
+    expect(outbound[0]).toContain('RUNTIME-1')
+    expect(outbound[0]).not.toContain('Your access token could not be refreshed')
+    expect(states).toEqual([
+      '请先完成 Codex 登录。'
+    ])
+  })
+
+  it('codex agent restarts after device-code login completes', async () => {
+    const outbound: string[] = []
+    const requests: Array<{
+      method: string
+      params: unknown
+    }> = []
+    let starts = 0
+    let stops = 0
+    let completeLogin: (() => void) | undefined
+    const appServer = {
+      async start(): Promise<void> {
+        starts += 1
+      },
+      async request(method: string, params: unknown): Promise<unknown> {
+        requests.push({
+          method,
+          params
+        })
+        if (method === 'account/read') {
+          return {
+            account: {}
+          }
+        }
+        if (method === 'account/login/start') {
+          return {
+            type: 'chatgptDeviceCode',
+            verificationUrl: 'https://login.example.test/device',
+            userCode: 'DONE-1'
+          }
+        }
+        if (method === 'thread/start') {
+          const count = requests.filter((request) => request.method === 'thread/start').length
+          return {
+            thread: {
+              id: `thread-${count}`
+            }
+          }
+        }
+        if (method === 'thread/resume') {
+          return {
+            thread: {
+              id: (params as Record<string, string>).threadId
+            }
+          }
+        }
+        return {}
+      },
+      async waitForNotification(): Promise<void> {
+        await new Promise<void>((resolve) => {
+          completeLogin = resolve
+        })
+      },
+      async stop(): Promise<void> {
+        stops += 1
+      }
+    }
+    const agent = new CodexAgent({
+      workspacePath: '.',
+      config: ConfigSchema.parse({}),
+      toolBaseUrl: 'http://127.0.0.1:8787',
+      send: async (text) => {
+        outbound.push(text)
+      },
+      sessionStore: await createTempSessionStore(),
+      appServer
+    })
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    try {
+      await agent.start(ConfigSchema.parse({}))
+      const handleNotification = (agent as unknown as {
+        handleNotification: (method: string, params: unknown) => Promise<void>
+      }).handleNotification.bind(agent)
+      await handleNotification('error', {
+        error: {
+          message: 'Your session has ended. Please log in again.',
+          code: 'refresh_token_invalidated'
+        }
+      })
+      completeLogin?.()
+      await waitFor(() => requests.some((request) => request.method === 'thread/resume'))
+    } finally {
+      stdout.mockRestore()
+    }
+
+    expect(starts).toBe(2)
+    expect(stops).toBe(1)
+    expect(requests.map((request) => request.method)).toEqual([
+      'account/read',
+      'thread/start',
+      'account/login/start',
+      'account/read',
+      'thread/resume'
+    ])
+    expect(outbound).toContain('Codex login completed.')
   })
 
   it('codex app-server ignores malformed JSON lines and times out pending requests', async () => {
@@ -1279,6 +1739,317 @@ describe('core', () => {
         }
       ]
     ])
+
+    const imagePayload = createFeishuMessagePayload({
+      role: 'user',
+      text: 'with image',
+      createdAt: Date.now(),
+      files: [
+        {
+          id: 'file-1',
+          mime: 'image/png',
+          name: 'image.png',
+          size: 1,
+          sha256: '0'.repeat(64),
+          path: 'C:\\tmp\\image.png',
+          url: '/api/files/file-1'
+        }
+      ]
+    }, [
+      {
+        imageKey: 'img-key'
+      }
+    ])
+    const imageContent = JSON.parse(imagePayload.content) as {
+      zh_cn: {
+        content: Array<Array<Record<string, string>>>
+      }
+    }
+    expect(imagePayload.content).not.toContain('/api/files/file-1')
+    expect(imageContent.zh_cn.content).toContainEqual([
+      {
+        tag: 'img',
+        image_key: 'img-key'
+      }
+    ])
+
+    const filePayload = createFeishuMessagePayload({
+      role: 'user',
+      text: 'with file',
+      createdAt: Date.now(),
+      files: [
+        {
+          id: 'file-1',
+          mime: 'text/plain',
+          name: 'note.txt',
+          size: 10,
+          sha256: '0'.repeat(64),
+          path: 'C:\\tmp\\note.txt',
+          url: '/api/files/file-1'
+        }
+      ]
+    })
+    expect(filePayload.content).not.toContain('/api/files/file-1')
+
+    const fileOnlyPayload = createFeishuMessagePayload({
+      role: 'user',
+      text: '',
+      createdAt: Date.now(),
+      files: [
+        {
+          id: 'file-1',
+          mime: 'text/plain',
+          name: 'note.txt',
+          size: 10,
+          sha256: '0'.repeat(64),
+          path: 'C:\\tmp\\note.txt',
+          url: '/api/files/file-1'
+        }
+      ]
+    })
+    expect(JSON.parse(fileOnlyPayload.content)).toEqual({
+      zh_cn: {
+        content: []
+      }
+    })
+  })
+
+  it('sends feishu image files inside one post message', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-feishu-image-'))
+    const path = join(dir, 'image.png')
+    await writeFile(path, pngBytes())
+    const createdMessages: Array<{
+      msgType: string
+      content: string
+    }> = []
+    const uploaded: Buffer[] = []
+    const sender = new FeishuMessageSender({
+      enabled: true,
+      appId: 'app-id',
+      appSecret: 'app-secret',
+      chatId: 'chat-id'
+    }, {
+      im: {
+        v1: {
+          image: {
+            create: async (payload) => {
+              uploaded.push(payload.data.image)
+              return {
+                image_key: 'img-key'
+              }
+            }
+          },
+          message: {
+            create: async (payload) => {
+              createdMessages.push({
+                msgType: payload.data.msg_type,
+                content: payload.data.content
+              })
+            }
+          }
+        }
+      }
+    } as unknown as ConstructorParameters<typeof FeishuMessageSender>[1])
+
+    const result = await sender.send({
+      role: 'user',
+      source: 'web',
+      text: '这图里是什么内容',
+      createdAt: Date.now(),
+      files: [
+        {
+          id: 'file-1',
+          mime: 'image/png',
+          name: 'image.png',
+          size: pngBytes().length,
+          sha256: '0'.repeat(64),
+          path,
+          url: '/api/files/file-1'
+        }
+      ]
+    })
+
+    expect(result.isFailed).toBe(false)
+    expect(uploaded[0].equals(pngBytes())).toBe(true)
+    expect(createdMessages).toHaveLength(1)
+    expect(createdMessages[0].msgType).toBe('post')
+    expect(createdMessages[0].content).not.toContain('/api/files/file-1')
+    expect(JSON.parse(createdMessages[0].content)).toEqual({
+      zh_cn: {
+        content: [
+          [
+            {
+              tag: 'md',
+              text: '这图里是什么内容'
+            }
+          ],
+          [
+            {
+              tag: 'img',
+              image_key: 'img-key'
+            }
+          ],
+          [
+            {
+              tag: 'text',
+              text: 'User'
+            }
+          ]
+        ]
+      }
+    })
+  })
+
+  it('sends feishu generic files as file messages', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-feishu-file-'))
+    const path = join(dir, 'note.txt')
+    await writeFile(path, 'hello file')
+    const createdMessages: Array<{
+      msgType: string
+      content: string
+    }> = []
+    const uploadedFiles: Array<{
+      fileType: string
+      fileName: string
+      file: Buffer
+    }> = []
+    const sender = new FeishuMessageSender({
+      enabled: true,
+      appId: 'app-id',
+      appSecret: 'app-secret',
+      chatId: 'chat-id'
+    }, {
+      im: {
+        v1: {
+          image: {
+            create: async () => {
+              throw new Error('image upload should not run')
+            }
+          },
+          file: {
+            create: async (payload) => {
+              uploadedFiles.push({
+                fileType: payload.data.file_type,
+                fileName: payload.data.file_name,
+                file: payload.data.file
+              })
+              return {
+                file_key: 'file-key'
+              }
+            }
+          },
+          message: {
+            create: async (payload) => {
+              createdMessages.push({
+                msgType: payload.data.msg_type,
+                content: payload.data.content
+              })
+            }
+          }
+        }
+      }
+    } as unknown as ConstructorParameters<typeof FeishuMessageSender>[1])
+
+    const result = await sender.send({
+      role: 'user',
+      source: 'web',
+      text: '你能看到文件吗？',
+      createdAt: Date.now(),
+      files: [
+        {
+          id: 'file-1',
+          mime: 'text/plain',
+          name: 'note.txt',
+          size: 'hello file'.length,
+          sha256: '0'.repeat(64),
+          path,
+          url: '/api/files/file-1'
+        }
+      ]
+    })
+
+    expect(result.isFailed).toBe(false)
+    expect(uploadedFiles).toHaveLength(1)
+    expect(uploadedFiles[0].fileType).toBe('stream')
+    expect(uploadedFiles[0].fileName).toBe('note.txt')
+    expect(uploadedFiles[0].file.equals(Buffer.from('hello file'))).toBe(true)
+    expect(createdMessages).toHaveLength(2)
+    expect(createdMessages[0].msgType).toBe('post')
+    expect(createdMessages[0].content).toContain('你能看到文件吗？')
+    expect(createdMessages[0].content).not.toContain('/api/files/file-1')
+    expect(createdMessages[1]).toEqual({
+      msgType: 'file',
+      content: JSON.stringify({
+        file_key: 'file-key'
+      })
+    })
+  })
+
+  it('sends feishu file-only messages without empty post content', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-feishu-file-only-'))
+    const path = join(dir, 'note.txt')
+    await writeFile(path, 'hello file')
+    const createdMessages: Array<{
+      msgType: string
+      content: string
+    }> = []
+    const sender = new FeishuMessageSender({
+      enabled: true,
+      appId: 'app-id',
+      appSecret: 'app-secret',
+      chatId: 'chat-id'
+    }, {
+      im: {
+        v1: {
+          file: {
+            create: async () => ({
+              file_key: 'file-key'
+            })
+          },
+          image: {
+            create: async () => {
+              throw new Error('image upload should not run')
+            }
+          },
+          message: {
+            create: async (payload) => {
+              createdMessages.push({
+                msgType: payload.data.msg_type,
+                content: payload.data.content
+              })
+            }
+          }
+        }
+      }
+    } as unknown as ConstructorParameters<typeof FeishuMessageSender>[1])
+
+    const result = await sender.send({
+      role: 'user',
+      source: 'web',
+      text: '',
+      createdAt: Date.now(),
+      files: [
+        {
+          id: 'file-1',
+          mime: 'text/plain',
+          name: 'note.txt',
+          size: 'hello file'.length,
+          sha256: '0'.repeat(64),
+          path,
+          url: '/api/files/file-1'
+        }
+      ]
+    })
+
+    expect(result.isFailed).toBe(false)
+    expect(createdMessages).toEqual([
+      {
+        msgType: 'file',
+        content: JSON.stringify({
+          file_key: 'file-key'
+        })
+      }
+    ])
   })
 
   it('formats feishu webhook system message with system suffix', () => {
@@ -1292,6 +2063,42 @@ describe('core', () => {
       text: 'clear',
       createdAt: Date.now()
     })).toBe('已开始新对话\n\nSystem')
+  })
+
+  it('formats feishu webhook text without local file links', () => {
+    expect(createFeishuWebhookText({
+      role: 'user',
+      text: '你能看到文件吗？',
+      createdAt: Date.now(),
+      files: [
+        {
+          id: 'file-1',
+          mime: 'text/plain',
+          name: 'note.txt',
+          size: 10,
+          sha256: '0'.repeat(64),
+          path: 'C:\\tmp\\note.txt',
+          url: '/api/files/file-1'
+        }
+      ]
+    })).toBe('你能看到文件吗？\n\nUser')
+
+    expect(createFeishuWebhookText({
+      role: 'user',
+      text: '',
+      createdAt: Date.now(),
+      files: [
+        {
+          id: 'file-1',
+          mime: 'text/plain',
+          name: 'note.txt',
+          size: 10,
+          sha256: '0'.repeat(64),
+          path: 'C:\\tmp\\note.txt',
+          url: '/api/files/file-1'
+        }
+      ]
+    })).toBe('已收到文件：note.txt\n\nUser')
   })
 
   it('formats email message without codexio title and labels non-agent roles at bottom', () => {
@@ -1410,4 +2217,20 @@ function createCodexAppServerMock(
     async waitForNotification(): Promise<void> {},
     async stop(): Promise<void> {}
   }
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  const startedAt = Date.now()
+  while (!predicate()) {
+    if (Date.now() - startedAt > 4000) {
+      throw new Error('wait timed out')
+    }
+    await new Promise((resolve) => {
+      setTimeout(resolve, 5)
+    })
+  }
+}
+
+function pngBytes(): Buffer {
+  return Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lS3KgwAAAABJRU5ErkJggg==', 'base64')
 }

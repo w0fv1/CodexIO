@@ -8,11 +8,13 @@ import { join } from 'node:path'
 import { ConfigSchema } from '../src/ConfigService.js'
 import { codexioRootPath } from '../src/AppMetadata.js'
 import { createCodexioApp, resolveAvailableServerPort } from '../src/index.js'
-import { createServeProcessSpec, restartServer, writeSupervisorState } from '../src/component/ServerLifecycle.js'
+import { createServeProcessSpec, readRunningSupervisorState, readSupervisorState, restartServer, stopServer, writeRuntimeServerState, writeSupervisorState } from '../src/component/ServerLifecycle.js'
 import { webPageHtml } from '../src/channel/WebPage.js'
 import { TestAgent } from './TestAgent.js'
+import { ConfigAction } from '../src/config/ConfigAction.js'
 
 const testToken = 'test-message-token'
+const webBaseUrls = new Map<string, string>()
 
 describe('server', () => {
   it('serves a compact Codexio web chat page', () => {
@@ -34,6 +36,25 @@ describe('server', () => {
     expect(webPageHtml).toContain('href="/config"')
     expect(webPageHtml).toContain("if (message.type === 'system')")
     expect(webPageHtml).toContain('whitespace-pre-wrap break-words')
+    expect(webPageHtml).toContain('@paste="handlePaste($event)"')
+    expect(webPageHtml).toContain('@drop.prevent="handleDrop($event)"')
+    expect(webPageHtml).toContain('multiple')
+    expect(webPageHtml).toContain('uploadSelectedFiles')
+    expect(webPageHtml).toContain('title="上传文件"')
+    expect(webPageHtml).toContain('isImageFile(file)')
+    expect(webPageHtml).toContain('formatFileSize')
+    expect(webPageHtml).toContain('m16 6-8.4 8.4')
+    expect(webPageHtml).not.toContain('<circle cx="9" cy="9" r="2"/>')
+    expect(webPageHtml).not.toContain('m21 15-3.1-3.1')
+    const userTemplateIndex = webPageHtml.indexOf('<template x-if="message.type === \'user\'">')
+    const userActionIndex = webPageHtml.indexOf('class="message-actions shrink-0 pt-1"', userTemplateIndex)
+    const userBubbleIndex = webPageHtml.indexOf('class="user-bubble', userTemplateIndex)
+    expect(userActionIndex).toBeGreaterThan(userTemplateIndex)
+    expect(userActionIndex).toBeLessThan(userBubbleIndex)
+    const agentTemplateIndex = webPageHtml.indexOf('<template x-if="message.type === \'agent\'">')
+    const agentBubbleIndex = webPageHtml.indexOf('class="agent-bubble', agentTemplateIndex)
+    const agentActionIndex = webPageHtml.indexOf('class="message-actions shrink-0 pt-1"', agentTemplateIndex)
+    expect(agentActionIndex).toBeGreaterThan(agentBubbleIndex)
   })
 
   it('receives web text', async () => {
@@ -56,6 +77,123 @@ describe('server', () => {
       type: 'agent',
       text: 'test: hello'
     })
+    await closeWebSocket(socket)
+    await closeTestServer(listener)
+  })
+
+  it('receives web image files', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    const socket = await openWebSocket(baseUrl)
+    const messages = recordWebSocket(socket)
+    const form = new FormData()
+    form.append('file', new Blob([pngBytes()], {
+      type: 'image/png'
+    }), 'web.png')
+    const uploadResponse = await fetch(`${baseUrl}/api/files`, {
+      method: 'POST',
+      body: form
+    })
+    const upload = await uploadResponse.json() as {
+      isFailed: boolean
+      data: {
+        file: {
+          id: string
+          mime: string
+          name: string
+          size: number
+          sha256: string
+          path: string
+          url: string
+        }
+      }
+    }
+    expect(upload.isFailed).toBe(false)
+    expect(upload.data.file).toMatchObject({
+      mime: 'image/png',
+      name: 'web.png',
+      size: pngBytes().length,
+      url: `/api/files/${upload.data.file.id}`
+    })
+    socket.send(JSON.stringify({
+      text: 'image input',
+      files: [
+        upload.data.file.id
+      ]
+    }))
+    await waitForWebSocketMessages(messages, 3)
+    expect(messages[0]).toMatchObject({
+      type: 'user',
+      text: 'image input',
+      files: [
+        {
+          id: upload.data.file.id,
+          mime: 'image/png',
+          url: `/api/files/${upload.data.file.id}`
+        }
+      ]
+    })
+    expect(messages[2]).toMatchObject({
+      type: 'agent',
+      text: 'test: image input'
+    })
+    await closeWebSocket(socket)
+    await closeTestServer(listener)
+  })
+
+  it('receives web generic files', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    const socket = await openWebSocket(baseUrl)
+    const messages = recordWebSocket(socket)
+    const form = new FormData()
+    form.append('file', new Blob(['hello file'], {
+      type: 'text/plain'
+    }), 'note.txt')
+    const uploadResponse = await fetch(`${baseUrl}/api/files`, {
+      method: 'POST',
+      body: form
+    })
+    const upload = await uploadResponse.json() as {
+      isFailed: boolean
+      data: {
+        file: {
+          id: string
+          mime: string
+          name: string
+          size: number
+          sha256: string
+          path: string
+          url: string
+        }
+      }
+    }
+    expect(upload.isFailed).toBe(false)
+    expect(upload.data.file).toMatchObject({
+      mime: 'text/plain',
+      name: 'note.txt',
+      size: 'hello file'.length,
+      url: `/api/files/${upload.data.file.id}`
+    })
+    socket.send(JSON.stringify({
+      text: 'file input',
+      files: [
+        upload.data.file.id
+      ]
+    }))
+    await waitForWebSocketMessages(messages, 3)
+    expect(messages[0]).toMatchObject({
+      type: 'user',
+      text: 'file input',
+      files: [
+        {
+          id: upload.data.file.id,
+          mime: 'text/plain',
+          url: `/api/files/${upload.data.file.id}`
+        }
+      ]
+    })
+    const fileResponse = await fetch(`${baseUrl}${upload.data.file.url}`)
+    expect(fileResponse.headers.get('content-type')).toContain('text/plain')
+    expect(await fileResponse.text()).toBe('hello file')
     await closeWebSocket(socket)
     await closeTestServer(listener)
   })
@@ -212,6 +350,7 @@ describe('server', () => {
     const workspace = join(dir, 'workspace')
     await mkdir(workspace)
     const configPath = join(dir, 'config.yaml')
+    const webPort = await resolveAvailableServerPort('127.0.0.1', 19788)
     await writeFile(configPath, [
       'server:',
       '  host: 127.0.0.1',
@@ -229,6 +368,8 @@ describe('server', () => {
       'channels:',
       '  web:',
       '    enabled: true',
+      '    host: 127.0.0.1',
+      `    port: ${webPort}`,
       'workspace:',
       `  path: ${workspace}`
     ].join('\n'), 'utf8')
@@ -246,7 +387,9 @@ describe('server', () => {
       },
       channels: {
         web: {
-          enabled: true
+          enabled: true,
+          host: '127.0.0.1',
+          port: webPort
         }
       },
       workspace: {
@@ -255,7 +398,24 @@ describe('server', () => {
     })
     const server = createCodexioApp(config, {
       configPath,
-      agentFactory: () => new TestAgent(async () => {})
+      agentFactory: () => new TestAgent(async () => {}),
+      configActions: [
+        {
+          descriptor: {
+            id: 'test.action',
+            group: 'Feishu',
+            label: '测试消息和图片'
+          },
+          run: async () => ({
+            code: '1',
+            message: 'no error',
+            data: {
+              message: '测试完成'
+            },
+            isFailed: false
+          })
+        } satisfies ConfigAction
+      ]
     })
     const listener = server.listen(0)
     await new Promise<void>((resolve) => listener.once('listening', resolve))
@@ -269,16 +429,35 @@ describe('server', () => {
     expect(pageText).toContain('Codexio Config')
     expect(pageText).toContain('导入配置')
     expect(pageText).toContain('导出配置')
+    expect(pageText).toContain('/api/config/actions/')
 
     const readResponse = await fetch(`${baseUrl}/api/config`)
     const readResult = await readResponse.json() as {
       isFailed: boolean
       data: {
         descriptor: Array<{ path: string }>
+        actions: Array<{ id: string, group: string, label: string }>
       }
     }
     expect(readResult.isFailed).toBe(false)
     expect(readResult.data.descriptor.some((item) => item.path === 'proxy.port')).toBe(true)
+    expect(readResult.data.actions).toContainEqual({
+      id: 'test.action',
+      group: 'Feishu',
+      label: '测试消息和图片'
+    })
+
+    const actionResponse = await fetch(`${baseUrl}/api/config/actions/test.action`, {
+      method: 'POST'
+    })
+    const actionResult = await actionResponse.json() as {
+      isFailed: boolean
+      data: {
+        message: string
+      }
+    }
+    expect(actionResult.isFailed).toBe(false)
+    expect(actionResult.data.message).toBe('测试完成')
 
     const patchResponse = await fetch(`${baseUrl}/api/config`, {
       method: 'PATCH',
@@ -358,6 +537,158 @@ describe('server', () => {
       type: 'agent',
       text: 'agent output'
     })
+    await closeWebSocket(socket)
+    await closeTestServer(listener)
+  })
+
+  it('accepts agent image output through local paths', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-agent-image-'))
+    const imagePath = join(dir, 'agent.png')
+    await writeFile(imagePath, pngBytes())
+    const { baseUrl, listener } = await startTestServer()
+    const socket = await openWebSocket(baseUrl)
+    const messages = recordWebSocket(socket)
+    const response = await fetch(`${baseUrl}/api/message`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${testToken}`
+      },
+      body: JSON.stringify({
+        text: 'agent image',
+        files: [
+          {
+            path: imagePath
+          }
+        ]
+      })
+    })
+    const result = await response.json() as {
+      isFailed: boolean
+      data: {
+        sent: boolean
+        files: Array<{
+          id: string
+          mime: string
+          url: string
+        }>
+      }
+    }
+    await waitForWebSocketMessages(messages, 1)
+    expect(result.isFailed).toBe(false)
+    expect(result.data.sent).toBe(true)
+    expect(result.data.files[0]).toMatchObject({
+      mime: 'image/png',
+      url: `/api/files/${result.data.files[0].id}`
+    })
+    expect(messages[0]).toMatchObject({
+      type: 'agent',
+      text: 'agent image',
+      files: [
+        {
+          id: result.data.files[0].id,
+          mime: 'image/png',
+          url: `/api/files/${result.data.files[0].id}`
+        }
+      ]
+    })
+    const fileResponse = await fetch(`${baseUrl}${result.data.files[0].url}`)
+    expect(fileResponse.headers.get('content-type')).toContain('image/png')
+    expect(Buffer.from(await fileResponse.arrayBuffer()).equals(pngBytes())).toBe(true)
+    await closeWebSocket(socket)
+    await closeTestServer(listener)
+  })
+
+  it('promotes local file markdown images to channel files', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    const socket = await openWebSocket(baseUrl)
+    const messages = recordWebSocket(socket)
+    const form = new FormData()
+    form.append('file', new Blob([pngBytes()], {
+      type: 'image/png'
+    }), 'agent-markdown.png')
+    const uploadResponse = await fetch(`${baseUrl}/api/files`, {
+      method: 'POST',
+      body: form
+    })
+    const upload = await uploadResponse.json() as {
+      isFailed: boolean
+      data: {
+        file: {
+          id: string
+          url: string
+        }
+      }
+    }
+    expect(upload.isFailed).toBe(false)
+
+    const response = await fetch(`${baseUrl}/api/message`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${testToken}`
+      },
+      body: JSON.stringify({
+        text: `图片如下：\n\n![agent image](${upload.data.file.url})`
+      })
+    })
+    const result = await response.json() as {
+      isFailed: boolean
+    }
+
+    await waitForWebSocketMessages(messages, 1)
+    expect(result.isFailed).toBe(false)
+    expect(messages[0]).toMatchObject({
+      type: 'agent',
+      text: '图片如下：',
+      files: [
+        {
+          id: upload.data.file.id,
+          url: upload.data.file.url
+        }
+      ]
+    })
+    expect(JSON.stringify(messages[0])).not.toContain('![agent image]')
+    await closeWebSocket(socket)
+    await closeTestServer(listener)
+  })
+
+  it('promotes local image paths in agent text to channel files', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-agent-path-image-'))
+    const imagePath = join(dir, 'agent-output.png')
+    await writeFile(imagePath, pngBytes())
+    const { baseUrl, listener } = await startTestServer()
+    const socket = await openWebSocket(baseUrl)
+    const messages = recordWebSocket(socket)
+
+    const response = await fetch(`${baseUrl}/api/message`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${testToken}`
+      },
+      body: JSON.stringify({
+        text: `截图预览：\n\n截图预览 ${imagePath.replaceAll('\\', '/')}`
+      })
+    })
+    const result = await response.json() as {
+      isFailed: boolean
+    }
+
+    await waitForWebSocketMessages(messages, 1)
+    expect(result.isFailed).toBe(false)
+    expect(messages[0]).toMatchObject({
+      type: 'agent',
+      text: '截图预览：\n\n截图预览',
+      files: [
+        {
+          mime: 'image/png',
+          name: 'agent-output.png',
+          url: expect.stringMatching(/^\/api\/files\//)
+        }
+      ]
+    })
+    expect(JSON.stringify(messages[0])).not.toContain(imagePath.replaceAll('\\', '/'))
     await closeWebSocket(socket)
     await closeTestServer(listener)
   })
@@ -477,14 +808,9 @@ describe('server', () => {
     await closed
   })
 
-  it('notifies users when the host server starts and stops', async () => {
+  it('notifies connected users when the host server stops', async () => {
     const { baseUrl, listener } = await startTestServer()
     const { socket, messages } = await openRecordedWebSocket(baseUrl)
-    await waitForWebSocketMessages(messages, 1)
-    expect(messages[0]).toMatchObject({
-      type: 'system',
-      text: 'Codexio server started.'
-    })
     const closed = new Promise<void>((resolve) => {
       listener.once('close', resolve)
     })
@@ -498,8 +824,8 @@ describe('server', () => {
       isFailed: boolean
     }
     expect(result.isFailed).toBe(false)
-    await waitForWebSocketMessages(messages, 2)
-    expect(messages[1]).toMatchObject({
+    await waitForWebSocketMessages(messages, 1)
+    expect(messages[0]).toMatchObject({
       type: 'system',
       text: 'Codexio server stopping.'
     })
@@ -583,7 +909,7 @@ describe('server', () => {
     await closeTestServer(listener)
   })
 
-  it('restores latest channel manager messages in web channel', async () => {
+  it('does not restore channel manager messages in new web connections', async () => {
     const { baseUrl, listener } = await startTestServer()
     const socket = await openWebSocket(baseUrl)
     const messages = recordWebSocket(socket)
@@ -593,41 +919,12 @@ describe('server', () => {
       }))
       await waitForWebSocketMessages(messages, index * 3)
     }
-    const restored: Array<Record<string, unknown>> = []
-    const restoredUrl = baseUrl.replace('http://', 'ws://').replace('https://', 'wss://')
-    const restoredSocket = new WebSocket(`${restoredUrl}/ws`)
-    await new Promise<void>((resolve, reject) => {
-      restoredSocket.on('message', (data) => {
-        const message = JSON.parse(data.toString()) as Record<string, unknown>
-        if (message.type !== 'ready') {
-          restored.push(message)
-        }
-        if (restored.length === 20) {
-          resolve()
-        }
-      })
-      restoredSocket.once('error', reject)
-    })
+    const restoredSocket = await openWebSocket(baseUrl)
+    const restored = recordWebSocket(restoredSocket)
     await new Promise((resolve) => {
       setTimeout(resolve, 50)
     })
-    expect(restored).toHaveLength(20)
-    expect(restored[0]).toMatchObject({
-      type: 'system',
-      text: expect.any(String)
-    })
-    expect(restored[1]).toMatchObject({
-      type: 'agent',
-      text: 'test: message 6'
-    })
-    expect(restored[2]).toMatchObject({
-      type: 'user',
-      text: 'message 7'
-    })
-    expect(restored[19]).toMatchObject({
-      type: 'agent',
-      text: 'test: message 12'
-    })
+    expect(restored).toHaveLength(0)
     await closeWebSocket(restoredSocket)
     await closeWebSocket(socket)
     await closeTestServer(listener)
@@ -762,6 +1059,188 @@ describe('server', () => {
     }
   })
 
+  it('waits for supervisor stop before returning', async () => {
+    const token = 'supervisor-token'
+    let stopped = false
+    const http = await new Promise<HttpServer>((resolve, reject) => {
+      const server = new HttpServer((request, response) => {
+        if (request.headers.authorization !== `Bearer ${token}`) {
+          response.statusCode = 401
+          response.end(JSON.stringify({
+            isFailed: true,
+            message: 'unauthorized'
+          }))
+          return
+        }
+        if (request.method === 'GET' && request.url === '/status') {
+          response.end(JSON.stringify({
+            isFailed: false,
+            data: {
+              pid: process.pid
+            }
+          }))
+          return
+        }
+        if (request.method === 'POST' && request.url === '/stop') {
+          response.end(JSON.stringify({
+            isFailed: false,
+            data: {
+              accepted: true,
+              action: 'stop'
+            }
+          }))
+          setTimeout(() => {
+            server.close(() => {
+              stopped = true
+            })
+          }, 80)
+          return
+        }
+        response.statusCode = 404
+        response.end(JSON.stringify({
+          isFailed: true,
+          message: 'not found'
+        }))
+      })
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => {
+        resolve(server)
+      })
+    })
+    try {
+      const address = http.address()
+      if (!address || typeof address === 'string') {
+        throw new Error('supervisor address not found')
+      }
+      const dir = await mkdtemp(join(tmpdir(), 'codexio-supervisor-stop-'))
+      const configPath = join(dir, 'config.yaml')
+      await writeSupervisorState(configPath, {
+        pid: process.pid,
+        host: '127.0.0.1',
+        port: address.port,
+        token,
+        startedAt: new Date().toISOString()
+      })
+
+      const result = await stopServer(configPath)
+
+      expect(result).toBe(true)
+      expect(stopped).toBe(true)
+      expect(await readSupervisorState(configPath)).toBeUndefined()
+    } finally {
+      if (http.listening) {
+        await closeTestServer(http)
+      }
+    }
+  })
+
+  it('stops orphan runtime server when supervisor is unavailable', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-orphan-runtime-'))
+    const configPath = join(dir, 'config.yaml')
+    await writeFile(configPath, [
+      'server:',
+      '  host: 127.0.0.1',
+      '  port: 8787',
+      `  token: ${testToken}`,
+      'proxy:',
+      '  enabled: false',
+      '  host: 127.0.0.1',
+      '  port: 7890',
+      'agents:',
+      '  codex:',
+      '    enabled: false',
+      '  claude:',
+      '    enabled: true',
+      'channels:',
+      '  web:',
+      '    enabled: true',
+      'workspace:',
+      `  path: ${dir}`
+    ].join('\n'), 'utf8')
+    let stopped = false
+    const http = await new Promise<HttpServer>((resolve, reject) => {
+      const server = new HttpServer((request, response) => {
+        if (request.method === 'GET' && request.url === '/api/status') {
+          response.end(JSON.stringify({
+            isFailed: false,
+            data: {
+              pid: process.pid
+            }
+          }))
+          return
+        }
+        if (request.method === 'POST' && request.url === '/api/server/stop') {
+          if (request.headers.authorization !== `Bearer ${testToken}`) {
+            response.statusCode = 401
+            response.end(JSON.stringify({
+              isFailed: true,
+              message: 'unauthorized'
+            }))
+            return
+          }
+          response.end(JSON.stringify({
+            isFailed: false,
+            data: {
+              stopping: true
+            }
+          }))
+          setTimeout(() => {
+            server.close(() => {
+              stopped = true
+            })
+          }, 80)
+          return
+        }
+        response.statusCode = 404
+        response.end(JSON.stringify({
+          isFailed: true,
+          message: 'not found'
+        }))
+      })
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => {
+        resolve(server)
+      })
+    })
+    try {
+      const address = http.address()
+      if (!address || typeof address === 'string') {
+        throw new Error('runtime address not found')
+      }
+      await writeRuntimeServerState(configPath, {
+        pid: process.pid,
+        host: '127.0.0.1',
+        port: address.port,
+        startedAt: new Date().toISOString()
+      })
+
+      const result = await stopServer(configPath)
+
+      expect(result).toBe(true)
+      expect(stopped).toBe(true)
+      expect(await readSupervisorState(configPath)).toBeUndefined()
+    } finally {
+      if (http.listening) {
+        await closeTestServer(http)
+      }
+    }
+  })
+
+  it('cleans stale supervisor state when supervisor process is gone', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-stale-supervisor-'))
+    const configPath = join(dir, 'config.yaml')
+    await writeSupervisorState(configPath, {
+      pid: 999999,
+      host: '127.0.0.1',
+      port: 9,
+      token: 'stale-token',
+      startedAt: new Date().toISOString()
+    })
+
+    expect(await readRunningSupervisorState(configPath)).toBeUndefined()
+    expect(await readSupervisorState(configPath)).toBeUndefined()
+  })
+
   it('resolves source and built serve process commands without npm restart branching', () => {
     const configPath = join(codexioRootPath, '.codexio', 'config.yaml')
     const sourceEntryPath = join(codexioRootPath, 'src', 'index.ts')
@@ -789,6 +1268,12 @@ describe('server', () => {
       autoPort: true
     })
     expect(dev.args).toContain('--auto-port')
+
+    const supervised = createServeProcessSpec(configPath, sourceEntryPath, {
+      supervisorPid: 12345
+    })
+    expect(supervised.env?.CODEXIO_SUPERVISOR_PID).toBe('12345')
+    expect(source.env).toBeUndefined()
   })
 })
 
@@ -808,8 +1293,10 @@ async function startTestServer(applicationLifecycle: {
   })
 }): Promise<{
   baseUrl: string
+  webBaseUrl: string
   listener: HttpServer
 }> {
+  const webPort = await resolveAvailableServerPort('127.0.0.1', 18788)
   const config = ConfigSchema.parse({
     server: {
       token: testToken
@@ -824,7 +1311,9 @@ async function startTestServer(applicationLifecycle: {
     },
     channels: {
       web: {
-        enabled: true
+        enabled: true,
+        host: '127.0.0.1',
+        port: webPort
       }
     },
     workspace: {
@@ -843,14 +1332,19 @@ async function startTestServer(applicationLifecycle: {
   if (!address || typeof address === 'string') {
     throw new Error('server address not found')
   }
+  const baseUrl = `http://127.0.0.1:${address.port}`
+  const webBaseUrl = `http://127.0.0.1:${webPort}`
+  webBaseUrls.set(baseUrl, webBaseUrl)
+  await waitForHttpServer(webBaseUrl)
   return {
-    baseUrl: `http://127.0.0.1:${address.port}`,
+    baseUrl,
+    webBaseUrl,
     listener
   }
 }
 
 async function openWebSocket(baseUrl: string): Promise<WebSocket> {
-  const url = baseUrl.replace('http://', 'ws://').replace('https://', 'wss://')
+  const url = (webBaseUrls.get(baseUrl) ?? baseUrl).replace('http://', 'ws://').replace('https://', 'wss://')
   const socket = new WebSocket(`${url}/ws`)
   await new Promise<void>((resolve, reject) => {
     socket.on('message', (data) => {
@@ -868,7 +1362,7 @@ async function openRecordedWebSocket(baseUrl: string): Promise<{
   socket: WebSocket
   messages: Array<Record<string, unknown>>
 }> {
-  const url = baseUrl.replace('http://', 'ws://').replace('https://', 'wss://')
+  const url = (webBaseUrls.get(baseUrl) ?? baseUrl).replace('http://', 'ws://').replace('https://', 'wss://')
   const socket = new WebSocket(`${url}/ws`)
   const messages = recordRawWebSocket(socket)
   await new Promise<void>((resolve, reject) => {
@@ -883,6 +1377,24 @@ async function openRecordedWebSocket(baseUrl: string): Promise<{
   return {
     socket,
     messages
+  }
+}
+
+async function waitForHttpServer(baseUrl: string): Promise<void> {
+  const startedAt = Date.now()
+  for (;;) {
+    try {
+      const response = await fetch(baseUrl)
+      await response.text()
+      return
+    } catch {
+      if (Date.now() - startedAt > 4000) {
+        throw new Error(`http server timeout: ${baseUrl}`)
+      }
+      await new Promise((resolve) => {
+        setTimeout(resolve, 5)
+      })
+    }
   }
 }
 
@@ -940,4 +1452,8 @@ async function closeTestServer(listener: HttpServer): Promise<void> {
       resolve()
     })
   })
+}
+
+function pngBytes(): Buffer {
+  return Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lS3KgwAAAABJRU5ErkJggg==', 'base64')
 }

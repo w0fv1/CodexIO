@@ -1,46 +1,26 @@
 import { ImapFlow } from 'imapflow'
 import { simpleParser } from 'mailparser'
 import nodemailer, { Transporter } from 'nodemailer'
-import { Channel, ChannelMessage, ChannelStartInput } from './Channel.js'
+import { CodexioConfig } from '../ConfigService.js'
+import { Channel, ChannelInput, ChannelMessage, ChannelReceiveResult } from './Channel.js'
 import { Result } from '../value/Result.js'
 import { Logger } from '../component/Logger.js'
 import { createEmailMessagePayload, createEmailSender, isAllowedEmailSender } from './ChannelUtil.js'
 
-type EmailServerConfig = {
-  host?: string
-  port?: number
-  secure?: boolean
-  user?: string
-  password?: string
-}
-
-export type EmailChannelConfig = {
-  enabled?: boolean
-  user?: string
-  agent?: {
-    imap?: EmailServerConfig & {
-      mailbox?: string
-    }
-    smtp?: EmailServerConfig & {
-      from?: string
-    }
-  }
-  idle?: boolean
-  pollSeconds?: number
-}
+type EmailChannelConfig = CodexioConfig['channels']['email']
 
 export class EmailChannel implements Channel {
   readonly type = 'email'
-  private input?: ChannelStartInput
+  private config?: EmailChannelConfig
   private imap?: ImapFlow
   private smtp?: Transporter
   private polling = false
   private stopped = false
 
-  constructor(private readonly config?: EmailChannelConfig) {}
+  constructor(private readonly receive: (input: ChannelInput) => Promise<Result<ChannelReceiveResult>>) {}
 
-  start(input: ChannelStartInput): void {
-    this.input = input
+  start(config: CodexioConfig): void {
+    this.config = config.channels.email
     this.assertConfig()
     Logger.info('email channel starting', {
       user: this.config?.user,
@@ -68,8 +48,8 @@ export class EmailChannel implements Channel {
     if (!this.smtp) {
       return Result.fail('email smtp not ready')
     }
-    if (message.text.trim().length === 0) {
-      return Result.fail('text is required')
+    if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
+      return Result.fail('text or file is required')
     }
     const recipient = this.config?.user?.trim() ?? ''
     if (recipient.length === 0) {
@@ -87,7 +67,12 @@ export class EmailChannel implements Channel {
         from: createEmailSender(this.config?.agent?.smtp?.from, this.config?.agent?.smtp?.user),
         to: recipient,
         subject: payload.subject,
-        text: payload.text
+        text: payload.text,
+        attachments: message.files?.map((file) => ({
+          filename: file.name,
+          path: file.path,
+          contentType: file.mime
+        }))
       })
       Logger.info('email send completed', {
         role: message.role,
@@ -173,12 +158,14 @@ export class EmailChannel implements Channel {
           parsed.from?.text ? `From: ${parsed.from.text}` : '',
           parsed.text?.trim() ?? ''
         ].filter((item) => item.trim().length > 0).join('\n\n')
-        if (text.trim().length > 0 && this.input) {
+        if (text.trim().length > 0) {
           Logger.info('email message received', {
             uid: message.uid,
             length: text.length
           })
-          const result = await this.input.receive(text)
+          const result = await this.receive({
+            text
+          })
           if (result.isFailed) {
             Logger.warn('email message receive failed', {
               uid: message.uid,

@@ -59,6 +59,13 @@ export const configFieldDescriptors: ConfigFieldDescriptor[] = [
     effect: 'agentRestart'
   },
   {
+    path: 'agents.codex.bundled',
+    group: 'Agents',
+    label: 'Bundled Codex',
+    type: 'boolean',
+    effect: 'agentRestart'
+  },
+  {
     path: 'agents.claude.enabled',
     group: 'Agents',
     label: 'Claude',
@@ -77,6 +84,20 @@ export const configFieldDescriptors: ConfigFieldDescriptor[] = [
     group: 'Web',
     label: 'Enabled',
     type: 'boolean',
+    effect: 'appRestart'
+  },
+  {
+    path: 'channels.web.host',
+    group: 'Web',
+    label: 'Host',
+    type: 'string',
+    effect: 'appRestart'
+  },
+  {
+    path: 'channels.web.port',
+    group: 'Web',
+    label: 'Port',
+    type: 'number',
     effect: 'appRestart'
   },
   {

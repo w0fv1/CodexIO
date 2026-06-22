@@ -2,7 +2,7 @@ import { CodexioConfig } from '../ConfigService.js'
 import { Result } from '../value/Result.js'
 import { ClaudeAgent } from './ClaudeAgent.js'
 import { CodexAgent } from './CodexAgent.js'
-import { Agent, AgentLoginInProgressError } from './Agent.js'
+import { Agent, AgentInput, AgentLoginInProgressError } from './Agent.js'
 import { Logger } from '../component/Logger.js'
 
 const receiveConfirmationStarts = [
@@ -148,8 +148,8 @@ export class AgentManager {
     return this.startTask
   }
 
-  async receiveMessage(text: string): Promise<Result<AgentReceiveResult>> {
-    const task = this.receiveQueue.then(() => this.receiveMessageNow(text), () => this.receiveMessageNow(text))
+  async receiveMessage(input: AgentInput): Promise<Result<AgentReceiveResult>> {
+    const task = this.receiveQueue.then(() => this.receiveMessageNow(input), () => this.receiveMessageNow(input))
     this.receiveQueue = task.then(() => {}, () => {})
     return task
   }
@@ -160,9 +160,9 @@ export class AgentManager {
     return task
   }
 
-  private async receiveMessageNow(text: string): Promise<Result<AgentReceiveResult>> {
-    if (text.trim().length === 0) {
-      return Result.fail('text is required')
+  private async receiveMessageNow(input: AgentInput): Promise<Result<AgentReceiveResult>> {
+    if (input.text.trim().length === 0 && (!input.files || input.files.length === 0)) {
+      return Result.fail('text or file is required')
     }
     const started = await this.start()
     if (started.isFailed) {
@@ -178,9 +178,10 @@ export class AgentManager {
     try {
       Logger.info('agent receive started', {
         agent: this.agent.type,
-        length: text.length
+        length: input.text.length,
+        files: input.files?.length ?? 0
       })
-      await this.agent.receive(text)
+      await this.agent.receive(input)
       Logger.info('agent receive accepted', {
         agent: this.agent.type
       })
@@ -292,7 +293,14 @@ export class AgentManager {
         config: this.config,
         toolBaseUrl: this.toolBaseUrl,
         send,
-        system
+        system,
+        onLoginRequired: async (message) => {
+          await this.setState({
+            status: 'loginRequired',
+            agent: 'codex',
+            message
+          })
+        }
       })
     }
     if (agentName === 'claude') {

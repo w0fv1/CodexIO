@@ -19,15 +19,45 @@ To send a Markdown-capable text message to the external user, post JSON to Codex
 ```powershell
 $json = @{ text = "message text" } | ConvertTo-Json -Compress
 $body = [System.Text.Encoding]::UTF8.GetBytes($json)
-$headers = @{ Authorization = "Bearer ${token}" }
-Invoke-RestMethod -Method Post -Uri "${toolBaseUrl}/api/message" -ContentType "application/json; charset=utf-8" -Headers $headers -Body $body
+$apiUrl = if ($env:CODEXIO_API_URL) { $env:CODEXIO_API_URL } else { "${toolBaseUrl}" }
+$token = if ($env:CODEXIO_TOKEN) { $env:CODEXIO_TOKEN } else { "${token}" }
+$headers = @{ Authorization = "Bearer $token" }
+Invoke-RestMethod -Method Post -Uri "$apiUrl/api/message" -ContentType "application/json; charset=utf-8" -Headers $headers -Body $body
 ```
 
-The request body must contain exactly one text field:
+The request body may include text and local image file paths:
 
 ```json
-{ "text": "message text" }
+{
+  "text": "message text",
+  "files": [
+    { "path": "C:\\path\\to\\image.png" }
+  ]
+}
 ```
+
+Use `files` only for local image files that already exist on disk. Codexio imports those paths into its local file store before forwarding them to external channels.
+
+When sending a screenshot, preview, generated image, or any other local image back to the external user, do not put the image path in `text`. Put the path in `files`.
+
+Correct:
+
+```powershell
+$json = @{
+  text = "截图预览如下。"
+  files = @(
+    @{ path = "C:\\path\\to\\preview.png" }
+  )
+} | ConvertTo-Json -Depth 4 -Compress
+```
+
+Incorrect:
+
+```text
+截图预览 C:\\path\\to\\preview.png
+```
+
+Never send local images as Markdown image links such as `![](/api/files/...)`. Always send images through the `files` array.
 
 When using Windows PowerShell, always send the request body as UTF-8 bytes. Do not post a plain PowerShell string body for Chinese or other non-ASCII text.
 

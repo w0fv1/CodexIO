@@ -19,13 +19,22 @@ const AgentConfigSchema = z.object({
   enabled: z.boolean().default(true)
 })
 
+const CodexAgentConfigSchema = AgentConfigSchema.extend({
+  bundled: z.boolean().default(true)
+})
+
 const AgentsConfigSchema = z.object({
-  codex: AgentConfigSchema.optional(),
+  codex: CodexAgentConfigSchema.optional(),
   claude: AgentConfigSchema.optional()
 })
 
 const ChannelConfigSchema = z.object({
   enabled: z.boolean().default(true)
+})
+
+const WebChannelConfigSchema = ChannelConfigSchema.extend({
+  host: z.string().default('127.0.0.1'),
+  port: z.number().int().positive().default(8788)
 })
 
 const FeishuChannelConfigSchema = ChannelConfigSchema.extend({
@@ -93,7 +102,7 @@ const EmailChannelConfigSchema = ChannelConfigSchema.extend({
 })
 
 const ChannelsConfigSchema = z.object({
-  web: ChannelConfigSchema.optional(),
+  web: WebChannelConfigSchema.optional(),
   feishu: FeishuChannelConfigSchema.optional(),
   feishuWebhook: FeishuWebhookChannelConfigSchema.optional(),
   email: EmailChannelConfigSchema.optional()
@@ -173,7 +182,8 @@ export const ConfigSchema = z.object({
   }),
   agents: AgentsConfigSchema.default({
     codex: {
-      enabled: true
+      enabled: true,
+      bundled: true
     },
     claude: {
       enabled: false
@@ -256,7 +266,8 @@ export class ConfigService {
       },
       agents: {
         codex: {
-          enabled: true
+          enabled: true,
+          bundled: true
         },
         claude: {
           enabled: false
@@ -264,7 +275,9 @@ export class ConfigService {
       },
       channels: {
         web: {
-          enabled: true
+          enabled: true,
+          host: '127.0.0.1',
+          port: 8788
         },
         feishu: {
           enabled: false,
@@ -379,7 +392,8 @@ function migrateAgentsConfig(config: LegacyConfigDocument): ConfigReferenceObjec
   }
   return {
     codex: {
-      enabled: config.defaultAgent === 'codex'
+      enabled: config.defaultAgent === 'codex',
+      bundled: true
     },
     claude: {
       enabled: config.defaultAgent === 'claude'
