@@ -1,6 +1,6 @@
 import { execa } from 'execa'
 import { createRequire } from 'node:module'
-import { CodexioConfig } from '../ConfigService.js'
+import { CodexioConfig } from '../config/ConfigDefinition.js'
 import { Agent, AgentInput } from './Agent.js'
 import { createAgentEnv } from './AgentEnvironment.js'
 import { Logger } from '../component/Logger.js'

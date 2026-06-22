@@ -12,7 +12,7 @@ import { asFunction, asValue, createContainer } from 'awilix'
 import { ChannelManager } from './channel/ChannelManager.js'
 import { ChannelFile } from './channel/Channel.js'
 import { AgentManager } from './agent/AgentManager.js'
-import { CodexioConfig, ConfigSchema, validateCodexioConfig } from './ConfigService.js'
+import { CodexioConfig, ConfigSchema, configFieldDescriptors, validateCodexioConfig } from './config/ConfigDefinition.js'
 import { Configer } from './config/Configer.js'
 import { Result } from './value/Result.js'
 import { readCodexioVersion } from './AppMetadata.js'
@@ -24,9 +24,7 @@ import { CommandExecutor, UpdateHandler } from './controller/CommandExecutor.js'
 import { Logger } from './component/Logger.js'
 import { runSupervisor } from './component/Supervisor.js'
 import { ApplicationLifecycle, SupervisorApplicationLifecycle } from './component/ApplicationLifecycle.js'
-import { configFieldDescriptors, resolveConfigEffects } from './config/ConfigDescriptor.js'
 import { configPageHtml } from './config/ConfigPage.js'
-import { ConfigAction, configActionDescriptors, defaultConfigActions, executeConfigAction } from './config/ConfigAction.js'
 import {
   removeRuntimeServerState,
   resolveAvailableServerPort,
@@ -44,10 +42,6 @@ const AgentMessageBodySchema = z.object({
 }).refine((value) => value.text.trim().length > 0 || value.files.length > 0)
 
 const WebSocketFileParamsSchema = z.object({
-  id: z.string().min(1)
-})
-
-const ConfigActionParamsSchema = z.object({
   id: z.string().min(1)
 })
 
@@ -73,7 +67,6 @@ export type CodexioAppOptions = {
   configPath?: string
   configer?: Configer
   applicationLifecycle?: ApplicationLifecycle
-  configActions?: ConfigAction[]
 }
 
 export function createCodexioApp(config: CodexioConfig, options: CodexioAppOptions = {}): CodexioServer {
@@ -95,7 +88,6 @@ export function createCodexioApp(config: CodexioConfig, options: CodexioAppOptio
     update: async () => new UpdateInstaller(await configer.read(), configer.path).update()
   } : undefined
   const applicationLifecycle = options.applicationLifecycle ?? (options.configPath ? new SupervisorApplicationLifecycle(configer.path) : undefined)
-  const configActions = options.configActions ?? defaultConfigActions
   const container = createAppContainer({
     app,
     config,
@@ -107,6 +99,7 @@ export function createCodexioApp(config: CodexioConfig, options: CodexioAppOptio
   const channelManager = container.resolve('channelManager')
   const agentManager = container.resolve('agentManager')
   const fileStore = container.resolve('fileStore')
+  bindConfigSubscribers(configer, channelManager, agentManager, applicationLifecycle)
   let activeListener: HttpServer | undefined
 
   app.post('/api/files', upload.single('file'), async (request, response) => {
@@ -244,33 +237,10 @@ export function createCodexioApp(config: CodexioConfig, options: CodexioAppOptio
     try {
       response.json(Result.success({
         config: await configer.read(),
-        descriptor: configFieldDescriptors,
-        actions: configActionDescriptors(configActions)
+        descriptor: configFieldDescriptors
       }))
     } catch (error) {
       Logger.error('api config read failed', error)
-      response.json(Result.fromError(error))
-    }
-  })
-
-  app.post('/api/config/actions/:id', async (request, response) => {
-    try {
-      const params = ConfigActionParamsSchema.safeParse(request.params)
-      if (!params.success) {
-        response.status(404).json(Result.fail('config action not found', '404'))
-        return
-      }
-      const result = await executeConfigAction(params.data.id, {
-        config: await configer.read(),
-        fileStore
-      }, configActions)
-      if (result.code === '404') {
-        response.status(404).json(result)
-        return
-      }
-      response.json(result)
-    } catch (error) {
-      Logger.error('api config action failed', error)
       response.json(Result.fromError(error))
     }
   })
@@ -295,27 +265,13 @@ export function createCodexioApp(config: CodexioConfig, options: CodexioAppOptio
         return
       }
       const change = await configer.importText(body.data.text)
-      const effects = resolveConfigEffects(change.paths)
-      const applied = await applyConfigEffects(change.current, effects, channelManager, agentManager)
-      if (applied.isFailed) {
-        response.json(applied)
-        return
-      }
-      const message = formatConfigSavedMessage(change.paths, effects)
+      const message = formatConfigSavedMessage(change.paths)
       response.json(Result.success({
         config: change.current,
         changedPaths: change.paths,
-        effects,
         message
       }))
       await channelManager.sendSystem(message)
-      if (effects.includes('appRestart') && applicationLifecycle) {
-        setImmediate(() => {
-          void applicationLifecycle.restart().catch((error) => {
-            Logger.error('config restart failed', error)
-          })
-        })
-      }
     } catch (error) {
       Logger.error('api config import failed', error)
       response.json(Result.fromError(error))
@@ -330,27 +286,13 @@ export function createCodexioApp(config: CodexioConfig, options: CodexioAppOptio
         return
       }
       const change = await configer.patch(body.data.patch)
-      const effects = resolveConfigEffects(change.paths)
-      const applied = await applyConfigEffects(change.current, effects, channelManager, agentManager)
-      if (applied.isFailed) {
-        response.json(applied)
-        return
-      }
-      const message = formatConfigSavedMessage(change.paths, effects)
+      const message = formatConfigSavedMessage(change.paths)
       response.json(Result.success({
         config: change.current,
         changedPaths: change.paths,
-        effects,
         message
       }))
       await channelManager.sendSystem(message)
-      if (effects.includes('appRestart') && applicationLifecycle) {
-        setImmediate(() => {
-          void applicationLifecycle.restart().catch((error) => {
-            Logger.error('config restart failed', error)
-          })
-        })
-      }
     } catch (error) {
       Logger.error('api config patch failed', error)
       response.json(Result.fromError(error))
@@ -739,45 +681,50 @@ function waitForListening(listener: HttpServer): Promise<void> {
   })
 }
 
-async function applyConfigEffects(nextConfig: CodexioConfig, effects: string[], channelManager: ChannelManager, agentManager: AgentManager): Promise<Result<null>> {
-  if (effects.includes('appRestart')) {
-    return Result.success(null)
-  }
-  if (effects.includes('channelReconnect')) {
-    const applied = await channelManager.applyConfig(nextConfig)
+function bindConfigSubscribers(configer: Configer, channelManager: ChannelManager, agentManager: AgentManager, applicationLifecycle?: ApplicationLifecycle): void {
+  configer.subscribe((config) => config.channels, async (change) => {
+    const applied = await channelManager.applyConfig(change.current)
     if (applied.isFailed) {
-      return applied
+      await channelManager.sendSystem(`通道配置应用失败：${applied.message}`)
     }
-  }
-  if (effects.includes('agentRestart')) {
-    const applied = await agentManager.applyConfig(nextConfig)
+  })
+  configer.subscribe((config) => ({
+    agents: config.agents,
+    proxy: config.proxy,
+    workspace: config.workspace,
+    server: config.server
+  }), async (change) => {
+    const applied = await agentManager.applyConfig(change.current)
     if (applied.isFailed) {
-      return applied
+      await channelManager.sendSystem(`Agent 配置应用失败：${applied.message}`)
     }
+  })
+  if (applicationLifecycle) {
+    configer.subscribe((config) => ({
+      server: config.server,
+      web: config.channels.web
+    }), () => {
+      setImmediate(() => {
+        void applicationLifecycle.restart().then(async (restarted) => {
+          if (restarted.isFailed) {
+            await channelManager.sendSystem(`Codexio 重启失败：${restarted.message}`)
+          }
+        }).catch(async (error) => {
+          const failed = Result.fromError(error)
+          await channelManager.sendSystem(`Codexio 重启失败：${failed.message}`)
+        })
+      })
+    })
   }
-  return Result.success(null)
 }
 
-function formatConfigSavedMessage(paths: string[], effects: string[]): string {
+function formatConfigSavedMessage(paths: string[]): string {
   if (paths.length === 0) {
     return '配置已保存，没有检测到有效变更。'
   }
-  const effectText = effects.map((effect) => {
-    if (effect === 'appRestart') {
-      return '重启 Codexio'
-    }
-    if (effect === 'channelReconnect') {
-      return '重连通道'
-    }
-    if (effect === 'agentRestart') {
-      return '重启 agent'
-    }
-    return '立即生效'
-  }).join('、')
   return [
     '配置已保存。',
-    `已变更：${paths.join(', ')}`,
-    `动作：${effectText}`
+    `已变更：${paths.join(', ')}`
   ].join('\n')
 }
 

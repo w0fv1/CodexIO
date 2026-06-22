@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { delimiter, join, resolve } from 'node:path'
-import { CodexioConfig } from '../ConfigService.js'
+import { CodexioConfig } from '../config/ConfigDefinition.js'
 import { codexioRootPath } from '../AppMetadata.js'
 
 export const codexHomePath = join(codexioRootPath, '.codexio', 'codex')

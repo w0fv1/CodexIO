@@ -1,6 +1,6 @@
 import * as Lark from '@larksuiteoapi/node-sdk'
 import { z } from 'zod'
-import { CodexioConfig } from '../ConfigService.js'
+import { CodexioConfig } from '../config/ConfigDefinition.js'
 import { Channel, ChannelInput, ChannelMessage, ChannelReceiveResult } from './Channel.js'
 import { Result } from '../value/Result.js'
 import { Logger } from '../component/Logger.js'

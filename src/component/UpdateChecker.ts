@@ -1,4 +1,4 @@
-import { CodexioConfig } from '../ConfigService.js'
+import { CodexioConfig } from '../config/ConfigDefinition.js'
 import { readCodexioReleaseMetadata, readCodexioVersion } from '../AppMetadata.js'
 
 type LatestReleaseResponse = {

@@ -22,6 +22,7 @@ channels:
     appId: ''
     appSecret: ''
     chatId: ''
+    ws: ''
   feishuWebhook:
     enabled: false
     url: ''

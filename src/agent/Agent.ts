@@ -1,4 +1,4 @@
-import { CodexioConfig } from '../ConfigService.js'
+import { CodexioConfig } from '../config/ConfigDefinition.js'
 import { ChannelFile } from '../channel/Channel.js'
 
 export type AgentInput = {

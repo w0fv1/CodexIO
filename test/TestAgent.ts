@@ -1,4 +1,4 @@
-import { CodexioConfig } from '../src/ConfigService.js'
+import { CodexioConfig } from '../src/config/ConfigDefinition.js'
 import { Agent, AgentInput } from '../src/agent/Agent.js'
 
 export class TestAgent implements Agent {

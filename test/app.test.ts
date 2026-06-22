@@ -5,13 +5,12 @@ import { createServer as createNetServer } from 'node:net'
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ConfigSchema } from '../src/ConfigService.js'
+import { ConfigSchema } from '../src/config/ConfigDefinition.js'
 import { codexioRootPath } from '../src/AppMetadata.js'
 import { createCodexioApp, resolveAvailableServerPort } from '../src/index.js'
 import { createServeProcessSpec, readRunningSupervisorState, readSupervisorState, restartServer, stopServer, writeRuntimeServerState, writeSupervisorState } from '../src/component/ServerLifecycle.js'
 import { webPageHtml } from '../src/channel/WebPage.js'
 import { TestAgent } from './TestAgent.js'
-import { ConfigAction } from '../src/config/ConfigAction.js'
 
 const testToken = 'test-message-token'
 const webBaseUrls = new Map<string, string>()
@@ -398,24 +397,7 @@ describe('server', () => {
     })
     const server = createCodexioApp(config, {
       configPath,
-      agentFactory: () => new TestAgent(async () => {}),
-      configActions: [
-        {
-          descriptor: {
-            id: 'test.action',
-            group: 'Feishu',
-            label: '测试消息和图片'
-          },
-          run: async () => ({
-            code: '1',
-            message: 'no error',
-            data: {
-              message: '测试完成'
-            },
-            isFailed: false
-          })
-        } satisfies ConfigAction
-      ]
+      agentFactory: () => new TestAgent(async () => {})
     })
     const listener = server.listen(0)
     await new Promise<void>((resolve) => listener.once('listening', resolve))
@@ -429,35 +411,17 @@ describe('server', () => {
     expect(pageText).toContain('Codexio Config')
     expect(pageText).toContain('导入配置')
     expect(pageText).toContain('导出配置')
-    expect(pageText).toContain('/api/config/actions/')
+    expect(pageText).not.toContain('/api/config/actions/')
 
     const readResponse = await fetch(`${baseUrl}/api/config`)
     const readResult = await readResponse.json() as {
       isFailed: boolean
       data: {
         descriptor: Array<{ path: string }>
-        actions: Array<{ id: string, group: string, label: string }>
       }
     }
     expect(readResult.isFailed).toBe(false)
     expect(readResult.data.descriptor.some((item) => item.path === 'proxy.port')).toBe(true)
-    expect(readResult.data.actions).toContainEqual({
-      id: 'test.action',
-      group: 'Feishu',
-      label: '测试消息和图片'
-    })
-
-    const actionResponse = await fetch(`${baseUrl}/api/config/actions/test.action`, {
-      method: 'POST'
-    })
-    const actionResult = await actionResponse.json() as {
-      isFailed: boolean
-      data: {
-        message: string
-      }
-    }
-    expect(actionResult.isFailed).toBe(false)
-    expect(actionResult.data.message).toBe('测试完成')
 
     const patchResponse = await fetch(`${baseUrl}/api/config`, {
       method: 'PATCH',
@@ -478,12 +442,12 @@ describe('server', () => {
       isFailed: boolean
       data: {
         changedPaths: string[]
-        effects: string[]
+        message: string
       }
     }
     expect(patchResult.isFailed).toBe(false)
     expect(patchResult.data.changedPaths).toContain('proxy.port')
-    expect(patchResult.data.effects).toContain('agentRestart')
+    expect(patchResult.data.message).toContain('proxy.port')
     expect(await readFile(configPath, 'utf8')).toContain('port: 7891')
 
     const exportResponse = await fetch(`${baseUrl}/api/config/export`)
@@ -504,12 +468,12 @@ describe('server', () => {
       isFailed: boolean
       data: {
         changedPaths: string[]
-        effects: string[]
+        message: string
       }
     }
     expect(importResult.isFailed).toBe(false)
     expect(importResult.data.changedPaths).toContain('update.baseUrl')
-    expect(importResult.data.effects).toContain('hot')
+    expect(importResult.data.message).toContain('update.baseUrl')
     expect(await readFile(configPath, 'utf8')).toContain('baseUrl: https://import.example.test')
     await closeTestServer(listener)
   })

@@ -20,7 +20,7 @@ import { runtimeServerStatePath, supervisorStatePath } from '../src/component/Se
 import { createUpdaterScript } from '../src/component/UpdateInstaller.js'
 import { FileStore } from '../src/component/FileStore.js'
 import { Configer, diffConfigPaths } from '../src/config/Configer.js'
-import { ConfigSchema, ConfigService, normalizeWorkspacePath, validateCodexioConfig } from '../src/ConfigService.js'
+import { ConfigSchema, createDefaultConfig, normalizeWorkspacePath, validateCodexioConfig } from '../src/config/ConfigDefinition.js'
 import { Result } from '../src/value/Result.js'
 import { TestAgent } from './TestAgent.js'
 
@@ -1199,77 +1199,15 @@ describe('core', () => {
     await waiterExpectation
   })
 
-  it('migrates old config to one enabled agent', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'codexio-'))
-    const path = join(dir, 'config.yaml')
-    await writeFile(path, [
-      'server:',
-      '  host: 127.0.0.1',
-      '  port: 8787',
-      '  publicUrl: http://127.0.0.1:8787',
-      'proxy:',
-      '  enabled: true',
-      '  http: http://127.0.0.1:7890',
-      'defaultAgent: codex',
-      'agents:',
-      '  codex:',
-      '    enabled: true',
-      '  claude:',
-      '    enabled: true',
-      'workspaces:',
-      '  default:',
-      '    path: C:\\\\repo',
-      'routing:',
-      '  defaultWorkspace: default'
-    ].join('\n'), 'utf8')
-    const config = await new ConfigService(path).load()
-    expect(config.agents.codex?.enabled).toBe(true)
-    expect(config.agents.claude?.enabled).toBe(false)
-    expect(config.workspace.path).toBe('C:\\\\repo')
-    expect(config.proxy).toEqual({
-      enabled: true,
-      host: '127.0.0.1',
-      port: 7890
-    })
-  })
-
-  it('migrates old config selected workspace through typed legacy shape', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'codexio-'))
-    const path = join(dir, 'config.yaml')
-    await writeFile(path, [
-      'proxy:',
-      '  enabled: true',
-      '  http: http://proxy.local:8080',
-      'defaultAgent: claude',
-      'workspaces:',
-      '  default:',
-      '    path: C:\\\\default',
-      '  product:',
-      '    path: C:\\\\product',
-      'routing:',
-      '  defaultWorkspace: product'
-    ].join('\n'), 'utf8')
-    const config = await new ConfigService(path).load()
-    expect(config.agents.codex?.enabled).toBe(false)
-    expect(config.agents.claude?.enabled).toBe(true)
-    expect(config.workspace.path).toBe('C:\\\\product')
-    expect(config.proxy).toEqual({
-      enabled: true,
-      host: 'proxy.local',
-      port: 8080
-    })
-  })
-
   it('defaults workspace to codexio local workspace directory', () => {
-    const config = new ConfigService().createDefaultConfig()
+    const config = createDefaultConfig()
     expect(config.workspace.path).toContain(join('.codexio', 'workspace'))
   })
 
   it('creates default workspace when initializing new config', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'codexio-'))
     const path = join(dir, 'config.yaml')
-    const service = new ConfigService(path)
-    const config = await service.init()
+    const config = await new Configer(path).init()
     expect(existsSync(config.workspace.path)).toBe(true)
   })
 
@@ -1434,7 +1372,7 @@ describe('core', () => {
       '  path: codexio/.codexio/workspace'
     ].join('\n'), 'utf8')
 
-    const config = await new ConfigService(path).load()
+    const config = await new Configer(path).read()
 
     expect(config.workspace.path).toBe(join(dir, 'codexio', '.codexio', 'workspace'))
     expect(existsSync(config.workspace.path)).toBe(true)
@@ -1498,7 +1436,7 @@ describe('core', () => {
       '  path: ${proxy.host}'
     ].join('\n'), 'utf8')
     try {
-      const config = await new ConfigService(path).load()
+      const config = await new Configer(path).read()
       expect(config.server.token).toBe('env-token')
       expect(config.workspace.path).toBe(join(dir, 'proxy.local'))
     } finally {
@@ -1511,7 +1449,7 @@ describe('core', () => {
   })
 
   it('creates default config without proxy enabled', () => {
-    const config = new ConfigService().createDefaultConfig('C:\\repo')
+    const config = createDefaultConfig('C:\\repo')
     expect(config.proxy.enabled).toBe(false)
     expect(config.proxy.host).toBe('127.0.0.1')
     expect(config.proxy.port).toBe(7890)
@@ -1626,38 +1564,8 @@ describe('core', () => {
   })
 
   it('uses empty feishu ws by default', () => {
-    const config = new ConfigService().createDefaultConfig('C:\\repo')
+    const config = createDefaultConfig('C:\\repo')
     expect(config.channels.feishu?.ws).toBe('')
-  })
-
-  it('migrates legacy email config to user and agent mailbox', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'codexio-'))
-    const path = join(dir, 'config.yaml')
-    await writeFile(path, [
-      'channels:',
-      '  email:',
-      '    enabled: true',
-      '    imap:',
-      '      host: imap.example.test',
-      '      port: 993',
-      '      secure: true',
-      '      user: agent@example.test',
-      '      password: imap-password',
-      '      mailbox: INBOX',
-      '    smtp:',
-      '      host: smtp.example.test',
-      '      port: 465',
-      '      secure: true',
-      '      user: agent@example.test',
-      '      password: smtp-password',
-      '      from: agent@example.test',
-      '    to:',
-      '      - target@example.test'
-    ].join('\n'), 'utf8')
-    const config = await new ConfigService(path).load()
-    expect(config.channels.email?.user).toBe('target@example.test')
-    expect(config.channels.email?.agent.imap.user).toBe('agent@example.test')
-    expect(config.channels.email?.agent.smtp.user).toBe('agent@example.test')
   })
 
   it('uses smtp user as email address when sender is only a display name', () => {

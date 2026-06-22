@@ -7,7 +7,7 @@ import { argv, execPath, pid } from 'node:process'
 import { z } from 'zod'
 import { codexioRootPath } from '../AppMetadata.js'
 import { Configer } from '../config/Configer.js'
-import { CodexioConfig } from '../ConfigService.js'
+import { CodexioConfig } from '../config/ConfigDefinition.js'
 
 const require = createRequire(import.meta.url)
 

@@ -1,4 +1,4 @@
-import { CodexioConfig } from '../ConfigService.js'
+import { CodexioConfig } from '../config/ConfigDefinition.js'
 import { Result } from '../value/Result.js'
 import { Channel, ChannelInput, ChannelMessage, ChannelReceiveResult } from './Channel.js'
 import { EmailChannel } from './EmailChannel.js'

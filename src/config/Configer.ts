@@ -1,7 +1,7 @@
-import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
-import YAML from 'yaml'
-import { CodexioConfig, ConfigSchema, ConfigService, defaultConfigPath, parseCodexioConfigText } from '../ConfigService.js'
+import { mkdir } from 'node:fs/promises'
+import { resolve } from 'node:path'
+import { CodexioConfig, ConfigSchema, createDefaultConfig, defaultConfigPath, parseCodexioConfig } from './ConfigDefinition.js'
+import { YamlFile } from '../component/YamlFile.js'
 
 export type ConfigChange = {
   previous: CodexioConfig
@@ -36,73 +36,62 @@ type SelectedConfigListenerEntry<T> = {
 type ConfigSubscriptionEntry = ConfigListenerEntry | SelectedConfigListenerEntry<unknown>
 
 export class Configer {
-  private readonly service: ConfigService
   private readonly listeners = new Set<ConfigSubscriptionEntry>()
   readonly path: string
 
   constructor(path = defaultConfigPath) {
     this.path = resolve(path)
-    this.service = new ConfigService(this.path)
   }
 
   async read(): Promise<CodexioConfig> {
-    return this.service.load()
+    const config = await parseCodexioConfig(await YamlFile.read(this.path), this.path)
+    if (config.server.token.trim().length === 0) {
+      config.server.token = createDefaultConfig().server.token
+      await this.write(config)
+    }
+    return config
   }
 
   async init(force = false): Promise<CodexioConfig> {
-    return this.service.init(force)
+    if (!force) {
+      try {
+        const config = await this.read()
+        await this.write(config)
+        return config
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error
+        }
+      }
+    }
+    const config = createDefaultConfig()
+    await mkdir(config.workspace.path, {
+      recursive: true
+    })
+    await this.write(config)
+    return config
   }
 
   async replace(next: CodexioConfig): Promise<ConfigChange> {
     const previous = await this.read()
     const current = ConfigSchema.parse(next)
-    const paths = diffConfigPaths(previous, current)
-    await this.write(current)
-    const change = {
-      previous,
-      current,
-      paths
-    }
-    if (paths.length > 0) {
-      await this.notify(change)
-    }
-    return change
+    return this.saveChange(previous, current)
   }
 
   async exportText(): Promise<string> {
-    return YAML.stringify(await this.read())
+    return YamlFile.stringify(await this.read())
   }
 
   async importText(text: string): Promise<ConfigChange> {
     const previous = await this.read()
-    const current = await parseCodexioConfigText(text, this.path)
-    const paths = diffConfigPaths(previous, current)
-    await this.write(current)
-    const change = {
-      previous,
-      current,
-      paths
-    }
-    if (paths.length > 0) {
-      await this.notify(change)
-    }
-    return change
+    const current = await parseCodexioConfig(YamlFile.parse(text), this.path)
+    return this.saveChange(previous, current)
   }
 
   async patch(patch: Partial<CodexioConfig>): Promise<ConfigChange> {
     const previous = await this.read()
     const current = ConfigSchema.parse(deepMergeConfig(previous as unknown as ConfigObject, patch as unknown as ConfigObject))
-    const paths = diffConfigPaths(previous, current)
-    await this.write(current)
-    const change = {
-      previous,
-      current,
-      paths
-    }
-    if (paths.length > 0) {
-      await this.notify(change)
-    }
-    return change
+    return this.saveChange(previous, current)
   }
 
   subscribe(listener: ConfigListener): ConfigSubscription
@@ -124,20 +113,22 @@ export class Configer {
     }
   }
 
-  private async write(config: CodexioConfig): Promise<void> {
-    await mkdir(dirname(this.path), {
-      recursive: true
-    })
-    const tempPath = join(dirname(this.path), `.config-${Date.now()}-${process.pid}.tmp`)
-    try {
-      await writeFile(tempPath, YAML.stringify(ConfigSchema.parse(config)), 'utf8')
-      await rename(tempPath, this.path)
-    } catch (error) {
-      await rm(tempPath, {
-        force: true
-      })
-      throw error
+  private async saveChange(previous: CodexioConfig, current: CodexioConfig): Promise<ConfigChange> {
+    const paths = diffConfigPaths(previous, current)
+    await this.write(current)
+    const change = {
+      previous,
+      current,
+      paths
     }
+    if (paths.length > 0) {
+      await this.notify(change)
+    }
+    return change
+  }
+
+  private async write(config: CodexioConfig): Promise<void> {
+    await YamlFile.write(this.path, ConfigSchema.parse(config))
   }
 
   private async notify(change: ConfigChange): Promise<void> {

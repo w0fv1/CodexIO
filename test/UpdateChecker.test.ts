@@ -2,7 +2,7 @@ import { rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { codexioRootPath, readCodexioVersion } from '../src/AppMetadata.js'
-import { ConfigSchema } from '../src/ConfigService.js'
+import { ConfigSchema } from '../src/config/ConfigDefinition.js'
 import { checkCodexioUpdate } from '../src/component/UpdateChecker.js'
 
 const releasePath = join(codexioRootPath, '.codexio', 'release.json')
