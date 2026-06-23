@@ -1,5 +1,8 @@
-import { CodexioConfig } from '../config/ConfigDefinition.js'
-import { readCodexioReleaseMetadata, readCodexioVersion } from '../AppMetadata.js'
+import { inject, injectable } from 'inversify'
+import { ChannelManager } from '../channel/ChannelManager.js'
+import { Logger } from './Logger.js'
+import { Configer } from './Configer.js'
+import { CodexioMetadata } from './CodexioMetadata.js'
 
 type LatestReleaseResponse = {
   isf?: unknown
@@ -15,38 +18,59 @@ type LatestRelease = {
   managePath: string
 }
 
-export async function checkCodexioUpdate(config: CodexioConfig): Promise<string | undefined> {
-  if (!config.update.enabled) {
-    return undefined
+@injectable()
+export class UpdateChecker {
+  constructor(
+    @inject(Configer) private readonly configer: Configer,
+    @inject(CodexioMetadata) private readonly metadata: CodexioMetadata,
+    @inject(ChannelManager) private readonly channelManager: ChannelManager
+  ) {}
+
+  start(): void {
+    void this.check()
+      .then(async (message) => {
+        if (message) {
+          await this.channelManager.sendSystem(message)
+        }
+      })
+      .catch((error) => {
+        Logger.error('update check failed', error)
+      })
   }
-  const localVersion = readCodexioVersion()
-  const releaseMetadata = readCodexioReleaseMetadata()
-  if (!releaseMetadata.platform) {
-    return undefined
+
+  async check(): Promise<string | undefined> {
+    if (!await this.configer.get('update.enabled')) {
+      return undefined
+    }
+    const localVersion = this.metadata.readVersion()
+    const releaseMetadata = this.metadata.readReleaseMetadata()
+    if (!releaseMetadata.platform) {
+      return undefined
+    }
+    const baseUrl = (await this.configer.get('update.baseUrl')).replace(/\/+$/, '')
+    const url = new URL(`/api/download/release/codexio/latest`, `${baseUrl}/`)
+    url.searchParams.set('platform', releaseMetadata.platform)
+    const response = await fetch(url)
+    if (!response.ok) {
+      throw new Error(`update check failed: ${response.status}`)
+    }
+    const body = await response.json() as LatestReleaseResponse
+    if (body.isf || !body.data || typeof body.data !== 'object') {
+      return undefined
+    }
+    const latest = parseLatestRelease(body.data)
+    if (compareVersion(latest.version, localVersion) <= 0) {
+      return undefined
+    }
+    const manageUrl = new URL(latest.managePath, `${baseUrl}/`).toString()
+    return [
+      `Codexio 有新版本 ${latest.version}，当前版本 ${localVersion}。`,
+      `平台：${latest.platform}`,
+      `文件：${latest.fileName}`,
+      '发送 $update 或 ￥update 自动升级。',
+      `后台发布页面：${manageUrl}`
+    ].join('\n')
   }
-  const baseUrl = config.update.baseUrl.replace(/\/+$/, '')
-  const url = new URL(`/api/download/release/codexio/latest`, `${baseUrl}/`)
-  url.searchParams.set('platform', releaseMetadata.platform)
-  const response = await fetch(url)
-  if (!response.ok) {
-    throw new Error(`update check failed: ${response.status}`)
-  }
-  const body = await response.json() as LatestReleaseResponse
-  if (body.isf || !body.data || typeof body.data !== 'object') {
-    return undefined
-  }
-  const latest = parseLatestRelease(body.data)
-  if (compareVersion(latest.version, localVersion) <= 0) {
-    return undefined
-  }
-  const manageUrl = new URL(latest.managePath, `${baseUrl}/`).toString()
-  return [
-    `Codexio 有新版本 ${latest.version}，当前版本 ${localVersion}。`,
-    `平台：${latest.platform}`,
-    `文件：${latest.fileName}`,
-    '发送 $update 或 ￥update 自动升级。',
-    `后台发布页面：${manageUrl}`
-  ].join('\n')
 }
 
 function parseLatestRelease(value: object): LatestRelease {

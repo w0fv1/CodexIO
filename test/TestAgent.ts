@@ -1,20 +1,25 @@
-import { CodexioConfig } from '../src/config/ConfigDefinition.js'
-import { Agent, AgentInput } from '../src/agent/Agent.js'
+import { Agent } from '../src/agent/Agent.js'
+import { Message } from '../src/value/Message.js'
 
 export class TestAgent implements Agent {
   readonly type = 'test'
 
-  constructor(private readonly send: (text: string) => Promise<void>) {}
+  constructor(private readonly send: (message: Message) => Promise<void>) {}
 
   async login(): Promise<void> {}
 
-  async start(_config: CodexioConfig): Promise<void> {}
+  async start(): Promise<void> {}
 
-  async receive(input: AgentInput): Promise<void> {
-    await this.send(`test: ${input.text}`)
+  async receive(input: Message): Promise<void> {
+    await this.send({
+      ioThreadId: input.ioThreadId,
+      role: 'agent',
+      text: `test: ${input.text}`,
+      createdAt: Date.now()
+    })
   }
 
-  async clear(): Promise<void> {}
+  async clear(_ioThreadId: string): Promise<void> {}
 
   async stop(): Promise<void> {}
 }

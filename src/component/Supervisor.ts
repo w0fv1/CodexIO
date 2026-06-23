@@ -2,17 +2,18 @@ import { ChildProcess } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { IncomingMessage, Server as HttpServer, ServerResponse, createServer } from 'node:http'
 import { pid } from 'node:process'
-import { validateCodexioConfig } from '../config/ConfigDefinition.js'
-import { Configer } from '../config/Configer.js'
+import { inject, injectable } from 'inversify'
 import { Result } from '../value/Result.js'
 import { Logger } from './Logger.js'
+import { CodexioMetadata } from './CodexioMetadata.js'
+import { Configer } from './Configer.js'
 import {
   readRunningSupervisorState,
   readRuntimeServerState,
   removeRuntimeServerState,
   removeSupervisorState,
   spawnServeProcess,
-  stopServer,
+  SupervisorClient,
   waitForRuntimeServerStarted,
   waitForRuntimeServerStopped,
   writeSupervisorState
@@ -27,24 +28,38 @@ export type SupervisorOptions = {
 
 type SupervisorAction = 'restart' | 'stop'
 
-export async function runSupervisor(options: SupervisorOptions = {}): Promise<void> {
-  const configer = new Configer(options.configPath)
-  const config = options.initConfig ? await configer.init(false) : await configer.read()
-  validateCodexioConfig(config)
-  const running = await readRunningSupervisorState(configer.path)
-  if (running) {
-    if (!options.replaceRunning) {
-      throw new Error(`codexio supervisor is already running on ${running.host}:${running.port}`)
+@injectable()
+export class SupervisorService {
+  constructor(@inject(CodexioMetadata) private readonly metadata: CodexioMetadata) {}
+
+  async run(options: SupervisorOptions = {}): Promise<void> {
+    const configer = new Configer(options.configPath ? new CodexioMetadata({
+      rootPath: this.metadata.rootPath,
+      configPath: options.configPath
+    }) : this.metadata)
+    if (options.initConfig) {
+      await configer.init(false)
+    } else {
+      await configer.validate()
     }
-    Logger.info('codexio supervisor replacing running instance', {
-      host: running.host,
-      port: running.port,
-      pid: running.pid
-    })
-    await stopServer(configer.path)
+    if (options.autoPort) {
+      await configer.set('server.autoPort', true)
+    }
+    const running = await readRunningSupervisorState(configer.path)
+    if (running) {
+      if (!options.replaceRunning) {
+        throw new Error(`codexio supervisor is already running on ${running.host}:${running.port}`)
+      }
+      Logger.info('codexio supervisor replacing running instance', {
+        host: running.host,
+        port: running.port,
+        pid: running.pid
+      })
+      await new SupervisorClient(configer).stop()
+    }
+    const supervisor = new Supervisor(configer.path, this.metadata.rootPath, await configer.get('server.token'))
+    await supervisor.run()
   }
-  const supervisor = new Supervisor(configer.path, config.server.token, Boolean(options.autoPort))
-  await supervisor.run()
 }
 
 class Supervisor {
@@ -58,8 +73,8 @@ class Supervisor {
 
   constructor(
     private readonly configPath: string,
-    private readonly serverToken: string,
-    private readonly autoPort: boolean
+    private readonly rootPath: string,
+    private readonly serverToken: string
   ) {}
 
   async run(): Promise<void> {
@@ -160,8 +175,7 @@ class Supervisor {
     if (this.child) {
       return
     }
-    const child = spawnServeProcess(this.configPath, {
-      autoPort: this.autoPort,
+    const child = spawnServeProcess(this.configPath, this.rootPath, {
       supervisorPid: pid
     })
     this.child = child

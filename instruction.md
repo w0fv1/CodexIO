@@ -17,18 +17,22 @@ The external user is connected through Codexio. Send concise Markdown updates as
 To send a Markdown-capable text message to the external user, post JSON to Codexio:
 
 ```powershell
-$json = @{ text = "message text" } | ConvertTo-Json -Compress
+$json = @{
+  ioThreadId = "${ioThreadId}"
+  text = "message text"
+} | ConvertTo-Json -Compress
 $body = [System.Text.Encoding]::UTF8.GetBytes($json)
 $apiUrl = if ($env:CODEXIO_API_URL) { $env:CODEXIO_API_URL } else { "${toolBaseUrl}" }
 $token = if ($env:CODEXIO_TOKEN) { $env:CODEXIO_TOKEN } else { "${token}" }
 $headers = @{ Authorization = "Bearer $token" }
-Invoke-RestMethod -Method Post -Uri "$apiUrl/api/message" -ContentType "application/json; charset=utf-8" -Headers $headers -Body $body
+Invoke-RestMethod -Method Post -Uri "$apiUrl/api/agent/message" -ContentType "application/json; charset=utf-8" -Headers $headers -Body $body
 ```
 
 The request body may include text and local image file paths:
 
 ```json
 {
+  "ioThreadId": "${ioThreadId}",
   "text": "message text",
   "files": [
     { "path": "C:\\path\\to\\image.png" }
@@ -44,6 +48,7 @@ Correct:
 
 ```powershell
 $json = @{
+  ioThreadId = "${ioThreadId}"
   text = "截图预览如下。"
   files = @(
     @{ path = "C:\\path\\to\\preview.png" }

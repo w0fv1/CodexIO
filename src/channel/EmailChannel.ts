@@ -1,14 +1,19 @@
 import { ImapFlow } from 'imapflow'
 import { simpleParser } from 'mailparser'
 import nodemailer, { Transporter } from 'nodemailer'
-import { CodexioConfig } from '../config/ConfigDefinition.js'
-import { Channel, ChannelInput, ChannelMessage, ChannelReceiveResult } from './Channel.js'
+import { inject, injectable } from 'inversify'
+import { CodexioConfig } from '../value/ConfigDefinition.js'
+import { Message } from '../value/Message.js'
+import { Channel, ChannelReceiveResult } from './Channel.js'
 import { Result } from '../value/Result.js'
 import { Logger } from '../component/Logger.js'
-import { createEmailMessagePayload, createEmailSender, isAllowedEmailSender } from './ChannelUtil.js'
+import { ThreadBinder } from '../value/ThreadBinder.js'
+import { ChannelReceiveId } from '../ComponentIdentifier.js'
+import { Configer } from '../component/Configer.js'
 
 type EmailChannelConfig = CodexioConfig['channels']['email']
 
+@injectable()
 export class EmailChannel implements Channel {
   readonly type = 'email'
   private config?: EmailChannelConfig
@@ -16,12 +21,24 @@ export class EmailChannel implements Channel {
   private smtp?: Transporter
   private polling = false
   private stopped = false
+  private readonly threads = new ThreadBinder()
 
-  constructor(private readonly receive: (input: ChannelInput) => Promise<Result<ChannelReceiveResult>>) {}
+  constructor(
+    @inject(Configer) private readonly configer: Configer,
+    @inject(ChannelReceiveId) private readonly receive: (message: Message) => Promise<Result<ChannelReceiveResult>>
+  ) {}
 
-  start(config: CodexioConfig): void {
-    this.config = config.channels.email
-    this.assertConfig()
+  async start(): Promise<void> {
+    this.config = await this.configer.get('channels.email')
+    if (!this.config?.user) {
+      throw new Error('email user is required')
+    }
+    if (!this.config.agent?.imap?.host || !this.config.agent.imap.user || !this.config.agent.imap.password) {
+      throw new Error('email imap config is required')
+    }
+    if (!this.config.agent.smtp?.host || !this.config.agent.smtp.user || !this.config.agent.smtp.password) {
+      throw new Error('email smtp config is required')
+    }
     Logger.info('email channel starting', {
       user: this.config?.user,
       imapHost: this.config?.agent?.imap?.host,
@@ -41,7 +58,7 @@ export class EmailChannel implements Channel {
     })
   }
 
-  async send(message: ChannelMessage): Promise<Result<null>> {
+  async send(message: Message): Promise<Result<null>> {
     if (message.role === 'user' && message.source === this.type) {
       return Result.success(null)
     }
@@ -55,19 +72,42 @@ export class EmailChannel implements Channel {
     if (recipient.length === 0) {
       return Result.fail('email user is required')
     }
-    const payload = createEmailMessagePayload(message)
+    let text = message.text
+    if (message.role === 'system' && text === 'clear') {
+      text = '已开始新对话'
+    }
+    const fileText = (message.files ?? [])
+      .map((file) => file.url ?? file.path)
+      .filter((value) => value.trim().length > 0)
+      .join('\n')
+    if (text.trim().length > 0 && fileText.length > 0) {
+      text = `${text}\n\n${fileText}`
+    } else if (fileText.length > 0) {
+      text = fileText
+    }
+    const subject = message.role === 'agent' ? 'Agent' : message.role === 'user' ? 'User' : 'System'
+    const trimmedFrom = this.config?.agent?.smtp?.from?.trim()
+    const trimmedUser = this.config?.agent?.smtp?.user?.trim()
+    const from = trimmedFrom && trimmedFrom.includes('@')
+      ? trimmedFrom
+      : trimmedFrom && trimmedUser && trimmedUser.includes('@')
+        ? {
+            name: trimmedFrom,
+            address: trimmedUser
+          }
+        : trimmedUser || trimmedFrom
     try {
       Logger.info('email send started', {
         role: message.role,
         source: message.source ?? null,
-        subject: payload.subject,
-        length: payload.text.length
+        subject,
+        length: text.length
       })
       await this.smtp.sendMail({
-        from: createEmailSender(this.config?.agent?.smtp?.from, this.config?.agent?.smtp?.user),
+        from,
         to: recipient,
-        subject: payload.subject,
-        text: payload.text,
+        subject,
+        text,
         attachments: message.files?.map((file) => ({
           filename: file.name,
           path: file.path,
@@ -76,7 +116,7 @@ export class EmailChannel implements Channel {
       })
       Logger.info('email send completed', {
         role: message.role,
-        subject: payload.subject
+        subject
       })
       return Result.success(null)
     } catch (error) {
@@ -143,8 +183,21 @@ export class EmailChannel implements Channel {
           continue
         }
         const parsed = await simpleParser(message.source)
+        const references = Array.isArray(parsed.references) ? parsed.references : typeof parsed.references === 'string' ? [
+          parsed.references
+        ] : []
+        const root = references.find((item) => item.trim().length > 0) ?? parsed.inReplyTo ?? parsed.messageId ?? ''
+        const mailbox = this.config?.agent?.imap?.user ?? this.config?.user ?? 'mailbox'
+        const emailKeys = [
+          root.trim().length > 0 ? `${mailbox}:root:${root.trim()}` : '',
+          parsed.messageId?.trim() ? `${mailbox}:message:${parsed.messageId.trim()}` : ''
+        ].filter((value) => value.length > 0)
+        const ioThreadId = this.threads.resolveOrCreate(emailKeys.length > 0 ? emailKeys : [
+          `${mailbox}:mailbox`
+        ])
         const senderList = parsed.from?.value.map((address) => address.address).filter((address): address is string => Boolean(address)) ?? []
-        if (!isAllowedEmailSender(senderList, this.config?.user)) {
+        const allowedSender = this.config?.user?.trim().toLowerCase()
+        if (!allowedSender || !senderList.some((item) => item.trim().toLowerCase() === allowedSender)) {
           Logger.info('email message ignored', {
             from: senderList
           })
@@ -164,7 +217,11 @@ export class EmailChannel implements Channel {
             length: text.length
           })
           const result = await this.receive({
-            text
+            ioThreadId,
+            role: 'user',
+            text,
+            createdAt: Date.now(),
+            source: this.type
           })
           if (result.isFailed) {
             Logger.warn('email message receive failed', {
@@ -172,6 +229,7 @@ export class EmailChannel implements Channel {
               message: result.message
             })
             await this.send({
+              ioThreadId,
               role: 'system',
               text: result.message,
               createdAt: Date.now(),
@@ -214,17 +272,5 @@ export class EmailChannel implements Channel {
       mailbox: this.config?.agent?.imap?.mailbox ?? 'INBOX'
     })
     return this.imap
-  }
-
-  private assertConfig(): void {
-    if (!this.config?.user) {
-      throw new Error('email user is required')
-    }
-    if (!this.config.agent?.imap?.host || !this.config.agent.imap.user || !this.config.agent.imap.password) {
-      throw new Error('email imap config is required')
-    }
-    if (!this.config.agent.smtp?.host || !this.config.agent.smtp.user || !this.config.agent.smtp.password) {
-      throw new Error('email smtp config is required')
-    }
   }
 }

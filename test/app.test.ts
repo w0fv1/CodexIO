@@ -1,25 +1,45 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { WebSocket } from 'ws'
 import { Server as HttpServer } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ConfigSchema } from '../src/config/ConfigDefinition.js'
-import { codexioRootPath } from '../src/AppMetadata.js'
-import { createCodexioApp, resolveAvailableServerPort } from '../src/index.js'
-import { createServeProcessSpec, readRunningSupervisorState, readSupervisorState, restartServer, stopServer, writeRuntimeServerState, writeSupervisorState } from '../src/component/ServerLifecycle.js'
+import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
+import { resolveAvailableServerPort } from '../src/util/Network.js'
+import { createServeProcessSpec, readRunningSupervisorState, readSupervisorState, SupervisorClient, writeRuntimeServerState, writeSupervisorState } from '../src/component/ServerLifecycle.js'
 import { webPageHtml } from '../src/channel/WebPage.js'
 import { TestAgent } from './TestAgent.js'
+import { Logger } from '../src/component/Logger.js'
+import { Configer } from '../src/component/Configer.js'
+import { Result } from '../src/value/Result.js'
+import { ChannelManager } from '../src/channel/ChannelManager.js'
+import { AgentManager } from '../src/agent/AgentManager.js'
+import { CodexioApiController } from '../src/controller/CodexioApiController.js'
+import { Agent } from '../src/agent/Agent.js'
+import { FileStore } from '../src/component/FileStore.js'
+import { CommandExecutor } from '../src/controller/CommandExecutor.js'
+import { UpdateService } from '../src/component/UpdateService.js'
+import { UpdateInstaller } from '../src/component/UpdateInstaller.js'
+import { WebChannel } from '../src/channel/WebChannel.js'
+import { FeishuChannel } from '../src/channel/FeishuChannel.js'
+import { FeishuWebhookChannel } from '../src/channel/FeishuWebhookChannel.js'
+import { EmailChannel } from '../src/channel/EmailChannel.js'
+import { EventBus } from '../src/component/EventBus.js'
+import { AppEvent } from '../src/value/Event.js'
 
 const testToken = 'test-message-token'
-const webBaseUrls = new Map<string, string>()
+const testMetadata = new CodexioMetadata()
+const codexioRootPath = testMetadata.rootPath
 
 describe('server', () => {
   it('serves a compact Codexio web chat page', () => {
     expect(webPageHtml).toContain('Codexio')
     expect(webPageHtml).toContain('id="messages"')
     expect(webPageHtml).toContain('id="form"')
+    expect(webPageHtml).toContain('id="threads"')
+    expect(webPageHtml).toContain('sidebarOpen')
+    expect(webPageHtml).toContain('activeThreadTitle()')
     expect(webPageHtml).toContain('https://unpkg.com/@tailwindcss/browser@4')
     expect(webPageHtml).toContain('https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js')
     expect(webPageHtml).toContain('event.shiftKey')
@@ -33,7 +53,7 @@ describe('server', () => {
     expect(webPageHtml).not.toContain('WebSocket 连接异常')
     expect(webPageHtml).not.toContain('>重连</button>')
     expect(webPageHtml).toContain('href="/config"')
-    expect(webPageHtml).toContain("if (message.type === 'system')")
+    expect(webPageHtml).toContain("if (message.role === 'system')")
     expect(webPageHtml).toContain('whitespace-pre-wrap break-words')
     expect(webPageHtml).toContain('@paste="handlePaste($event)"')
     expect(webPageHtml).toContain('@drop.prevent="handleDrop($event)"')
@@ -42,18 +62,34 @@ describe('server', () => {
     expect(webPageHtml).toContain('title="上传文件"')
     expect(webPageHtml).toContain('isImageFile(file)')
     expect(webPageHtml).toContain('formatFileSize')
+    expect(webPageHtml).not.toContain('overflow-x-auto')
     expect(webPageHtml).toContain('m16 6-8.4 8.4')
     expect(webPageHtml).not.toContain('<circle cx="9" cy="9" r="2"/>')
     expect(webPageHtml).not.toContain('m21 15-3.1-3.1')
     const userTemplateIndex = webPageHtml.indexOf('<template x-if="message.type === \'user\'">')
-    const userActionIndex = webPageHtml.indexOf('class="message-actions shrink-0 pt-1"', userTemplateIndex)
-    const userBubbleIndex = webPageHtml.indexOf('class="user-bubble', userTemplateIndex)
+    const userActionIndex = webPageHtml.indexOf('class="message-actions', userTemplateIndex)
+    const userBubbleIndex = webPageHtml.indexOf('class="min-w-0 rounded-2xl rounded-br-md', userTemplateIndex)
     expect(userActionIndex).toBeGreaterThan(userTemplateIndex)
     expect(userActionIndex).toBeLessThan(userBubbleIndex)
     const agentTemplateIndex = webPageHtml.indexOf('<template x-if="message.type === \'agent\'">')
-    const agentBubbleIndex = webPageHtml.indexOf('class="agent-bubble', agentTemplateIndex)
-    const agentActionIndex = webPageHtml.indexOf('class="message-actions shrink-0 pt-1"', agentTemplateIndex)
+    const agentBubbleIndex = webPageHtml.indexOf('class="min-w-0 break-words rounded-2xl rounded-bl-md', agentTemplateIndex)
+    const agentActionIndex = webPageHtml.indexOf('class="message-actions', agentTemplateIndex)
     expect(agentActionIndex).toBeGreaterThan(agentBubbleIndex)
+  })
+
+  it('logs the web page url when the web channel starts', async () => {
+    const info = vi.spyOn(Logger, 'info').mockImplementation(() => {})
+    const { listener } = await startTestServer()
+    try {
+      expect(info).toHaveBeenCalledWith('web channel ready', {
+        host: '127.0.0.1',
+        port: 8787,
+        url: 'http://127.0.0.1:8787'
+      })
+    } finally {
+      info.mockRestore()
+      await closeTestServer(listener)
+    }
   })
 
   it('receives web text', async () => {
@@ -61,20 +97,67 @@ describe('server', () => {
     const socket = await openWebSocket(baseUrl)
     const messages = recordWebSocket(socket)
     socket.send(JSON.stringify({
+      ioThreadId: 'io-thread',
       text: 'hello'
     }))
     await waitForWebSocketMessages(messages, 3)
     expect(messages[0]).toMatchObject({
-      type: 'user',
+      event: 'message',
+      role: 'user',
+      ioThreadId: 'io-thread',
       text: 'hello'
     })
     expect(messages[1]).toMatchObject({
-      type: 'system',
+      event: 'message',
+      role: 'system',
       text: expect.any(String)
     })
     expect(messages[2]).toMatchObject({
-      type: 'agent',
+      event: 'message',
+      role: 'agent',
+      ioThreadId: 'io-thread',
       text: 'test: hello'
+    })
+    await closeWebSocket(socket)
+    await closeTestServer(listener)
+  })
+
+  it('routes web messages by explicit thread id', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    const socket = await openWebSocket(baseUrl)
+    const messages = recordWebSocket(socket)
+    socket.send(JSON.stringify({
+      ioThreadId: 'io-thread-a',
+      text: 'first'
+    }))
+    socket.send(JSON.stringify({
+      ioThreadId: 'io-thread-b',
+      text: 'second'
+    }))
+    await waitForWebSocketMessages(messages, 6)
+    expect(messages.find((message) => message.ioThreadId === 'io-thread-a' && message.role === 'user')).toMatchObject({
+      event: 'message',
+      role: 'user',
+      ioThreadId: 'io-thread-a',
+      text: 'first'
+    })
+    expect(messages.find((message) => message.ioThreadId === 'io-thread-a' && message.role === 'agent')).toMatchObject({
+      event: 'message',
+      role: 'agent',
+      ioThreadId: 'io-thread-a',
+      text: 'test: first'
+    })
+    expect(messages.find((message) => message.ioThreadId === 'io-thread-b' && message.role === 'user')).toMatchObject({
+      event: 'message',
+      role: 'user',
+      ioThreadId: 'io-thread-b',
+      text: 'second'
+    })
+    expect(messages.find((message) => message.ioThreadId === 'io-thread-b' && message.role === 'agent')).toMatchObject({
+      event: 'message',
+      role: 'agent',
+      ioThreadId: 'io-thread-b',
+      text: 'test: second'
     })
     await closeWebSocket(socket)
     await closeTestServer(listener)
@@ -114,6 +197,7 @@ describe('server', () => {
       url: `/api/files/${upload.data.file.id}`
     })
     socket.send(JSON.stringify({
+      ioThreadId: 'io-thread-image',
       text: 'image input',
       files: [
         upload.data.file.id
@@ -121,7 +205,9 @@ describe('server', () => {
     }))
     await waitForWebSocketMessages(messages, 3)
     expect(messages[0]).toMatchObject({
-      type: 'user',
+      event: 'message',
+      role: 'user',
+      ioThreadId: 'io-thread-image',
       text: 'image input',
       files: [
         {
@@ -132,7 +218,9 @@ describe('server', () => {
       ]
     })
     expect(messages[2]).toMatchObject({
-      type: 'agent',
+      event: 'message',
+      role: 'agent',
+      ioThreadId: 'io-thread-image',
       text: 'test: image input'
     })
     await closeWebSocket(socket)
@@ -173,6 +261,7 @@ describe('server', () => {
       url: `/api/files/${upload.data.file.id}`
     })
     socket.send(JSON.stringify({
+      ioThreadId: 'io-thread-file',
       text: 'file input',
       files: [
         upload.data.file.id
@@ -180,7 +269,9 @@ describe('server', () => {
     }))
     await waitForWebSocketMessages(messages, 3)
     expect(messages[0]).toMatchObject({
-      type: 'user',
+      event: 'message',
+      role: 'user',
+      ioThreadId: 'io-thread-file',
       text: 'file input',
       files: [
         {
@@ -202,24 +293,28 @@ describe('server', () => {
     const socket = await openWebSocket(baseUrl)
     const messages = recordWebSocket(socket)
     socket.send(JSON.stringify({
+      ioThreadId: 'io-thread-clear',
       text: 'first'
     }))
     await waitForWebSocketMessages(messages, 3)
     socket.send(JSON.stringify({
+      ioThreadId: 'io-thread-clear',
       text: '$ clear'
     }))
     await waitForWebSocketMessages(messages, 4)
     const clear = messages[3]
     socket.send(JSON.stringify({
+      ioThreadId: 'io-thread-clear',
       text: 'second'
     }))
     await waitForWebSocketMessages(messages, 7)
     const second = messages[6]
     expect(clear).toMatchObject({
-      type: 'clear'
+      event: 'clear'
     })
     expect(second).toMatchObject({
-      type: 'agent',
+      event: 'message',
+      role: 'agent',
       text: 'test: second'
     })
     await closeWebSocket(socket)
@@ -231,56 +326,95 @@ describe('server', () => {
     const socket = await openWebSocket(baseUrl)
     const messages = recordWebSocket(socket)
     socket.send(JSON.stringify({
+      ioThreadId: 'io-thread-yuan-clear',
       text: 'first'
     }))
     await waitForWebSocketMessages(messages, 3)
     socket.send(JSON.stringify({
+      ioThreadId: 'io-thread-yuan-clear',
       text: '￥clear'
     }))
     await waitForWebSocketMessages(messages, 4)
     expect(messages[3]).toMatchObject({
-      type: 'clear'
+      event: 'clear'
     })
     await closeWebSocket(socket)
     await closeTestServer(listener)
   })
 
   it('shows system feedback for restart command', async () => {
-    const restarts: string[] = []
-    const restarted = await startTestServer({
-      restart: async () => {
-        restarts.push('restart')
-        return {
-          code: '1',
-          message: 'no error',
-          data: 'Codexio restart requested through supervisor 127.0.0.1:10000',
-          isFailed: false
+    const requested: string[] = []
+    const token = 'restart-token'
+    const supervisor = await new Promise<HttpServer>((resolve, reject) => {
+      const server = new HttpServer((request, response) => {
+        if (request.headers.authorization !== `Bearer ${token}`) {
+          response.statusCode = 401
+          response.end(JSON.stringify(Result.fail('unauthorized')))
+          return
         }
-      }
+        if (request.method === 'GET' && request.url === '/status') {
+          response.end(JSON.stringify(Result.success({
+            pid: process.pid
+          })))
+          return
+        }
+        if (request.method === 'POST' && request.url === '/restart') {
+          requested.push('restart')
+          response.end(JSON.stringify(Result.success({
+            accepted: true
+          })))
+          return
+        }
+        response.statusCode = 404
+        response.end(JSON.stringify(Result.fail('not found')))
+      })
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => {
+        resolve(server)
+      })
+    })
+    const restarted = await startTestServer()
+    const address = supervisor.address()
+    if (!address || typeof address === 'string') {
+      throw new Error('supervisor address not found')
+    }
+    await writeSupervisorState(restarted.configPath, {
+      pid: process.pid,
+      host: '127.0.0.1',
+      port: address.port,
+      token,
+      startedAt: new Date().toISOString()
     })
     const restartedSocket = await openWebSocket(restarted.baseUrl)
     const restartedMessages = recordWebSocket(restartedSocket)
-    restartedSocket.send(JSON.stringify({
-      text: '$restart'
-    }))
-    await waitForWebSocketMessages(restartedMessages, 2)
-    expect(restartedMessages[0]).toMatchObject({
-      type: 'user',
-      text: '$restart'
-    })
-    expect(restartedMessages[1]).toMatchObject({
-      type: 'system',
-      text: '正在重启 Codexio，页面会自动重连。'
-    })
-    expect(restarts).toEqual([
-      'restart'
-    ])
-    await closeWebSocket(restartedSocket)
-    await closeTestServer(restarted.listener)
+    try {
+      restartedSocket.send(JSON.stringify({
+        text: '$restart'
+      }))
+      await waitForWebSocketMessages(restartedMessages, 2)
+      expect(restartedMessages[0]).toMatchObject({
+        event: 'message',
+        role: 'user',
+        text: '$restart'
+      })
+      expect(restartedMessages[1]).toMatchObject({
+        event: 'message',
+        role: 'system',
+        text: '正在重启 Codexio，页面会自动重连。'
+      })
+      await waitFor(() => requested.length === 1)
+      expect(requested).toEqual([
+        'restart'
+      ])
+    } finally {
+      await closeWebSocket(restartedSocket)
+      await closeTestServer(restarted.listener)
+      await closeTestServer(supervisor)
+    }
   })
 
   it('reports restart command failure when application lifecycle is unavailable', async () => {
-    const { baseUrl, listener } = await startTestServer(null)
+    const { baseUrl, listener } = await startTestServer()
     const socket = await openWebSocket(baseUrl)
     const messages = recordWebSocket(socket)
     socket.send(JSON.stringify({
@@ -288,15 +422,18 @@ describe('server', () => {
     }))
     await waitForWebSocketMessages(messages, 3)
     expect(messages[0]).toMatchObject({
-      type: 'user',
+      event: 'message',
+      role: 'user',
       text: '$restart'
     })
     expect(messages[1]).toMatchObject({
-      type: 'system',
+      event: 'message',
+      role: 'system',
       text: '正在重启 Codexio，页面会自动重连。'
     })
     expect(messages[2]).toMatchObject({
-      type: 'system',
+      event: 'message',
+      role: 'system',
       text: '执行失败：$restart\nCodexio supervisor 未运行，请用 start.cmd 启动后再重启。'
     })
     await closeWebSocket(socket)
@@ -310,13 +447,15 @@ describe('server', () => {
     socket.send(JSON.stringify({
       text: '￥help'
     }))
-    await waitForWebSocketMessages(messages, 2)
+    await waitForWebSocketMessages(messages, 1)
     expect(messages[0]).toMatchObject({
-      type: 'user',
+      event: 'message',
+      role: 'user',
       text: '￥help'
     })
     expect(messages[1]).toMatchObject({
-      type: 'system',
+      event: 'message',
+      role: 'system',
       text: expect.stringContaining('$update / ￥update')
     })
     socket.send(JSON.stringify({
@@ -324,11 +463,13 @@ describe('server', () => {
     }))
     await waitForWebSocketMessages(messages, 4)
     expect(messages[2]).toMatchObject({
-      type: 'user',
+      event: 'message',
+      role: 'user',
       text: '￥?'
     })
     expect(messages[3]).toMatchObject({
-      type: 'system',
+      event: 'message',
+      role: 'system',
       text: expect.stringContaining('$help / ￥help / $? / ￥?')
     })
     await closeWebSocket(socket)
@@ -372,33 +513,7 @@ describe('server', () => {
       'workspace:',
       `  path: ${workspace}`
     ].join('\n'), 'utf8')
-    const config = ConfigSchema.parse({
-      server: {
-        token: testToken
-      },
-      agents: {
-        codex: {
-          enabled: false
-        },
-        claude: {
-          enabled: true
-        }
-      },
-      channels: {
-        web: {
-          enabled: true,
-          host: '127.0.0.1',
-          port: webPort
-        }
-      },
-      workspace: {
-        path: workspace
-      }
-    })
-    const server = createCodexioApp(config, {
-      configPath,
-      agentFactory: () => new TestAgent(async () => {})
-    })
+    const server = await createTestCodexioApp(createTestConfiger(configPath), new TestAgent(async () => {}))
     const listener = server.listen(0)
     await new Promise<void>((resolve) => listener.once('listening', resolve))
     const address = listener.address()
@@ -482,13 +597,14 @@ describe('server', () => {
     const { baseUrl, listener } = await startTestServer()
     const socket = await openWebSocket(baseUrl)
     const messages = recordWebSocket(socket)
-    const response = await fetch(`${baseUrl}/api/message`, {
+    const response = await fetch(`${baseUrl}/api/agent/message`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${testToken}`
       },
       body: JSON.stringify({
+        ioThreadId: 'api-thread',
         text: 'agent output'
       })
     })
@@ -498,8 +614,40 @@ describe('server', () => {
     await waitForWebSocketMessages(messages, 1)
     expect(result.isFailed).toBe(false)
     expect(messages[0]).toMatchObject({
-      type: 'agent',
+      event: 'message',
+      role: 'agent',
+      ioThreadId: 'api-thread',
       text: 'agent output'
+    })
+    await closeWebSocket(socket)
+    await closeTestServer(listener)
+  })
+
+  it('accepts agent output for an explicit thread id', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    const socket = await openWebSocket(baseUrl)
+    const messages = recordWebSocket(socket)
+    const response = await fetch(`${baseUrl}/api/agent/message`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${testToken}`
+      },
+      body: JSON.stringify({
+        ioThreadId: 'api-thread',
+        text: 'thread output'
+      })
+    })
+    const result = await response.json() as {
+      isFailed: boolean
+    }
+    await waitForWebSocketMessages(messages, 1)
+    expect(result.isFailed).toBe(false)
+    expect(messages[0]).toMatchObject({
+      event: 'message',
+      role: 'agent',
+      ioThreadId: 'api-thread',
+      text: 'thread output'
     })
     await closeWebSocket(socket)
     await closeTestServer(listener)
@@ -512,13 +660,14 @@ describe('server', () => {
     const { baseUrl, listener } = await startTestServer()
     const socket = await openWebSocket(baseUrl)
     const messages = recordWebSocket(socket)
-    const response = await fetch(`${baseUrl}/api/message`, {
+    const response = await fetch(`${baseUrl}/api/agent/message`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${testToken}`
       },
       body: JSON.stringify({
+        ioThreadId: 'api-thread',
         text: 'agent image',
         files: [
           {
@@ -546,7 +695,9 @@ describe('server', () => {
       url: `/api/files/${result.data.files[0].id}`
     })
     expect(messages[0]).toMatchObject({
-      type: 'agent',
+      event: 'message',
+      role: 'agent',
+      ioThreadId: 'api-thread',
       text: 'agent image',
       files: [
         {
@@ -586,13 +737,14 @@ describe('server', () => {
     }
     expect(upload.isFailed).toBe(false)
 
-    const response = await fetch(`${baseUrl}/api/message`, {
+    const response = await fetch(`${baseUrl}/api/agent/message`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${testToken}`
       },
       body: JSON.stringify({
+        ioThreadId: 'api-thread',
         text: `图片如下：\n\n![agent image](${upload.data.file.url})`
       })
     })
@@ -603,7 +755,9 @@ describe('server', () => {
     await waitForWebSocketMessages(messages, 1)
     expect(result.isFailed).toBe(false)
     expect(messages[0]).toMatchObject({
-      type: 'agent',
+      event: 'message',
+      role: 'agent',
+      ioThreadId: 'api-thread',
       text: '图片如下：',
       files: [
         {
@@ -625,13 +779,14 @@ describe('server', () => {
     const socket = await openWebSocket(baseUrl)
     const messages = recordWebSocket(socket)
 
-    const response = await fetch(`${baseUrl}/api/message`, {
+    const response = await fetch(`${baseUrl}/api/agent/message`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${testToken}`
       },
       body: JSON.stringify({
+        ioThreadId: 'api-thread',
         text: `截图预览：\n\n截图预览 ${imagePath.replaceAll('\\', '/')}`
       })
     })
@@ -642,7 +797,9 @@ describe('server', () => {
     await waitForWebSocketMessages(messages, 1)
     expect(result.isFailed).toBe(false)
     expect(messages[0]).toMatchObject({
-      type: 'agent',
+      event: 'message',
+      role: 'agent',
+      ioThreadId: 'api-thread',
       text: '截图预览：\n\n截图预览',
       files: [
         {
@@ -661,13 +818,14 @@ describe('server', () => {
     const { baseUrl, listener } = await startTestServer()
     const socket = await openWebSocket(baseUrl)
     const messages = recordWebSocket(socket)
-    const response = await fetch(`${baseUrl}/api/message`, {
+    const response = await fetch(`${baseUrl}/api/agent/message`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${testToken}`
       },
       body: JSON.stringify({
+        ioThreadId: 'api-thread',
         text: '**done**\n\n<script>alert(1)</script>'
       })
     })
@@ -677,7 +835,9 @@ describe('server', () => {
     await waitForWebSocketMessages(messages, 1)
     expect(result.isFailed).toBe(false)
     expect(messages[0]).toMatchObject({
-      type: 'agent',
+      event: 'message',
+      role: 'agent',
+      ioThreadId: 'api-thread',
       text: '**done**\n\n<script>alert(1)</script>'
     })
     expect(messages[0].html).toContain('<strong>done</strong>')
@@ -688,7 +848,7 @@ describe('server', () => {
 
   it('rejects unauthenticated agent output', async () => {
     const { baseUrl, listener } = await startTestServer()
-    const response = await fetch(`${baseUrl}/api/message`, {
+    const response = await fetch(`${baseUrl}/api/agent/message`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -707,18 +867,109 @@ describe('server', () => {
     await closeTestServer(listener)
   })
 
+  it('authorizes agent output with current config token after config patch', async () => {
+    const nextToken = 'test-message-token-next'
+    const { baseUrl, listener } = await startTestServer()
+    const socket = await openWebSocket(baseUrl)
+    const messages = recordWebSocket(socket)
+    const patchResponse = await fetch(`${baseUrl}/api/config`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        patch: {
+          server: {
+            token: nextToken
+          }
+        }
+      })
+    })
+    const patchResult = await patchResponse.json() as {
+      isFailed: boolean
+    }
+    expect(patchResult.isFailed).toBe(false)
+
+    const staleResponse = await fetch(`${baseUrl}/api/agent/message`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${testToken}`
+      },
+      body: JSON.stringify({
+        text: 'stale token output'
+      })
+    })
+    expect(staleResponse.status).toBe(401)
+    
+    const currentResponse = await fetch(`${baseUrl}/api/agent/message`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${nextToken}`
+      },
+      body: JSON.stringify({
+        ioThreadId: 'api-thread',
+        text: 'current token output'
+      })
+    })
+    const currentResult = await currentResponse.json() as {
+      isFailed: boolean
+    }
+    await waitForWebSocketMessages(messages, 1)
+    expect(currentResult.isFailed).toBe(false)
+    expect(messages.at(-1)).toMatchObject({
+      event: 'message',
+      role: 'agent',
+      ioThreadId: 'api-thread',
+      text: 'current token output'
+    })
+    await closeWebSocket(socket)
+    await closeTestServer(listener)
+  })
+
   it('restarts the application through the authenticated admin endpoint', async () => {
     const restarts: string[] = []
-    const { baseUrl, listener } = await startTestServer({
-      restart: async () => {
-        restarts.push('restart')
-        return {
-          code: '1',
-          message: 'no error',
-          data: 'Codexio restart requested through supervisor 127.0.0.1:10000',
-          isFailed: false
+    const token = 'admin-restart-token'
+    const supervisor = await new Promise<HttpServer>((resolve, reject) => {
+      const server = new HttpServer((request, response) => {
+        if (request.headers.authorization !== `Bearer ${token}`) {
+          response.statusCode = 401
+          response.end(JSON.stringify(Result.fail('unauthorized')))
+          return
         }
-      }
+        if (request.method === 'GET' && request.url === '/status') {
+          response.end(JSON.stringify(Result.success({
+            pid: process.pid
+          })))
+          return
+        }
+        if (request.method === 'POST' && request.url === '/restart') {
+          restarts.push('restart')
+          response.end(JSON.stringify(Result.success({
+            accepted: true
+          })))
+          return
+        }
+        response.statusCode = 404
+        response.end(JSON.stringify(Result.fail('not found')))
+      })
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => {
+        resolve(server)
+      })
+    })
+    const { baseUrl, listener, configPath } = await startTestServer()
+    const address = supervisor.address()
+    if (!address || typeof address === 'string') {
+      throw new Error('supervisor address not found')
+    }
+    await writeSupervisorState(configPath, {
+      pid: process.pid,
+      host: '127.0.0.1',
+      port: address.port,
+      token,
+      startedAt: new Date().toISOString()
     })
     const unauthorized = await fetch(`${baseUrl}/api/server/restart`, {
       method: 'POST'
@@ -733,16 +984,15 @@ describe('server', () => {
     })
     const result = await response.json() as {
       isFailed: boolean
-      data: {
-        action: string
-      }
+      data: string
     }
     expect(result.isFailed).toBe(false)
-    expect(result.data).toBe('Codexio restart requested through supervisor 127.0.0.1:10000')
+    expect(result.data).toBe(`Codexio restart requested through supervisor 127.0.0.1:${address.port}`)
     expect(restarts).toEqual([
       'restart'
     ])
     await closeTestServer(listener)
+    await closeTestServer(supervisor)
   })
 
   it('stops the host server through the authenticated admin endpoint', async () => {
@@ -790,7 +1040,8 @@ describe('server', () => {
     expect(result.isFailed).toBe(false)
     await waitForWebSocketMessages(messages, 1)
     expect(messages[0]).toMatchObject({
-      type: 'system',
+      event: 'message',
+      role: 'system',
       text: 'Codexio server stopping.'
     })
     await closed
@@ -802,13 +1053,14 @@ describe('server', () => {
     const second = await openWebSocket(baseUrl)
     const firstMessages = recordWebSocket(first)
     const secondMessages = recordWebSocket(second)
-    const response = await fetch(`${baseUrl}/api/message`, {
+    const response = await fetch(`${baseUrl}/api/agent/message`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${testToken}`
       },
       body: JSON.stringify({
+        ioThreadId: 'api-thread',
         text: 'broadcast output'
       })
     })
@@ -821,11 +1073,15 @@ describe('server', () => {
     const secondMessage = secondMessages[0]
     expect(result.isFailed).toBe(false)
     expect(firstMessage).toMatchObject({
-      type: 'agent',
+      event: 'message',
+      role: 'agent',
+      ioThreadId: 'api-thread',
       text: 'broadcast output'
     })
     expect(secondMessage).toMatchObject({
-      type: 'agent',
+      event: 'message',
+      role: 'agent',
+      ioThreadId: 'api-thread',
       text: 'broadcast output'
     })
     await closeWebSocket(first)
@@ -840,32 +1096,43 @@ describe('server', () => {
     const firstMessages = recordWebSocket(first)
     const secondMessages = recordWebSocket(second)
     first.send(JSON.stringify({
+      ioThreadId: 'io-thread-shared',
       text: 'shared input'
     }))
     await waitForWebSocketMessages(firstMessages, 3)
     await waitForWebSocketMessages(secondMessages, 3)
     expect(firstMessages[0]).toMatchObject({
-      type: 'user',
+      event: 'message',
+      role: 'user',
+      ioThreadId: 'io-thread-shared',
       text: 'shared input'
     })
     expect(secondMessages[0]).toMatchObject({
-      type: 'user',
+      event: 'message',
+      role: 'user',
+      ioThreadId: 'io-thread-shared',
       text: 'shared input'
     })
     expect(firstMessages[1]).toMatchObject({
-      type: 'system',
+      event: 'message',
+      role: 'system',
       text: expect.any(String)
     })
     expect(secondMessages[1]).toMatchObject({
-      type: 'system',
+      event: 'message',
+      role: 'system',
       text: expect.any(String)
     })
     expect(firstMessages[2]).toMatchObject({
-      type: 'agent',
+      event: 'message',
+      role: 'agent',
+      ioThreadId: 'io-thread-shared',
       text: 'test: shared input'
     })
     expect(secondMessages[2]).toMatchObject({
-      type: 'agent',
+      event: 'message',
+      role: 'agent',
+      ioThreadId: 'io-thread-shared',
       text: 'test: shared input'
     })
     await closeWebSocket(first)
@@ -879,6 +1146,7 @@ describe('server', () => {
     const messages = recordWebSocket(socket)
     for (let index = 1; index <= 12; index += 1) {
       socket.send(JSON.stringify({
+        ioThreadId: 'io-thread-history',
         text: `message ${index}`
       }))
       await waitForWebSocketMessages(messages, index * 3)
@@ -894,45 +1162,24 @@ describe('server', () => {
     await closeTestServer(listener)
   })
 
-  it('does not expose legacy inbound API', async () => {
-    const { baseUrl, listener } = await startTestServer()
-    const response = await fetch(`${baseUrl}/api/messages/inbound`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        channel: 'cli',
-        text: 'hello'
-      })
-    })
-    expect(response.status).toBe(404)
-    await closeTestServer(listener)
-  })
-
-  it('rejects invalid startup config before listening', () => {
-    const config = ConfigSchema.parse({
-      server: {
-        token: testToken
-      },
-      agents: {
-        codex: {
-          enabled: true
-        },
-        claude: {
-          enabled: true
-        }
-      },
-      channels: {
-        web: {
-          enabled: true
-        }
-      },
-      workspace: {
-        path: '.'
-      }
-    })
-    expect(() => createCodexioApp(config)).toThrow('only one agent can be enabled')
+  it('rejects invalid startup config before listening', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-invalid-config-'))
+    const configPath = join(dir, 'config.yaml')
+    await writeFile(configPath, [
+      'server:',
+      `  token: ${testToken}`,
+      'agents:',
+      '  codex:',
+      '    enabled: true',
+      '  claude:',
+      '    enabled: true',
+      'channels:',
+      '  web:',
+      '    enabled: true',
+      'workspace:',
+      '  path: .'
+    ].join('\n'), 'utf8')
+    await expect(createTestCodexioApp(createTestConfiger(configPath), new TestAgent(async () => {}))).rejects.toThrow('only one agent can be enabled')
   })
 
   it('selects the next server port when the preferred port is occupied', async () => {
@@ -1012,7 +1259,7 @@ describe('server', () => {
         startedAt: new Date().toISOString()
       })
 
-      const state = await restartServer(configPath)
+      const state = await new SupervisorClient(createTestConfiger(configPath)).restart()
 
       expect(state.port).toBe(address.port)
       expect(requested).toEqual([
@@ -1086,7 +1333,7 @@ describe('server', () => {
         startedAt: new Date().toISOString()
       })
 
-      const result = await stopServer(configPath)
+      const result = await new SupervisorClient(createTestConfiger(configPath)).stop()
 
       expect(result).toBe(true)
       expect(stopped).toBe(true)
@@ -1178,7 +1425,7 @@ describe('server', () => {
         startedAt: new Date().toISOString()
       })
 
-      const result = await stopServer(configPath)
+      const result = await new SupervisorClient(createTestConfiger(configPath)).stop()
 
       expect(result).toBe(true)
       expect(stopped).toBe(true)
@@ -1228,11 +1475,6 @@ describe('server', () => {
       configPath
     ])
 
-    const dev = createServeProcessSpec(configPath, sourceEntryPath, {
-      autoPort: true
-    })
-    expect(dev.args).toContain('--auto-port')
-
     const supervised = createServeProcessSpec(configPath, sourceEntryPath, {
       supervisorPid: 12345
     })
@@ -1241,79 +1483,126 @@ describe('server', () => {
   })
 })
 
-async function startTestServer(applicationLifecycle: {
-  restart: () => Promise<{
-    code: string
-    message: string
-    data: string | null
-    isFailed: boolean
-  }>
-} | null = {
-  restart: async () => ({
-    code: '1',
-    message: 'no error',
-    data: 'Codexio restart requested through supervisor 127.0.0.1:10000',
-    isFailed: false
-  })
-}): Promise<{
+async function startTestServer(): Promise<{
   baseUrl: string
-  webBaseUrl: string
+  configPath: string
   listener: HttpServer
 }> {
-  const webPort = await resolveAvailableServerPort('127.0.0.1', 18788)
-  const config = ConfigSchema.parse({
-    server: {
-      token: testToken
-    },
-    agents: {
-      codex: {
-        enabled: false
-      },
-      claude: {
-        enabled: true
-      }
-    },
-    channels: {
-      web: {
-        enabled: true,
-        host: '127.0.0.1',
-        port: webPort
-      }
-    },
-    workspace: {
-      path: '.'
-    }
-  })
-  const server = createCodexioApp(config, {
-    agentFactory: () => new TestAgent(async (text) => {
-      await server.channelManager.send(text)
-    }),
-    applicationLifecycle: applicationLifecycle ?? undefined
-  })
+  const dir = await mkdtemp(join(tmpdir(), 'codexio-server-'))
+  const workspace = join(dir, 'workspace')
+  const configPath = join(dir, 'config.yaml')
+  await writeFile(configPath, [
+    'server:',
+    `  token: ${testToken}`,
+    'agents:',
+    '  codex:',
+    '    enabled: false',
+    '  claude:',
+    '    enabled: true',
+    'channels:',
+    '  web:',
+    '    enabled: true',
+    '    host: 127.0.0.1',
+    '    port: 8788',
+    'workspace:',
+    `  path: ${workspace}`
+  ].join('\n'), 'utf8')
+  let baseUrl = ''
+  const server = await createTestCodexioApp(createTestConfiger(configPath), new TestAgent(async (message) => {
+      await fetch(`${baseUrl}/api/agent/message`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${testToken}`
+        },
+        body: JSON.stringify({
+          ioThreadId: message.ioThreadId,
+          text: message.text
+        })
+      })
+    }))
   const listener = server.listen(0)
   await new Promise<void>((resolve) => listener.once('listening', resolve))
   const address = listener.address()
   if (!address || typeof address === 'string') {
     throw new Error('server address not found')
   }
-  const baseUrl = `http://127.0.0.1:${address.port}`
-  const webBaseUrl = `http://127.0.0.1:${webPort}`
-  webBaseUrls.set(baseUrl, webBaseUrl)
-  await waitForHttpServer(webBaseUrl)
+  baseUrl = `http://127.0.0.1:${address.port}`
   return {
     baseUrl,
-    webBaseUrl,
+    configPath,
     listener
   }
 }
 
+function createTestConfiger(configPath: string): Configer {
+  return new Configer(new CodexioMetadata({
+    rootPath: testMetadata.rootPath,
+    configPath
+  }))
+}
+
+async function createTestCodexioApp(configer: Configer, claudeAgent: Agent): Promise<{
+  listen: (port?: number, host?: string) => HttpServer
+  stop: () => Promise<Result<null>>
+}> {
+  await configer.validate()
+  const metadata = new CodexioMetadata({
+    rootPath: testMetadata.rootPath,
+    configPath: configer.path
+  })
+  const eventBus = new EventBus()
+  const fileStore = new FileStore(metadata)
+  let commandExecutor: CommandExecutor
+  const receive = async (message: Parameters<CommandExecutor['receive']>[0]) => commandExecutor.receive(message)
+  const webChannel = new WebChannel(configer, fileStore, receive)
+  const channelManager = new ChannelManager(
+    configer,
+    fileStore,
+    webChannel,
+    new FeishuChannel(configer, receive),
+    new FeishuWebhookChannel(configer),
+    new EmailChannel(configer, receive)
+  )
+  const supervisorClient = new SupervisorClient(configer)
+  const agentManager = new AgentManager(configer, {
+    send: async (message) => channelManager.send(message),
+    status: async () => Result.success(null)
+  }, claudeAgent, claudeAgent)
+  const updateService = new UpdateService(new UpdateInstaller(configer, metadata))
+  commandExecutor = new CommandExecutor(channelManager, agentManager, updateService, supervisorClient)
+  eventBus.on(AppEvent.HttpClosed, () => {
+    void (async () => {
+      await channelManager.sendSystem('Codexio server stopping.')
+      await agentManager.stop()
+      await channelManager.stop()
+    })()
+  })
+  const apiController = new CodexioApiController(configer, channelManager, agentManager, fileStore, supervisorClient, webChannel, eventBus)
+  await channelManager.start()
+  return {
+    listen: (port?: number, host?: string) => apiController.listen(port, host),
+    stop: async () => {
+      const agentStopped = await agentManager.stop()
+      const channelStopped = await channelManager.stop()
+      if (agentStopped.isFailed) {
+        return agentStopped
+      }
+      if (channelStopped.isFailed) {
+        return channelStopped
+      }
+      return Result.success(null)
+    }
+  }
+}
+
 async function openWebSocket(baseUrl: string): Promise<WebSocket> {
-  const url = (webBaseUrls.get(baseUrl) ?? baseUrl).replace('http://', 'ws://').replace('https://', 'wss://')
+  const url = baseUrl.replace('http://', 'ws://').replace('https://', 'wss://')
   const socket = new WebSocket(`${url}/ws`)
   await new Promise<void>((resolve, reject) => {
     socket.on('message', (data) => {
       const message = JSON.parse(data.toString()) as Record<string, unknown>
-      if (message.type === 'ready') {
+      if (message.event === 'ready') {
         resolve()
       }
     })
@@ -1326,13 +1615,13 @@ async function openRecordedWebSocket(baseUrl: string): Promise<{
   socket: WebSocket
   messages: Array<Record<string, unknown>>
 }> {
-  const url = (webBaseUrls.get(baseUrl) ?? baseUrl).replace('http://', 'ws://').replace('https://', 'wss://')
+  const url = baseUrl.replace('http://', 'ws://').replace('https://', 'wss://')
   const socket = new WebSocket(`${url}/ws`)
   const messages = recordRawWebSocket(socket)
   await new Promise<void>((resolve, reject) => {
     socket.on('message', (data) => {
       const message = JSON.parse(data.toString()) as Record<string, unknown>
-      if (message.type === 'ready') {
+      if (message.event === 'ready') {
         resolve()
       }
     })
@@ -1344,29 +1633,11 @@ async function openRecordedWebSocket(baseUrl: string): Promise<{
   }
 }
 
-async function waitForHttpServer(baseUrl: string): Promise<void> {
-  const startedAt = Date.now()
-  for (;;) {
-    try {
-      const response = await fetch(baseUrl)
-      await response.text()
-      return
-    } catch {
-      if (Date.now() - startedAt > 4000) {
-        throw new Error(`http server timeout: ${baseUrl}`)
-      }
-      await new Promise((resolve) => {
-        setTimeout(resolve, 5)
-      })
-    }
-  }
-}
-
 function recordWebSocket(socket: WebSocket): Array<Record<string, unknown>> {
   const messages: Array<Record<string, unknown>> = []
   socket.on('message', (data) => {
     const message = JSON.parse(data.toString()) as Record<string, unknown>
-    if (message.type !== 'ready' && message.text !== 'Codexio server started.' && message.text !== 'Codexio server stopping.') {
+    if (message.event !== 'ready' && message.text !== 'Codexio server started.' && message.text !== 'Codexio server stopping.') {
       messages.push(message)
     }
   })
@@ -1377,7 +1648,7 @@ function recordRawWebSocket(socket: WebSocket): Array<Record<string, unknown>> {
   const messages: Array<Record<string, unknown>> = []
   socket.on('message', (data) => {
     const message = JSON.parse(data.toString()) as Record<string, unknown>
-    if (message.type !== 'ready') {
+    if (message.event !== 'ready') {
       messages.push(message)
     }
   })
@@ -1389,6 +1660,18 @@ async function waitForWebSocketMessages(messages: Array<Record<string, unknown>>
   while (messages.length < count) {
     if (Date.now() - startedAt > 4000) {
       throw new Error(`websocket message timeout: ${messages.length}/${count}`)
+    }
+    await new Promise((resolve) => {
+      setTimeout(resolve, 5)
+    })
+  }
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  const startedAt = Date.now()
+  while (!predicate()) {
+    if (Date.now() - startedAt > 4000) {
+      throw new Error('wait timed out')
     }
     await new Promise((resolve) => {
       setTimeout(resolve, 5)

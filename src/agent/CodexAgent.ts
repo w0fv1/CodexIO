@@ -2,14 +2,17 @@ import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { execa } from 'execa'
-import { CodexioConfig } from '../config/ConfigDefinition.js'
-import { Agent, AgentInput, AgentLoginInProgressError } from './Agent.js'
-import { createAgentEnv } from './AgentEnvironment.js'
+import { inject, injectable } from 'inversify'
+import { Agent } from './Agent.js'
+import { createProcessEnv } from '../util/ProcessEnvironment.js'
 import { CodexAppServer } from './CodexAppServer.js'
-import { codexioRootPath } from '../AppMetadata.js'
-import { CodexSessionStore } from './CodexSessionStore.js'
+import { CodexioMetadata } from '../component/CodexioMetadata.js'
+import { Configer } from '../component/Configer.js'
 import { Logger } from '../component/Logger.js'
 import { isImageFile } from '../component/FileStore.js'
+import { allIoThreadId, Message } from '../value/Message.js'
+import { AgentManagerCallbacksId } from '../ComponentIdentifier.js'
+import type { AgentManagerCallbacks } from './AgentManager.js'
 
 const codexEntryPath = createRequire(import.meta.url).resolve('@openai/codex/bin/codex.js')
 
@@ -18,8 +21,8 @@ export type CodexCommand = {
   args: string[]
 }
 
-export function createCodexCommand(config: CodexioConfig, args: string[]): CodexCommand {
-  if (config.agents.codex?.bundled ?? true) {
+export function createCodexCommand(bundled: boolean | undefined, args: string[]): CodexCommand {
+  if (bundled ?? true) {
     return {
       command: process.execPath,
       args: [
@@ -35,90 +38,65 @@ export function createCodexCommand(config: CodexioConfig, args: string[]): Codex
 }
 
 type CodexAppServerHandle = Pick<CodexAppServer, 'start' | 'request' | 'waitForNotification' | 'stop'>
-type CodexSessionStoreHandle = Pick<CodexSessionStore, 'read' | 'write' | 'clear'>
+
+type CodexThread = {
+  ioThreadId: string
+  agentThreadId: string
+  turnId?: string
+  messages: Map<string, string>
+}
 
 const codexLoginInProgressMessage = '请先完成 Codex 登录。'
 
-export type CodexAgentOptions = {
-  workspacePath: string
-  config: CodexioConfig
-  toolBaseUrl: string
-  send: (text: string) => Promise<void>
-  system?: (text: string) => Promise<void>
-  onLoginRequired?: (message: string) => Promise<void>
-  onLoginCompleted?: () => Promise<void>
-  appServer?: CodexAppServerHandle
-  sessionStore?: CodexSessionStoreHandle
+export class AgentLoginInProgressError extends Error {
+  constructor(message = codexLoginInProgressMessage) {
+    super(message)
+    this.name = 'AgentLoginInProgressError'
+  }
 }
 
-export class CodexAgent implements Agent {
-  readonly type = 'codex'
-  private started = false
-  private threadId?: string
-  private activeTurnId?: string
-  private appServer?: CodexAppServerHandle
-  private loginTask?: Promise<void>
-  private readonly sessionStore: CodexSessionStoreHandle
-  private readonly messageByItemId = new Map<string, string>()
+@injectable()
+export class CodexAppServerFactory {
+  constructor(
+    @inject(Configer) private readonly configer: Configer,
+    @inject(CodexioMetadata) private readonly metadata: CodexioMetadata
+  ) {}
 
-  constructor(private readonly options: CodexAgentOptions) {
-    this.sessionStore = options.sessionStore ?? new CodexSessionStore()
-  }
-
-  async login(): Promise<void> {
-    Logger.info('codex login started', {
-      cwd: this.options.workspacePath
-    })
-    const command = createCodexCommand(this.options.config, [
-      'login',
-      '--device-auth'
-    ])
-    await execa(command.command, command.args, {
-      cwd: this.options.workspacePath,
-      env: createAgentEnv(this.options.config),
-      stdio: 'inherit'
-    })
-    Logger.info('codex login completed')
-  }
-
-  async start(_config: CodexioConfig): Promise<void> {
-    if (this.started) {
-      return
-    }
-    Logger.info('codex agent starting', {
-      cwd: this.options.workspacePath
-    })
-    if (!this.appServer) {
-      this.appServer = this.createAppServer()
-      await this.appServer.start()
-    }
-    await this.ensureLoggedIn()
-    await this.resumeOrStartThread()
-    this.started = true
-    Logger.info('codex agent ready', {
-      threadId: this.threadId
-    })
-  }
-
-  private createAppServer(): CodexAppServerHandle {
-    const command = createCodexCommand(this.options.config, [
+  async create(onNotification: (method: string, params: unknown) => void): Promise<CodexAppServerHandle> {
+    const bundled = await this.configer.get('agents.codex.bundled')
+    const serverHost = await this.configer.get('server.host')
+    const serverPort = await this.configer.get('server.port')
+    const serverToken = await this.configer.get('server.token')
+    const workspacePath = await this.configer.get('workspace.path')
+    const proxyEnabled = await this.configer.get('proxy.enabled')
+    const proxyHost = await this.configer.get('proxy.host')
+    const proxyPort = await this.configer.get('proxy.port')
+    const command = createCodexCommand(bundled, [
       'app-server',
       '--stdio'
     ])
-    const env = createAgentEnv(this.options.config, {
-      codexio: {
-        apiUrl: this.options.toolBaseUrl,
-        token: this.options.config.server.token
+    const env = createProcessEnv(
+      bundled ?? true ? this.metadata.codexHomePath : undefined,
+      bundled ?? true ? join(this.metadata.codexHomePath, 'config.toml') : undefined,
+      proxyEnabled ? `http://${proxyHost}:${proxyPort}` : undefined,
+      proxyEnabled ? [
+        'localhost',
+        '127.0.0.1',
+        '::1',
+        serverHost
+      ] : [],
+      {
+        CODEXIO_API_URL: `http://${serverHost}:${serverPort}`,
+        CODEXIO_TOKEN: serverToken
       }
-    })
-    return this.options.appServer ?? new CodexAppServer({
+    )
+    return new CodexAppServer({
       command: command.command,
       args: command.args,
-      cwd: this.options.workspacePath,
+      cwd: workspacePath,
       env,
-      onNotification: (method, params) => {
-        void this.handleNotification(method, params)
-      },
+      metadata: this.metadata,
+      onNotification,
       onStderr: (data) => {
         Logger.warn('codex app-server stderr', {
           text: data.toString('utf8')
@@ -127,15 +105,71 @@ export class CodexAgent implements Agent {
       }
     })
   }
+}
 
-  async receive(input: AgentInput): Promise<void> {
+@injectable()
+export class CodexAgent implements Agent {
+  readonly type = 'codex'
+  private started = false
+  private appServer?: CodexAppServerHandle
+  private loginTask?: Promise<void>
+  private readonly threads = new Map<string, CodexThread>()
+  private readonly ioThreadIdByAgentThreadId = new Map<string, string>()
+
+  constructor(
+    @inject(Configer) private readonly configer: Configer,
+    @inject(CodexioMetadata) private readonly metadata: CodexioMetadata,
+    @inject(AgentManagerCallbacksId) private readonly callbacks: AgentManagerCallbacks,
+    @inject(CodexAppServerFactory) private readonly appServerFactory: CodexAppServerFactory
+  ) {}
+
+  async login(): Promise<void> {
+    const workspacePath = await this.configer.get('workspace.path')
+    const bundled = await this.configer.get('agents.codex.bundled')
+    Logger.info('codex login started', {
+      cwd: workspacePath
+    })
+    const command = createCodexCommand(bundled, [
+      'login',
+      '--device-auth'
+    ])
+    await execa(command.command, command.args, {
+      cwd: workspacePath,
+      env: createProcessEnv(
+        await this.codexHomePath(),
+        await this.shellEnvironmentPath(),
+        await this.proxyUrl(),
+        await this.noProxyHosts()
+      ),
+      stdio: 'inherit'
+    })
+    Logger.info('codex login completed')
+  }
+
+  async start(ioThreadId?: string): Promise<void> {
+    if (this.started) {
+      return
+    }
+    Logger.info('codex agent starting', {
+      cwd: await this.configer.get('workspace.path')
+    })
+    if (!this.appServer) {
+      this.appServer = await this.appServerFactory.create((method, params) => {
+          void this.handleNotification(method, params)
+      })
+      await this.appServer.start()
+    }
+    await this.ensureLoggedIn(ioThreadId)
+    this.started = true
+    Logger.info('codex agent ready')
+  }
+
+  async receive(input: Message): Promise<void> {
     if (!this.started) {
       throw new Error('agent not started')
     }
-    if (!this.threadId) {
-      await this.startThread()
-    }
-    if (!this.threadId || !this.appServer) {
+    const thread = await this.ensureThread(input.ioThreadId)
+    if (!this.appServer) {
       throw new Error('codex app-server not started')
     }
     const genericFiles = (input.files ?? []).filter((file) => !isImageFile(file))
@@ -158,22 +192,23 @@ export class CodexAgent implements Agent {
         })
       }
     }
-    if (this.activeTurnId) {
+    if (thread.turnId) {
       Logger.info('codex turn steered', {
-        threadId: this.threadId,
-        turnId: this.activeTurnId,
+        ioThreadId: thread.ioThreadId,
+        agentThreadId: thread.agentThreadId,
+        turnId: thread.turnId,
         length: input.text.length,
         files: input.files?.length ?? 0
       })
       await this.appServer.request('turn/steer', {
-        threadId: this.threadId,
-        expectedTurnId: this.activeTurnId,
+        threadId: thread.agentThreadId,
+        expectedTurnId: thread.turnId,
         input: turnInput
       })
       return
     }
     const response = await this.appServer.request('turn/start', {
-      threadId: this.threadId,
+      threadId: thread.agentThreadId,
       input: turnInput
     })
     if (!response || typeof response !== 'object') {
@@ -183,109 +218,83 @@ export class CodexAgent implements Agent {
     if (!turn || typeof turn !== 'object' || typeof (turn as Record<string, unknown>).id !== 'string') {
       throw new Error('codex turn id not found')
     }
-    this.activeTurnId = (turn as Record<string, string>).id
+    thread.turnId = (turn as Record<string, string>).id
     Logger.info('codex turn started', {
-      threadId: this.threadId,
-      turnId: this.activeTurnId,
+      ioThreadId: thread.ioThreadId,
+      agentThreadId: thread.agentThreadId,
+      turnId: thread.turnId,
       length: input.text.length,
       files: input.files?.length ?? 0
     })
   }
 
-  async clear(): Promise<void> {
+  async clear(ioThreadId: string): Promise<void> {
+    const thread = this.threads.get(ioThreadId)
     Logger.info('codex agent clearing', {
-      threadId: this.threadId,
-      turnId: this.activeTurnId
+      ioThreadId,
+      agentThreadId: thread?.agentThreadId,
+      turnId: thread?.turnId
     })
-    await this.interruptActiveTurn()
-    this.activeTurnId = undefined
-    this.threadId = undefined
-    this.messageByItemId.clear()
+    if (thread) {
+      await this.interruptActiveTurn(thread)
+      this.ioThreadIdByAgentThreadId.delete(thread.agentThreadId)
+      this.threads.delete(ioThreadId)
+    }
     this.started = true
     if (this.appServer) {
-      await this.startThread()
+      await this.startThread(ioThreadId)
     }
   }
 
   async stop(): Promise<void> {
     Logger.info('codex agent stopping', {
-      threadId: this.threadId,
-      turnId: this.activeTurnId
+      threads: this.threads.size
     })
-    await this.interruptActiveTurn()
+    for (const thread of this.threads.values()) {
+      await this.interruptActiveTurn(thread)
+    }
     await this.appServer?.stop()
-    this.activeTurnId = undefined
-    this.threadId = undefined
     this.appServer = undefined
     this.loginTask = undefined
-    this.messageByItemId.clear()
+    this.threads.clear()
+    this.ioThreadIdByAgentThreadId.clear()
     this.started = false
   }
 
-  private async startThread(): Promise<void> {
+  private async startThread(ioThreadId: string): Promise<CodexThread> {
     if (!this.appServer) {
       throw new Error('codex app-server not started')
     }
     const response = await this.appServer.request('thread/start', {
-      cwd: this.options.workspacePath,
+      cwd: await this.configer.get('workspace.path'),
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
       ephemeral: false,
-      developerInstructions: await this.readDeveloperInstructions()
+      developerInstructions: await this.readDeveloperInstructions(ioThreadId)
     })
-    this.threadId = this.readThreadId(response)
-    this.activeTurnId = undefined
-    this.messageByItemId.clear()
-    await this.sessionStore.write(this.threadId)
+    const agentThreadId = this.readThreadId(response)
+    const thread: CodexThread = {
+      ioThreadId,
+      agentThreadId,
+      messages: new Map<string, string>()
+    }
+    this.threads.set(ioThreadId, thread)
+    this.ioThreadIdByAgentThreadId.set(agentThreadId, ioThreadId)
     Logger.info('codex thread started', {
-      threadId: this.threadId
+      ioThreadId,
+      agentThreadId
     })
+    return thread
   }
 
-  private async resumeOrStartThread(): Promise<void> {
-    const session = await this.sessionStore.read()
-    if (session?.threadId) {
-      try {
-        Logger.info('codex thread resume requested', {
-          threadId: session.threadId
-        })
-        await this.resumeThread(session.threadId)
-        return
-      } catch (error) {
-        Logger.warn('codex thread resume failed', {
-          threadId: session.threadId,
-          error: error instanceof Error ? error.message : String(error)
-        })
-        await this.sessionStore.clear()
-      }
-    }
-    await this.startThread()
-  }
-
-  private async resumeThread(threadId: string): Promise<void> {
-    if (!this.appServer) {
-      throw new Error('codex app-server not started')
-    }
-    const response = await this.appServer.request('thread/resume', {
-      threadId,
-      cwd: this.options.workspacePath,
-      approvalPolicy: 'never',
-      sandbox: 'danger-full-access',
-      developerInstructions: await this.readDeveloperInstructions()
-    })
-    this.threadId = this.readThreadId(response)
-    this.activeTurnId = undefined
-    this.messageByItemId.clear()
-    await this.sessionStore.write(this.threadId)
-    Logger.info('codex thread resumed', {
-      threadId: this.threadId
-    })
-  }
-
-  private async readDeveloperInstructions(): Promise<string> {
-    return (await readFile(join(codexioRootPath, 'instruction.md'), 'utf8'))
-      .replaceAll('${toolBaseUrl}', this.options.toolBaseUrl)
-      .replaceAll('${token}', this.options.config.server.token)
+  private async readDeveloperInstructions(ioThreadId: string): Promise<string> {
+    const serverHost = await this.configer.get('server.host')
+    const serverPort = await this.configer.get('server.port')
+    const token = await this.configer.get('server.token')
+    return (await readFile(join(this.metadata.rootPath, 'instruction.md'), 'utf8'))
+      .replaceAll('${toolBaseUrl}', `http://${serverHost}:${serverPort}`)
+      .replaceAll('${token}', token)
+      .replaceAll('${ioThreadId}', ioThreadId)
   }
 
   private readThreadId(response: unknown): string {
@@ -299,15 +308,24 @@ export class CodexAgent implements Agent {
     return (thread as Record<string, string>).id
   }
 
-  private async interruptActiveTurn(): Promise<void> {
-    if (this.threadId && this.activeTurnId && this.appServer) {
+  private async ensureThread(ioThreadId: string): Promise<CodexThread> {
+    const existing = this.threads.get(ioThreadId)
+    if (existing) {
+      return existing
+    }
+    return this.startThread(ioThreadId)
+  }
+
+  private async interruptActiveTurn(thread: CodexThread): Promise<void> {
+    if (thread.turnId && this.appServer) {
       Logger.info('codex turn interrupt requested', {
-        threadId: this.threadId,
-        turnId: this.activeTurnId
+        ioThreadId: thread.ioThreadId,
+        agentThreadId: thread.agentThreadId,
+        turnId: thread.turnId
       })
       await this.appServer.request('turn/interrupt', {
-        threadId: this.threadId,
-        turnId: this.activeTurnId
+        threadId: thread.agentThreadId,
+        turnId: thread.turnId
       }).catch((error) => {
         Logger.warn('codex turn interrupt failed', {
           error: error instanceof Error ? error.message : String(error)
@@ -316,7 +334,7 @@ export class CodexAgent implements Agent {
     }
   }
 
-  private async ensureLoggedIn(): Promise<void> {
+  private async ensureLoggedIn(ioThreadId?: string): Promise<void> {
     if (!this.appServer) {
       throw new Error('codex app-server not started')
     }
@@ -330,7 +348,7 @@ export class CodexAgent implements Agent {
       })
     } catch (error) {
       if (this.isAuthenticationInvalidated(error)) {
-        await this.requireLogin()
+        await this.requireLogin(ioThreadId)
       }
       throw error
     }
@@ -338,16 +356,16 @@ export class CodexAgent implements Agent {
       Logger.info('codex account ready')
       return
     }
-    await this.requireLogin()
+    await this.requireLogin(ioThreadId)
   }
 
-  private async requireLogin(): Promise<never> {
+  private async requireLogin(ioThreadId?: string): Promise<never> {
     Logger.warn('codex login required')
-    await this.startDeviceLogin()
+    await this.startDeviceLogin(ioThreadId)
     throw new AgentLoginInProgressError(codexLoginInProgressMessage)
   }
 
-  private async startDeviceLogin(): Promise<void> {
+  private async startDeviceLogin(ioThreadId?: string): Promise<void> {
     if (!this.appServer) {
       throw new Error('codex app-server not started')
     }
@@ -371,18 +389,28 @@ export class CodexAgent implements Agent {
       '登录完成后 Codexio 会自动恢复。'
     ].join('\n')
     process.stdout.write(`${message}\n`)
-    await (this.options.system ?? this.options.send)(message).catch(() => {})
+    const loginMessage: Message = {
+      ioThreadId: ioThreadId ?? allIoThreadId,
+      role: 'agent',
+      text: message,
+      createdAt: Date.now()
+    }
+    await this.sendSystem(loginMessage)
     const appServer = this.appServer
     const task = (async () => {
       await appServer.waitForNotification('account/login/completed')
       const completedMessage = 'Codex login completed.'
       process.stdout.write(`${completedMessage}\n`)
-      await (this.options.system ?? this.options.send)(completedMessage).catch(() => {})
+      const completionMessage: Message = {
+        ioThreadId: ioThreadId ?? allIoThreadId,
+        role: 'agent',
+        text: completedMessage,
+        createdAt: Date.now()
+      }
+      await this.sendSystem(completionMessage)
       await this.restartAfterLogin()
-      await this.options.onLoginCompleted?.()
     })()
     this.loginTask = task
-    await this.options.onLoginRequired?.(codexLoginInProgressMessage)
     void task.then(() => {
       if (this.loginTask === task) {
         this.loginTask = undefined
@@ -402,7 +430,7 @@ export class CodexAgent implements Agent {
     const shouldRestart = this.started
     await this.stop()
     if (shouldRestart) {
-      await this.start(this.options.config)
+      await this.start()
     }
   }
 
@@ -452,17 +480,18 @@ export class CodexAgent implements Agent {
       return
     }
     const data = params as Record<string, unknown>
+    const thread = this.resolveThread(data.threadId)
     if (method === 'turn/started') {
       const turn = data.turn
-      if (typeof data.threadId === 'string' && data.threadId === this.threadId && turn && typeof turn === 'object' && typeof (turn as Record<string, unknown>).id === 'string') {
-        this.activeTurnId = (turn as Record<string, string>).id
+      if (thread && turn && typeof turn === 'object' && typeof (turn as Record<string, unknown>).id === 'string') {
+        thread.turnId = (turn as Record<string, string>).id
       }
       return
     }
     if (method === 'item/agentMessage/delta') {
-      if (typeof data.threadId === 'string' && data.threadId === this.threadId && typeof data.itemId === 'string' && typeof data.delta === 'string') {
-        const current = this.messageByItemId.get(data.itemId) ?? ''
-        this.messageByItemId.set(data.itemId, current + data.delta)
+      if (thread && typeof data.itemId === 'string' && typeof data.delta === 'string') {
+        const current = thread.messages.get(data.itemId) ?? ''
+        thread.messages.set(data.itemId, current + data.delta)
       }
       return
     }
@@ -482,12 +511,12 @@ export class CodexAgent implements Agent {
     }
     if (method === 'turn/completed') {
       const turn = data.turn
-      if (typeof data.threadId !== 'string' || data.threadId !== this.threadId || !turn || typeof turn !== 'object') {
+      if (!thread || !turn || typeof turn !== 'object') {
         return
       }
       const turnId = (turn as Record<string, unknown>).id
-      if (typeof turnId === 'string' && turnId === this.activeTurnId) {
-        this.activeTurnId = undefined
+      if (typeof turnId === 'string' && turnId === thread.turnId) {
+        thread.turnId = undefined
       }
       const items = (turn as Record<string, unknown>).items
       const messages: string[] = []
@@ -502,16 +531,21 @@ export class CodexAgent implements Agent {
         }
       }
       if (messages.length === 0) {
-        for (const value of this.messageByItemId.values()) {
+        for (const value of thread.messages.values()) {
           const text = value.trim()
           if (text.length > 0) {
             messages.push(text)
           }
         }
       }
-      this.messageByItemId.clear()
+      thread.messages.clear()
       if (messages.length > 0) {
-        await this.options.send(messages.join('\n\n'))
+        await this.send({
+          ioThreadId: thread.ioThreadId,
+          role: 'agent',
+          text: messages.join('\n\n'),
+          createdAt: Date.now()
+        })
       }
       return
     }
@@ -521,11 +555,67 @@ export class CodexAgent implements Agent {
         const message = (error as Record<string, string>).message
         Logger.error('codex notification error', new Error(message))
         if (this.isAuthenticationInvalidated(error)) {
-          await this.startDeviceLogin()
+          await this.startDeviceLogin(thread?.ioThreadId ?? this.firstIoThreadId())
           return
         }
-        await (this.options.system ?? this.options.send)(message)
+        await this.sendSystem({
+          ioThreadId: thread?.ioThreadId ?? this.firstIoThreadId() ?? allIoThreadId,
+          role: 'agent',
+          text: message,
+          createdAt: Date.now()
+        })
       }
     }
+  }
+
+  private resolveThread(agentThreadId: unknown): CodexThread | undefined {
+    if (typeof agentThreadId !== 'string') {
+      return undefined
+    }
+    const ioThreadId = this.ioThreadIdByAgentThreadId.get(agentThreadId)
+    if (!ioThreadId) {
+      return undefined
+    }
+    return this.threads.get(ioThreadId)
+  }
+
+  private firstIoThreadId(): string | undefined {
+    return this.threads.keys().next().value
+  }
+
+  private async send(message: Message): Promise<void> {
+    const result = await this.callbacks.send(message)
+    if (result.isFailed) {
+      throw new Error(result.message)
+    }
+  }
+
+  private async sendSystem(message: Message): Promise<void> {
+    await this.callbacks.send(message).catch(() => {})
+  }
+
+  private async codexHomePath(): Promise<string | undefined> {
+    return await this.configer.get('agents.codex.bundled') ?? true ? this.metadata.codexHomePath : undefined
+  }
+
+  private async shellEnvironmentPath(): Promise<string | undefined> {
+    const codexHomePath = await this.codexHomePath()
+    return codexHomePath ? join(codexHomePath, 'config.toml') : undefined
+  }
+
+  private async proxyUrl(): Promise<string | undefined> {
+    return await this.configer.get('proxy.enabled') ? `http://${await this.configer.get('proxy.host')}:${await this.configer.get('proxy.port')}` : undefined
+  }
+
+  private async noProxyHosts(): Promise<string[]> {
+    if (!await this.configer.get('proxy.enabled')) {
+      return []
+    }
+    return [
+      'localhost',
+      '127.0.0.1',
+      '::1',
+      await this.configer.get('server.host')
+    ]
   }
 }

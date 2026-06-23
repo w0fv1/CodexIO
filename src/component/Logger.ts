@@ -1,7 +1,6 @@
 import { mkdir, appendFile, readdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { inspect } from 'node:util'
-import { codexioRootPath } from '../AppMetadata.js'
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
@@ -25,7 +24,7 @@ type LogRecord = {
 const defaultConsoleEnabled = process.env.NODE_ENV !== 'test'
 
 export class Logger {
-  private static logDir = join(codexioRootPath, '.codexio', 'log')
+  private static logDir = join(process.cwd(), '.codexio', 'log')
   private static consoleEnabled = defaultConsoleEnabled
   private static pending: Promise<void> = Promise.resolve()
 
@@ -39,7 +38,7 @@ export class Logger {
   }
 
   static reset(): void {
-    Logger.logDir = join(codexioRootPath, '.codexio', 'log')
+    Logger.logDir = join(process.cwd(), '.codexio', 'log')
     Logger.consoleEnabled = defaultConsoleEnabled
     Logger.pending = Promise.resolve()
   }

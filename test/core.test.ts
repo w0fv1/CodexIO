@@ -3,26 +3,32 @@ import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { codexConfigPath, codexHomePath, createAgentEnv } from '../src/agent/AgentEnvironment.js'
+import { createProcessEnv } from '../src/util/ProcessEnvironment.js'
 import { AgentManager } from '../src/agent/AgentManager.js'
 import { CodexAppServer } from '../src/agent/CodexAppServer.js'
-import { CodexAgent, createCodexCommand } from '../src/agent/CodexAgent.js'
-import { CodexSessionStore } from '../src/agent/CodexSessionStore.js'
-import { AgentLoginInProgressError } from '../src/agent/Agent.js'
-import { codexioRootPath } from '../src/AppMetadata.js'
+import { AgentLoginInProgressError, CodexAgent, CodexAppServerFactory, createCodexCommand } from '../src/agent/CodexAgent.js'
+import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
 import { CommandExecutor, parseCommandInput } from '../src/controller/CommandExecutor.js'
 import { FeishuChannel } from '../src/channel/FeishuChannel.js'
 import { FeishuMessageSender } from '../src/channel/FeishuMessageSender.js'
-import { createEmailMessagePayload, createEmailSender, createFeishuMessagePayload, createFeishuWebhookText, isAllowedEmailSender } from '../src/channel/ChannelUtil.js'
+import { ThreadBinder } from '../src/value/ThreadBinder.js'
 import { Logger } from '../src/component/Logger.js'
 import { renderMarkdownHtml } from '../src/component/Markdown.js'
 import { runtimeServerStatePath, supervisorStatePath } from '../src/component/ServerLifecycle.js'
 import { createUpdaterScript } from '../src/component/UpdateInstaller.js'
 import { FileStore } from '../src/component/FileStore.js'
-import { Configer, diffConfigPaths } from '../src/config/Configer.js'
-import { ConfigSchema, createDefaultConfig, normalizeWorkspacePath, validateCodexioConfig } from '../src/config/ConfigDefinition.js'
+import { Configer, diffConfigPaths } from '../src/component/Configer.js'
+import { ConfigSchema, createDefaultConfig, normalizeWorkspacePath, validateCodexioConfig } from '../src/value/ConfigDefinition.js'
 import { Result } from '../src/value/Result.js'
 import { TestAgent } from './TestAgent.js'
+import type { CodexioConfig } from '../src/value/ConfigDefinition.js'
+import type { Message } from '../src/value/Message.js'
+import type { Agent } from '../src/agent/Agent.js'
+
+const testMetadata = new CodexioMetadata()
+const codexioRootPath = testMetadata.rootPath
+const testCodexHomePath = join(codexioRootPath, '.codexio', 'codex')
+const testCodexConfigPath = join(testCodexHomePath, 'config.toml')
 
 describe('core', () => {
   it('writes daily persistent log file', async () => {
@@ -91,11 +97,12 @@ describe('core', () => {
 
   it('test agent sends received text', async () => {
     const outbound: string[] = []
-    const agent = new TestAgent(async (text) => {
-      outbound.push(text)
+    const agent = new TestAgent(async (message) => {
+      outbound.push(message.text)
     })
-    await agent.start(ConfigSchema.parse({}))
+    await agent.start()
     await agent.receive({
+      ioThreadId: 'test-thread',
       text: 'hello'
     })
     expect(outbound).toEqual([
@@ -107,9 +114,9 @@ describe('core', () => {
     const dir = await mkdtemp(join(tmpdir(), 'codexio-file-store-'))
     const source = join(dir, 'source.png')
     await writeFile(source, pngBytes())
-    const store = new FileStore({
-      rootPath: join(dir, 'store')
-    })
+    const store = new FileStore(new CodexioMetadata({
+      rootPath: dir
+    }))
 
     const file = await store.importPath(source)
     const saved = await readFile(file.path)
@@ -126,9 +133,9 @@ describe('core', () => {
 
   it('imports generic files through file store', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'codexio-file-store-generic-'))
-    const store = new FileStore({
-      rootPath: join(dir, 'store')
-    })
+    const store = new FileStore(new CodexioMetadata({
+      rootPath: dir
+    }))
 
     const file = await store.importBuffer({
       buffer: Buffer.from('hello file', 'utf8'),
@@ -148,8 +155,25 @@ describe('core', () => {
     expect(saved).toBe('hello file')
   })
 
+  it('binds platform thread identities to one io thread', () => {
+    const binder = new ThreadBinder()
+
+    const ioThreadId = binder.resolveOrCreate([
+      ' chat:thread:omt_1 ',
+      'chat:message:om_1'
+    ])
+    const same = binder.resolveOrCreate([
+      'chat:message:om_1',
+      'chat:message:om_2'
+    ])
+
+    expect(same).toBe(ioThreadId)
+    expect(binder.resolve(['chat:message:om_2'])).toBe(ioThreadId)
+    expect(() => binder.resolveOrCreate([])).toThrow('thread binding key is required')
+  })
+
   it('selected agent exposes login lifecycle', async () => {
-    const manager = new AgentManager(ConfigSchema.parse({
+    const manager = await createAgentManager(ConfigSchema.parse({
       agents: {
         codex: {
           enabled: false
@@ -158,19 +182,17 @@ describe('core', () => {
           enabled: true
         }
       }
-    }), 'http://127.0.0.1:8787', {
+    }), {
       send: async () => Result.success(null),
       status: async () => Result.success(null)
-    }, {
-      agentFactory: () => new TestAgent(async () => {})
-    })
+    }, new TestAgent(async () => {}))
     expect(manager.status().status).toBe('idle')
     await expect(manager.login()).resolves.toBeUndefined()
   })
 
   it('agent manager acknowledges user message before agent work', async () => {
     const outbound: string[] = []
-    const manager = new AgentManager(ConfigSchema.parse({
+    const manager = await createAgentManager(ConfigSchema.parse({
       agents: {
         codex: {
           enabled: false
@@ -179,18 +201,17 @@ describe('core', () => {
           enabled: true
         }
       }
-    }), 'http://127.0.0.1:8787', {
+    }), {
       send: async (text) => {
-        outbound.push(text)
+        outbound.push(text.text)
         return Result.success(null)
       },
       status: async () => Result.success(null)
-    }, {
-      agentFactory: () => new TestAgent(async (text) => {
-        outbound.push(text)
-      })
-    })
+    }, new TestAgent(async (message) => {
+      outbound.push(message.text)
+    }))
     const result = await manager.receiveMessage({
+      ioThreadId: 'test-thread',
       text: 'hello'
     })
     expect(result.isFailed).toBe(false)
@@ -202,7 +223,7 @@ describe('core', () => {
 
   it('agent manager serializes concurrent user messages', async () => {
     const outbound: string[] = []
-    const manager = new AgentManager(ConfigSchema.parse({
+    const manager = await createAgentManager(ConfigSchema.parse({
       agents: {
         codex: {
           enabled: false
@@ -211,10 +232,10 @@ describe('core', () => {
           enabled: true
         }
       }
-    }), 'http://127.0.0.1:8787', {
+    }), {
       send: async (text) => {
-        outbound.push(text)
-        if (!text.startsWith('test:')) {
+        outbound.push(text.text)
+        if (!text.text.startsWith('test:')) {
           await new Promise((resolve) => {
             setTimeout(resolve, 10)
           })
@@ -222,16 +243,16 @@ describe('core', () => {
         return Result.success(null)
       },
       status: async () => Result.success(null)
-    }, {
-      agentFactory: () => new TestAgent(async (text) => {
-        outbound.push(text)
-      })
-    })
+    }, new TestAgent(async (message) => {
+      outbound.push(message.text)
+    }))
     const [first, second] = await Promise.all([
       manager.receiveMessage({
+        ioThreadId: 'test-thread',
         text: 'first'
       }),
       manager.receiveMessage({
+        ioThreadId: 'test-thread',
         text: 'second'
       })
     ])
@@ -246,7 +267,7 @@ describe('core', () => {
   })
 
   it('agent manager does not queue user messages behind an active login flow', async () => {
-    const manager = new AgentManager(ConfigSchema.parse({
+    const manager = await createAgentManager(ConfigSchema.parse({
       agents: {
         codex: {
           enabled: true
@@ -255,26 +276,26 @@ describe('core', () => {
           enabled: false
         }
       }
-    }), 'http://127.0.0.1:8787', {
+    }), {
       send: async () => Result.success(null),
       status: async () => Result.success(null)
     }, {
-      agentFactory: () => ({
-        type: 'codex',
-        async login(): Promise<void> {},
-        async start(): Promise<void> {
-          throw new AgentLoginInProgressError('请先完成 Codex 登录。')
-        },
-        async receive(): Promise<void> {},
-        async clear(): Promise<void> {},
-        async stop(): Promise<void> {}
-      })
+      type: 'codex',
+      async login(): Promise<void> {},
+      async start(): Promise<void> {
+        throw new AgentLoginInProgressError('请先完成 Codex 登录。')
+      },
+      async receive(): Promise<void> {},
+      async clear(): Promise<void> {},
+      async stop(): Promise<void> {}
     })
 
     const first = await manager.receiveMessage({
+      ioThreadId: 'test-thread',
       text: 'first'
     })
     const second = await manager.receiveMessage({
+      ioThreadId: 'test-thread',
       text: 'second'
     })
 
@@ -289,22 +310,20 @@ describe('core', () => {
   })
 
   it('agents apply proxy env internally', async () => {
-    const env = createAgentEnv(ConfigSchema.parse({
-      proxy: {
-        enabled: true,
-        host: 'proxy.local',
-        port: 8080
-      },
-      server: {
-        host: '127.0.0.1',
-        port: 8787
+    const env = createProcessEnv(
+      testCodexHomePath,
+      testCodexConfigPath,
+      'http://proxy.local:8080',
+      [
+        'localhost',
+        '127.0.0.1',
+        '::1'
+      ],
+      {
+        CODEXIO_API_URL: 'http://127.0.0.1:8787',
+        CODEXIO_TOKEN: 'runtime-token'
       }
-    }), {
-      codexio: {
-        apiUrl: 'http://127.0.0.1:8787',
-        token: 'runtime-token'
-      }
-    })
+    )
     expect(env.HTTP_PROXY).toBe('http://proxy.local:8080')
     expect(env.HTTPS_PROXY).toBe('http://proxy.local:8080')
     expect(env.ALL_PROXY).toBe('http://proxy.local:8080')
@@ -315,8 +334,8 @@ describe('core', () => {
     expect(env.CODEXIO_TOKEN).toBe('runtime-token')
     expect(env.CODEX_HOME).toContain('.codexio')
     expect(env.CODEX_HOME).toContain('codex')
-    expect(existsSync(codexHomePath)).toBe(true)
-    const codexConfig = readFileSync(codexConfigPath, 'utf8')
+    expect(existsSync(testCodexHomePath)).toBe(true)
+    const codexConfig = readFileSync(testCodexConfigPath, 'utf8')
     expect(codexConfig).toContain('[shell_environment_policy]')
     expect(codexConfig).toContain('"HTTPS_PROXY" = "http://proxy.local:8080"')
     expect(codexConfig).toContain('"NO_PROXY" = "localhost,127.0.0.1,::1"')
@@ -325,7 +344,7 @@ describe('core', () => {
   })
 
   it('resolves bundled codex command by default', () => {
-    const command = createCodexCommand(ConfigSchema.parse({}), [
+    const command = createCodexCommand(undefined, [
       'app-server',
       '--stdio'
     ])
@@ -340,19 +359,11 @@ describe('core', () => {
     const previousCodexHome = process.env.CODEX_HOME
     process.env.CODEX_HOME = 'C:\\Users\\test\\.codex'
     try {
-      const config = ConfigSchema.parse({
-        agents: {
-          codex: {
-            enabled: true,
-            bundled: false
-          }
-        }
-      })
-      const command = createCodexCommand(config, [
+      const command = createCodexCommand(false, [
         'app-server',
         '--stdio'
       ])
-      const env = createAgentEnv(config)
+      const env = createProcessEnv()
 
       expect(command).toEqual({
         command: 'codex',
@@ -413,6 +424,57 @@ describe('core', () => {
     })
   })
 
+  it('command executor forwards ordinary text with channel thread id', async () => {
+    const displayed: Array<{ ioThreadId: string, text: string }> = []
+    const received: Array<{ ioThreadId: string, text: string }> = []
+    const executor = new CommandExecutor({
+      sendSystem: async () => Result.success(null),
+      displayUser: async (input: { ioThreadId: string, text: string }) => {
+        displayed.push(input)
+        return Result.success(null)
+      },
+      clear: async () => Result.success(null)
+    } as unknown as import('../src/channel/ChannelManager.js').ChannelManager, {
+      receiveMessage: async (input: { ioThreadId: string, text: string }) => {
+        received.push(input)
+        return Result.success({})
+      },
+      clear: async () => Result.success({
+        action: 'clear'
+      })
+    } as unknown as AgentManager, {
+      update: async () => Result.success('updated')
+    }, {
+      restart: async () => Result.success('restarted')
+    })
+
+    const createdAt = Date.now()
+    const result = await executor.receive({
+      role: 'user',
+      ioThreadId: 'io-thread',
+      text: 'hello',
+      createdAt,
+      source: 'web'
+    })
+
+    expect(result.isFailed).toBe(false)
+    expect(result.data?.ioThreadId).toBe('io-thread')
+    expect(displayed[0]).toMatchObject({
+      role: 'user',
+      ioThreadId: 'io-thread',
+      text: 'hello',
+      createdAt,
+      source: 'web'
+    })
+    expect(received[0]).toMatchObject({
+      role: 'user',
+      ioThreadId: 'io-thread',
+      text: 'hello',
+      createdAt,
+      source: 'web'
+    })
+  })
+
   it('command executor sends system feedback around update command', async () => {
     const systemMessages: string[] = []
     const executor = new CommandExecutor({
@@ -429,10 +491,15 @@ describe('core', () => {
       })
     } as unknown as AgentManager, {
       update: async () => Result.success('Codexio 0.4.2 更新包已准备完成，正在安装并重启。')
+    }, {
+      restart: async () => Result.success('restarted')
     })
 
     const result = await executor.receive({
+      role: 'user',
+      ioThreadId: 'io-thread',
       text: '$update',
+      createdAt: Date.now(),
       source: 'web'
     })
 
@@ -462,10 +529,15 @@ describe('core', () => {
       })
     } as unknown as AgentManager, {
       update: async () => Result.success('Codexio 已是最新版本 0.4.2。')
+    }, {
+      restart: async () => Result.success('restarted')
     })
 
     const result = await executor.receive({
+      role: 'user',
+      ioThreadId: 'io-thread',
       text: '$update',
+      createdAt: Date.now(),
       source: 'web'
     })
 
@@ -484,16 +556,12 @@ describe('core', () => {
       method: string
       params: unknown
     }> = []
-    const agent = new CodexAgent({
-      workspacePath: '.',
+    const agent = createCodexAgent({
       config: ConfigSchema.parse({
         server: {
           token: 'test-token'
         }
       }),
-      toolBaseUrl: 'http://127.0.0.1:8787',
-      send: async () => {},
-      sessionStore: await createTempSessionStore(),
       appServer: {
         async start(): Promise<void> {},
         async request(method: string, params: unknown): Promise<unknown> {
@@ -506,6 +574,13 @@ describe('core', () => {
               account: {}
             }
           }
+          if (method === 'turn/start') {
+            return {
+              turn: {
+                id: 'turn-1'
+              }
+            }
+          }
           return {
             thread: {
               id: 'thread-1'
@@ -516,11 +591,15 @@ describe('core', () => {
         async stop(): Promise<void> {}
       }
     })
-    await agent.start(ConfigSchema.parse({}))
+    await agent.start()
+    await agent.receive({
+      ioThreadId: 'io-thread',
+      text: 'hello'
+    })
     const threadStart = requests.find((request) => request.method === 'thread/start')
     expect(threadStart?.params).toMatchObject({
       ephemeral: false,
-      developerInstructions: expect.stringContaining('$apiUrl/api/message')
+      developerInstructions: expect.stringContaining('$apiUrl/api/agent/message')
     })
     const developerInstructions = (threadStart?.params as Record<string, unknown>).developerInstructions
     expect(developerInstructions).toContain('Bearer $token')
@@ -530,126 +609,116 @@ describe('core', () => {
     expect(developerInstructions).toContain('[System.Text.Encoding]::UTF8.GetBytes')
     expect(developerInstructions).toContain('application/json; charset=utf-8')
     expect(developerInstructions).toContain('Never send local images as Markdown image links')
+    expect(developerInstructions).toContain('ioThreadId = "io-thread"')
+    expect(developerInstructions).toContain('"ioThreadId": "io-thread"')
     expect(developerInstructions).not.toContain('${toolBaseUrl}')
     expect(developerInstructions).not.toContain('${token}')
+    expect(developerInstructions).not.toContain('${ioThreadId}')
   })
 
-  it('codex agent saves a new persistent thread when no session exists', async () => {
-    const { store, path } = await createTempSessionStoreWithPath()
+  it('codex agent does not create a thread during startup', async () => {
     const requests: Array<{
       method: string
       params: unknown
     }> = []
-    const agent = new CodexAgent({
-      workspacePath: '.',
-      config: ConfigSchema.parse({}),
-      toolBaseUrl: 'http://127.0.0.1:8787',
-      send: async () => {},
-      sessionStore: store,
+    const agent = createCodexAgent({
       appServer: createCodexAppServerMock(requests)
     })
 
-    await agent.start(ConfigSchema.parse({}))
+    await agent.start()
 
     expect(requests.map((request) => request.method)).toEqual([
-      'account/read',
-      'thread/start'
+      'account/read'
     ])
-    expect(requests[1].params).toMatchObject({
-      ephemeral: false
-    })
-    expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({
-      agent: 'codex',
-      threadId: 'thread-1',
-      updatedAt: expect.any(String)
-    })
   })
 
-  it('codex agent resumes an existing persistent thread', async () => {
-    const { store } = await createTempSessionStoreWithPath()
-    await store.write('thread-existing')
+  it('codex agent creates a thread for the received codexio thread id', async () => {
     const requests: Array<{
       method: string
       params: unknown
     }> = []
-    const agent = new CodexAgent({
-      workspacePath: '.',
-      config: ConfigSchema.parse({}),
-      toolBaseUrl: 'http://127.0.0.1:8787',
-      send: async () => {},
-      sessionStore: store,
+    const agent = createCodexAgent({
       appServer: createCodexAppServerMock(requests)
     })
 
-    await agent.start(ConfigSchema.parse({}))
-
-    expect(requests.map((request) => request.method)).toEqual([
-      'account/read',
-      'thread/resume'
-    ])
-    expect(requests[1].params).toMatchObject({
-      threadId: 'thread-existing',
-      approvalPolicy: 'never',
-      sandbox: 'danger-full-access'
+    await agent.start()
+    await agent.receive({
+      ioThreadId: 'io-thread',
+      text: 'hello'
     })
-  })
-
-  it('codex agent clears an invalid session and creates a new thread', async () => {
-    const { store } = await createTempSessionStoreWithPath()
-    await store.write('thread-stale')
-    const requests: Array<{
-      method: string
-      params: unknown
-    }> = []
-    const agent = new CodexAgent({
-      workspacePath: '.',
-      config: ConfigSchema.parse({}),
-      toolBaseUrl: 'http://127.0.0.1:8787',
-      send: async () => {},
-      sessionStore: store,
-      appServer: createCodexAppServerMock(requests, {
-        failResume: true
-      })
-    })
-
-    await agent.start(ConfigSchema.parse({}))
-
-    expect(requests.map((request) => request.method)).toEqual([
-      'account/read',
-      'thread/resume',
-      'thread/start'
-    ])
-    await expect(store.read()).resolves.toMatchObject({
-      threadId: 'thread-1'
-    })
-  })
-
-  it('codex agent clear overwrites the persisted thread with a new thread', async () => {
-    const { store } = await createTempSessionStoreWithPath()
-    const requests: Array<{
-      method: string
-      params: unknown
-    }> = []
-    const agent = new CodexAgent({
-      workspacePath: '.',
-      config: ConfigSchema.parse({}),
-      toolBaseUrl: 'http://127.0.0.1:8787',
-      send: async () => {},
-      sessionStore: store,
-      appServer: createCodexAppServerMock(requests)
-    })
-
-    await agent.start(ConfigSchema.parse({}))
-    await agent.clear()
 
     expect(requests.map((request) => request.method)).toEqual([
       'account/read',
       'thread/start',
-      'thread/start'
+      'turn/start'
     ])
-    await expect(store.read()).resolves.toMatchObject({
+    expect(requests[1].params).toMatchObject({
+      approvalPolicy: 'never',
+      sandbox: 'danger-full-access',
+      ephemeral: false
+    })
+    expect(requests[2].params).toMatchObject({
+      threadId: 'thread-1'
+    })
+  })
+
+  it('codex agent creates independent agent threads for different codexio thread ids', async () => {
+    const requests: Array<{
+      method: string
+      params: unknown
+    }> = []
+    const agent = createCodexAgent({
+      appServer: createCodexAppServerMock(requests)
+    })
+
+    await agent.start()
+    await agent.receive({
+      ioThreadId: 'thread-a',
+      text: 'first'
+    })
+    await agent.receive({
+      ioThreadId: 'thread-b',
+      text: 'second'
+    })
+
+    expect(requests.map((request) => request.method)).toEqual([
+      'account/read',
+      'thread/start',
+      'turn/start',
+      'thread/start',
+      'turn/start'
+    ])
+    expect(requests[2].params).toMatchObject({
+      threadId: 'thread-1'
+    })
+    expect(requests[4].params).toMatchObject({
       threadId: 'thread-2'
     })
+  })
+
+  it('codex agent clear recreates the selected codexio thread', async () => {
+    const requests: Array<{
+      method: string
+      params: unknown
+    }> = []
+    const agent = createCodexAgent({
+      appServer: createCodexAppServerMock(requests)
+    })
+
+    await agent.start()
+    await agent.receive({
+      ioThreadId: 'io-thread',
+      text: 'first'
+    })
+    await agent.clear('io-thread')
+
+    expect(requests.map((request) => request.method)).toEqual([
+      'account/read',
+      'thread/start',
+      'turn/start',
+      'turn/interrupt',
+      'thread/start'
+    ])
   })
 
   it('codex agent steers the active app-server turn', async () => {
@@ -695,22 +764,19 @@ describe('core', () => {
       async waitForNotification(): Promise<void> {},
       async stop(): Promise<void> {}
     }
-    const agent = new CodexAgent({
-      workspacePath: '.',
-      config: ConfigSchema.parse({}),
-      toolBaseUrl: 'http://127.0.0.1:8787',
-      send: async () => {},
-      sessionStore: await createTempSessionStore(),
+    const agent = createCodexAgent({
       appServer
     })
-    await agent.start(ConfigSchema.parse({}))
+    await agent.start()
     await agent.receive({
+      ioThreadId: 'io-thread',
       text: 'first'
     })
     await agent.receive({
+      ioThreadId: 'io-thread',
       text: 'second'
     })
-    await agent.clear()
+    await agent.clear('io-thread')
     expect(requests.map((request) => request.method)).toEqual([
       'account/read',
       'thread/start',
@@ -735,16 +801,12 @@ describe('core', () => {
       method: string
       params: unknown
     }> = []
-    const agent = new CodexAgent({
-      workspacePath: '.',
-      config: ConfigSchema.parse({}),
-      toolBaseUrl: 'http://127.0.0.1:8787',
-      send: async () => {},
-      sessionStore: await createTempSessionStore(),
+    const agent = createCodexAgent({
       appServer: createCodexAppServerMock(requests)
     })
-    await agent.start(ConfigSchema.parse({}))
+    await agent.start()
     await agent.receive({
+      ioThreadId: 'io-thread',
       text: 'look',
       files: [
         {
@@ -780,16 +842,12 @@ describe('core', () => {
       method: string
       params: unknown
     }> = []
-    const agent = new CodexAgent({
-      workspacePath: '.',
-      config: ConfigSchema.parse({}),
-      toolBaseUrl: 'http://127.0.0.1:8787',
-      send: async () => {},
-      sessionStore: await createTempSessionStore(),
+    const agent = createCodexAgent({
       appServer: createCodexAppServerMock(requests)
     })
-    await agent.start(ConfigSchema.parse({}))
+    await agent.start()
     await agent.receive({
+      ioThreadId: 'io-thread',
       text: 'read this',
       files: [
         {
@@ -856,19 +914,15 @@ describe('core', () => {
       },
       async stop(): Promise<void> {}
     }
-    const agent = new CodexAgent({
-      workspacePath: '.',
-      config: ConfigSchema.parse({}),
-      toolBaseUrl: 'http://127.0.0.1:8787',
-      send: async (text) => {
-        outbound.push(text)
+    const agent = createCodexAgent({
+      send: async (message) => {
+        outbound.push(message.text)
       },
-      sessionStore: await createTempSessionStore(),
       appServer
     })
     const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     try {
-      await expect(agent.start(ConfigSchema.parse({}))).rejects.toThrow(AgentLoginInProgressError)
+      await expect(agent.start('login-thread')).rejects.toThrow(AgentLoginInProgressError)
     } finally {
       stdout.mockRestore()
     }
@@ -888,7 +942,6 @@ describe('core', () => {
 
   it('codex agent starts device-code login when account refresh is invalidated', async () => {
     const outbound: string[] = []
-    const states: string[] = []
     const requests: Array<{
       method: string
       params: unknown
@@ -917,22 +970,15 @@ describe('core', () => {
       },
       async stop(): Promise<void> {}
     }
-    const agent = new CodexAgent({
-      workspacePath: '.',
-      config: ConfigSchema.parse({}),
-      toolBaseUrl: 'http://127.0.0.1:8787',
-      send: async (text) => {
-        outbound.push(text)
+    const agent = createCodexAgent({
+      send: async (message) => {
+        outbound.push(message.text)
       },
-      onLoginRequired: async (message) => {
-        states.push(message)
-      },
-      sessionStore: await createTempSessionStore(),
       appServer
     })
     const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     try {
-      await expect(agent.start(ConfigSchema.parse({}))).rejects.toThrow(AgentLoginInProgressError)
+      await expect(agent.start('login-thread')).rejects.toThrow(AgentLoginInProgressError)
     } finally {
       stdout.mockRestore()
     }
@@ -947,14 +993,10 @@ describe('core', () => {
     expect(outbound[0]).toContain('Codex 登录已失效，请重新登录。')
     expect(outbound[0]).toContain('https://login.example.test/device')
     expect(outbound[0]).toContain('WXYZ-1234')
-    expect(states).toEqual([
-      '请先完成 Codex 登录。'
-    ])
   })
 
   it('codex agent turns runtime token invalidation into one login flow', async () => {
     const outbound: string[] = []
-    const states: string[] = []
     const requests: Array<{
       method: string
       params: unknown
@@ -992,22 +1034,15 @@ describe('core', () => {
       },
       async stop(): Promise<void> {}
     }
-    const agent = new CodexAgent({
-      workspacePath: '.',
-      config: ConfigSchema.parse({}),
-      toolBaseUrl: 'http://127.0.0.1:8787',
-      send: async (text) => {
-        outbound.push(text)
+    const agent = createCodexAgent({
+      send: async (message) => {
+        outbound.push(message.text)
       },
-      onLoginRequired: async (message) => {
-        states.push(message)
-      },
-      sessionStore: await createTempSessionStore(),
       appServer
     })
     const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     try {
-      await agent.start(ConfigSchema.parse({}))
+      await agent.start()
       const handleNotification = (agent as unknown as {
         handleNotification: (method: string, params: unknown) => Promise<void>
       }).handleNotification.bind(agent)
@@ -1029,15 +1064,11 @@ describe('core', () => {
 
     expect(requests.map((request) => request.method)).toEqual([
       'account/read',
-      'thread/start',
       'account/login/start'
     ])
     expect(outbound).toHaveLength(1)
     expect(outbound[0]).toContain('RUNTIME-1')
     expect(outbound[0]).not.toContain('Your access token could not be refreshed')
-    expect(states).toEqual([
-      '请先完成 Codex 登录。'
-    ])
   })
 
   it('codex agent restarts after device-code login completes', async () => {
@@ -1078,13 +1109,6 @@ describe('core', () => {
             }
           }
         }
-        if (method === 'thread/resume') {
-          return {
-            thread: {
-              id: (params as Record<string, string>).threadId
-            }
-          }
-        }
         return {}
       },
       async waitForNotification(): Promise<void> {
@@ -1096,19 +1120,15 @@ describe('core', () => {
         stops += 1
       }
     }
-    const agent = new CodexAgent({
-      workspacePath: '.',
-      config: ConfigSchema.parse({}),
-      toolBaseUrl: 'http://127.0.0.1:8787',
-      send: async (text) => {
-        outbound.push(text)
+    const agent = createCodexAgent({
+      send: async (message) => {
+        outbound.push(message.text)
       },
-      sessionStore: await createTempSessionStore(),
       appServer
     })
     const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     try {
-      await agent.start(ConfigSchema.parse({}))
+      await agent.start()
       const handleNotification = (agent as unknown as {
         handleNotification: (method: string, params: unknown) => Promise<void>
       }).handleNotification.bind(agent)
@@ -1119,7 +1139,7 @@ describe('core', () => {
         }
       })
       completeLogin?.()
-      await waitFor(() => requests.some((request) => request.method === 'thread/resume'))
+      await waitFor(() => requests.filter((request) => request.method === 'account/read').length === 2)
     } finally {
       stdout.mockRestore()
     }
@@ -1128,10 +1148,8 @@ describe('core', () => {
     expect(stops).toBe(1)
     expect(requests.map((request) => request.method)).toEqual([
       'account/read',
-      'thread/start',
       'account/login/start',
-      'account/read',
-      'thread/resume'
+      'account/read'
     ])
     expect(outbound).toContain('Codex login completed.')
   })
@@ -1157,6 +1175,7 @@ describe('core', () => {
       ],
       cwd: '.',
       env: process.env,
+      metadata: testMetadata,
       requestTimeoutMs: 500,
       onNotification: () => {},
       onStderr: (data) => {
@@ -1188,6 +1207,7 @@ describe('core', () => {
       ],
       cwd: '.',
       env: process.env,
+      metadata: testMetadata,
       requestTimeoutMs: 500,
       onNotification: () => {},
       onStderr: () => {}
@@ -1200,15 +1220,36 @@ describe('core', () => {
   })
 
   it('defaults workspace to codexio local workspace directory', () => {
-    const config = createDefaultConfig()
+    const config = createDefaultConfig(join(codexioRootPath, '.codexio', 'workspace'))
     expect(config.workspace.path).toContain(join('.codexio', 'workspace'))
   })
 
-  it('creates default workspace when initializing new config', async () => {
+  it('leaves workspace creation to agent runtime when initializing new config', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'codexio-'))
     const path = join(dir, 'config.yaml')
-    const config = await new Configer(path).init()
-    expect(existsSync(config.workspace.path)).toBe(true)
+    const config = await createTestConfiger(path).init()
+    expect(existsSync(config.workspace.path)).toBe(false)
+  })
+
+  it('agent manager creates workspace before starting agent', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-agent-workspace-'))
+    const workspace = join(dir, 'workspace')
+    const config = ConfigSchema.parse({
+      workspace: {
+        path: workspace
+      }
+    })
+    const agent = new TestAgent(async () => {})
+    const manager = await createAgentManager(config, {
+      send: async () => Result.success(null),
+      status: async () => Result.success(null)
+    }, agent)
+
+    const started = await manager.start()
+
+    expect(started.isFailed).toBe(false)
+    expect(existsSync(workspace)).toBe(true)
+    await manager.stop()
   })
 
   it('configer patches config file and notifies after successful write', async () => {
@@ -1232,7 +1273,7 @@ describe('core', () => {
       'workspace:',
       `  path: ${workspace}`
     ].join('\n'), 'utf8')
-    const configer = new Configer(path)
+    const configer = createTestConfiger(path)
     const changes: Array<{
       previousPort: number
       currentPort: number
@@ -1308,12 +1349,12 @@ describe('core', () => {
       'workspace:',
       `  path: ${workspace}`
     ].join('\n'), 'utf8')
-    const configer = new Configer(path)
+    const configer = createTestConfiger(path)
     const feishuChanges: Array<{
       previousSecret: string | undefined
       currentSecret: string | undefined
     }> = []
-    configer.subscribe((config) => config.channels.feishu, (change) => {
+    configer.subscribe('channels.feishu', (change) => {
       feishuChanges.push({
         previousSecret: change.previousValue?.appSecret,
         currentSecret: change.currentValue?.appSecret
@@ -1364,7 +1405,7 @@ describe('core', () => {
     ])
   })
 
-  it('creates packaged managed workspace when loading default release config', async () => {
+  it('resolves packaged managed workspace without creating it when loading default release config', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'codexio-package-'))
     const path = join(dir, 'config.yaml')
     await writeFile(path, [
@@ -1372,17 +1413,17 @@ describe('core', () => {
       '  path: codexio/.codexio/workspace'
     ].join('\n'), 'utf8')
 
-    const config = await new Configer(path).read()
+    const configer = createTestConfiger(path)
 
-    expect(config.workspace.path).toBe(join(dir, 'codexio', '.codexio', 'workspace'))
-    expect(existsSync(config.workspace.path)).toBe(true)
+    expect(await configer.get('workspace.path')).toBe(join(dir, 'codexio', '.codexio', 'workspace'))
+    expect(existsSync(await configer.get('workspace.path'))).toBe(false)
   })
 
   it('expands home workspace paths', () => {
     expect(normalizeWorkspacePath('~/Desktop')).toBe(join(homedir(), 'Desktop'))
   })
 
-  it('validates workspace and enabled channel config before startup', () => {
+  it('allows missing workspace and validates enabled channel config before startup', () => {
     const missingWorkspace = join(tmpdir(), 'codexio-missing-workspace')
     const config = ConfigSchema.parse({
       server: {
@@ -1413,7 +1454,6 @@ describe('core', () => {
       throw new Error('validation should fail')
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      expect(message).toContain('workspace.path does not exist')
       expect(message).toContain('channels.feishu.appId is required')
       expect(message).toContain('channels.feishu.appSecret is required')
       expect(message).toContain('channels.feishu.chatId is required')
@@ -1436,9 +1476,9 @@ describe('core', () => {
       '  path: ${proxy.host}'
     ].join('\n'), 'utf8')
     try {
-      const config = await new Configer(path).read()
-      expect(config.server.token).toBe('env-token')
-      expect(config.workspace.path).toBe(join(dir, 'proxy.local'))
+      const configer = createTestConfiger(path)
+      expect(await configer.get('server.token')).toBe('env-token')
+      expect(await configer.get('workspace.path')).toBe(join(dir, 'proxy.local'))
     } finally {
       if (previousToken === undefined) {
         delete process.env.CODEXIO_TEST_TOKEN
@@ -1568,156 +1608,176 @@ describe('core', () => {
     expect(config.channels.feishu?.ws).toBe('')
   })
 
-  it('uses smtp user as email address when sender is only a display name', () => {
-    expect(createEmailSender('codexio-agent', 'agent@example.test')).toEqual({
-      name: 'codexio-agent',
-      address: 'agent@example.test'
-    })
-  })
+  it('appends feishu thread messages through message reply', async () => {
+    const createdMessages: unknown[] = []
+    const repliedMessages: Array<{
+      messageId: string
+      msgType: string
+      content: string
+      replyInThread?: boolean
+    }> = []
+    const sender = new FeishuMessageSender({
+      enabled: true,
+      appId: 'app-id',
+      appSecret: 'app-secret',
+      chatId: 'chat-id'
+    }, {
+      im: {
+        v1: {
+          image: {
+            create: async () => {
+              throw new Error('image upload should not run')
+            }
+          },
+          message: {
+            create: async (payload) => {
+              createdMessages.push(payload)
+            },
+            reply: async (payload) => {
+              repliedMessages.push({
+                messageId: payload.path.message_id,
+                msgType: payload.data.msg_type,
+                content: payload.data.content,
+                replyInThread: payload.data.reply_in_thread
+              })
+            }
+          }
+        }
+      }
+    } as unknown as ConstructorParameters<typeof FeishuMessageSender>[1])
+    sender.rememberThread('io-thread', 'om-root')
 
-  it('filters incoming email by configured user address', () => {
-    expect(isAllowedEmailSender([
-      'USER@EXAMPLE.TEST'
-    ], 'user@example.test')).toBe(true)
-    expect(isAllowedEmailSender([
-      'other@example.test'
-    ], 'user@example.test')).toBe(false)
-  })
-
-  it('formats feishu message without codexio title and labels non-agent roles at bottom', () => {
-    const agentPayload = createFeishuMessagePayload({
+    const result = await sender.send({
       role: 'agent',
-      text: 'agent output',
+      ioThreadId: 'io-thread',
+      source: 'agent',
+      text: '继续在同一个话题回复',
       createdAt: Date.now()
     })
-    const agentContent = JSON.parse(agentPayload.content) as {
-      zh_cn: {
-        title?: string
-        content: Array<Array<{ tag: string, text: string }>>
-      }
-    }
-    expect(agentContent.zh_cn.title).toBeUndefined()
-    expect(agentContent.zh_cn.content).toEqual([
-      [
-        {
-          tag: 'md',
-          text: 'agent output'
-        }
-      ]
-    ])
 
-    const userPayload = createFeishuMessagePayload({
+    expect(result.isFailed).toBe(false)
+    expect(createdMessages).toEqual([])
+    expect(repliedMessages).toHaveLength(1)
+    expect(repliedMessages[0]).toMatchObject({
+      messageId: 'om-root',
+      msgType: 'post',
+      replyInThread: true
+    })
+    expect(JSON.parse(repliedMessages[0].content)).toEqual({
+      zh_cn: {
+        content: [
+          [
+            {
+              tag: 'md',
+              text: '继续在同一个话题回复'
+            }
+          ]
+        ]
+      }
+    })
+  })
+
+  it('creates the first feishu root message for an unknown codexio thread then replies in that thread', async () => {
+    const createdMessages: Array<{
+      receiveId: string
+      msgType: string
+      content: string
+    }> = []
+    const repliedMessages: Array<{
+      messageId: string
+      msgType: string
+      content: string
+      replyInThread?: boolean
+    }> = []
+    const sender = new FeishuMessageSender({
+      enabled: true,
+      appId: 'app-id',
+      appSecret: 'app-secret',
+      chatId: 'chat-id'
+    }, {
+      im: {
+        v1: {
+          image: {
+            create: async () => {
+              throw new Error('image upload should not run')
+            }
+          },
+          message: {
+            create: async (payload) => {
+              createdMessages.push({
+                receiveId: payload.data.receive_id,
+                msgType: payload.data.msg_type,
+                content: payload.data.content
+              })
+              return {
+                data: {
+                  message_id: 'om-root'
+                }
+              }
+            },
+            reply: async (payload) => {
+              repliedMessages.push({
+                messageId: payload.path.message_id,
+                msgType: payload.data.msg_type,
+                content: payload.data.content,
+                replyInThread: payload.data.reply_in_thread
+              })
+            }
+          }
+        }
+      }
+    } as unknown as ConstructorParameters<typeof FeishuMessageSender>[1])
+
+    const first = await sender.send({
       role: 'user',
-      text: 'user input',
+      ioThreadId: 'io-thread',
+      source: 'web',
+      text: '你好啊',
       createdAt: Date.now()
     })
-    const userContent = JSON.parse(userPayload.content) as {
-      zh_cn: {
-        content: Array<Array<{ tag: string, text: string }>>
-      }
-    }
-    expect(userContent.zh_cn.content.at(-1)).toEqual([
-      {
-        tag: 'text',
-        text: 'User'
-      }
-    ])
-
-    const systemPayload = createFeishuMessagePayload({
-      role: 'system',
-      text: 'system output',
+    const second = await sender.send({
+      role: 'agent',
+      ioThreadId: 'io-thread',
+      source: 'agent',
+      text: '收到，我在这里。',
       createdAt: Date.now()
     })
-    const systemContent = JSON.parse(systemPayload.content) as {
-      zh_cn: {
-        content: Array<Array<{ tag: string, text: string }>>
-      }
-    }
-    expect(systemContent.zh_cn.content).toEqual([
-      [
-        {
-          tag: 'md',
-          text: 'system output'
-        }
-      ],
-      [
-        {
-          tag: 'text',
-          text: 'System'
-        }
-      ]
-    ])
 
-    const imagePayload = createFeishuMessagePayload({
-      role: 'user',
-      text: 'with image',
-      createdAt: Date.now(),
-      files: [
-        {
-          id: 'file-1',
-          mime: 'image/png',
-          name: 'image.png',
-          size: 1,
-          sha256: '0'.repeat(64),
-          path: 'C:\\tmp\\image.png',
-          url: '/api/files/file-1'
-        }
-      ]
-    }, [
-      {
-        imageKey: 'img-key'
-      }
-    ])
-    const imageContent = JSON.parse(imagePayload.content) as {
-      zh_cn: {
-        content: Array<Array<Record<string, string>>>
-      }
-    }
-    expect(imagePayload.content).not.toContain('/api/files/file-1')
-    expect(imageContent.zh_cn.content).toContainEqual([
-      {
-        tag: 'img',
-        image_key: 'img-key'
-      }
-    ])
-
-    const filePayload = createFeishuMessagePayload({
-      role: 'user',
-      text: 'with file',
-      createdAt: Date.now(),
-      files: [
-        {
-          id: 'file-1',
-          mime: 'text/plain',
-          name: 'note.txt',
-          size: 10,
-          sha256: '0'.repeat(64),
-          path: 'C:\\tmp\\note.txt',
-          url: '/api/files/file-1'
-        }
-      ]
+    expect(first.isFailed).toBe(false)
+    expect(second.isFailed).toBe(false)
+    expect(createdMessages).toHaveLength(1)
+    expect(createdMessages[0]).toMatchObject({
+      receiveId: 'chat-id',
+      msgType: 'post'
     })
-    expect(filePayload.content).not.toContain('/api/files/file-1')
-
-    const fileOnlyPayload = createFeishuMessagePayload({
-      role: 'user',
-      text: '',
-      createdAt: Date.now(),
-      files: [
-        {
-          id: 'file-1',
-          mime: 'text/plain',
-          name: 'note.txt',
-          size: 10,
-          sha256: '0'.repeat(64),
-          path: 'C:\\tmp\\note.txt',
-          url: '/api/files/file-1'
-        }
-      ]
-    })
-    expect(JSON.parse(fileOnlyPayload.content)).toEqual({
+    expect(JSON.parse(createdMessages[0].content)).toEqual({
       zh_cn: {
-        content: []
+        content: [
+          [
+            {
+              tag: 'md',
+              text: '你好啊'
+            }
+          ]
+        ]
+      }
+    })
+    expect(repliedMessages).toHaveLength(1)
+    expect(repliedMessages[0]).toMatchObject({
+      messageId: 'om-root',
+      msgType: 'post',
+      replyInThread: true
+    })
+    expect(JSON.parse(repliedMessages[0].content)).toEqual({
+      zh_cn: {
+        content: [
+          [
+            {
+              tag: 'md',
+              text: '收到，我在这里。'
+            }
+          ]
+        ]
       }
     })
   })
@@ -1753,6 +1813,17 @@ describe('core', () => {
                 msgType: payload.data.msg_type,
                 content: payload.data.content
               })
+              return {
+                data: {
+                  message_id: 'om-root'
+                }
+              }
+            },
+            reply: async (payload) => {
+              createdMessages.push({
+                msgType: payload.data.msg_type,
+                content: payload.data.content
+              })
             }
           }
         }
@@ -1761,6 +1832,7 @@ describe('core', () => {
 
     const result = await sender.send({
       role: 'user',
+      ioThreadId: 'io-thread',
       source: 'web',
       text: '这图里是什么内容',
       createdAt: Date.now(),
@@ -1795,12 +1867,6 @@ describe('core', () => {
             {
               tag: 'img',
               image_key: 'img-key'
-            }
-          ],
-          [
-            {
-              tag: 'text',
-              text: 'User'
             }
           ]
         ]
@@ -1852,6 +1918,17 @@ describe('core', () => {
                 msgType: payload.data.msg_type,
                 content: payload.data.content
               })
+              return {
+                data: {
+                  message_id: 'om-root'
+                }
+              }
+            },
+            reply: async (payload) => {
+              createdMessages.push({
+                msgType: payload.data.msg_type,
+                content: payload.data.content
+              })
             }
           }
         }
@@ -1860,6 +1937,7 @@ describe('core', () => {
 
     const result = await sender.send({
       role: 'user',
+      ioThreadId: 'io-thread',
       source: 'web',
       text: '你能看到文件吗？',
       createdAt: Date.now(),
@@ -1925,6 +2003,11 @@ describe('core', () => {
                 msgType: payload.data.msg_type,
                 content: payload.data.content
               })
+              return {
+                data: {
+                  message_id: 'om-root'
+                }
+              }
             }
           }
         }
@@ -1933,6 +2016,7 @@ describe('core', () => {
 
     const result = await sender.send({
       role: 'user',
+      ioThreadId: 'io-thread',
       source: 'web',
       text: '',
       createdAt: Date.now(),
@@ -1960,87 +2044,6 @@ describe('core', () => {
     ])
   })
 
-  it('formats feishu webhook system message with system suffix', () => {
-    expect(createFeishuWebhookText({
-      role: 'system',
-      text: 'system output',
-      createdAt: Date.now()
-    })).toBe('system output\n\nSystem')
-    expect(createFeishuWebhookText({
-      role: 'system',
-      text: 'clear',
-      createdAt: Date.now()
-    })).toBe('已开始新对话\n\nSystem')
-  })
-
-  it('formats feishu webhook text without local file links', () => {
-    expect(createFeishuWebhookText({
-      role: 'user',
-      text: '你能看到文件吗？',
-      createdAt: Date.now(),
-      files: [
-        {
-          id: 'file-1',
-          mime: 'text/plain',
-          name: 'note.txt',
-          size: 10,
-          sha256: '0'.repeat(64),
-          path: 'C:\\tmp\\note.txt',
-          url: '/api/files/file-1'
-        }
-      ]
-    })).toBe('你能看到文件吗？\n\nUser')
-
-    expect(createFeishuWebhookText({
-      role: 'user',
-      text: '',
-      createdAt: Date.now(),
-      files: [
-        {
-          id: 'file-1',
-          mime: 'text/plain',
-          name: 'note.txt',
-          size: 10,
-          sha256: '0'.repeat(64),
-          path: 'C:\\tmp\\note.txt',
-          url: '/api/files/file-1'
-        }
-      ]
-    })).toBe('已收到文件：note.txt\n\nUser')
-  })
-
-  it('formats email message without codexio title and labels non-agent roles at bottom', () => {
-    const agentPayload = createEmailMessagePayload({
-      role: 'agent',
-      text: 'agent output',
-      createdAt: Date.now()
-    })
-    expect(agentPayload).toEqual({
-      subject: 'Agent',
-      text: 'agent output'
-    })
-
-    const userPayload = createEmailMessagePayload({
-      role: 'user',
-      text: 'user input',
-      createdAt: Date.now()
-    })
-    expect(userPayload).toEqual({
-      subject: 'User',
-      text: 'user input\n\nUser'
-    })
-
-    const systemPayload = createEmailMessagePayload({
-      role: 'system',
-      text: 'system output',
-      createdAt: Date.now()
-    })
-    expect(systemPayload).toEqual({
-      subject: 'System',
-      text: 'system output\n\nSystem'
-    })
-  })
-
   it('renders safe markdown for web channel display', () => {
     const html = renderMarkdownHtml([
       '**bold**',
@@ -2057,30 +2060,11 @@ describe('core', () => {
   })
 })
 
-async function createTempSessionStore(): Promise<CodexSessionStore> {
-  return (await createTempSessionStoreWithPath()).store
-}
-
-async function createTempSessionStoreWithPath(): Promise<{
-  store: CodexSessionStore
-  path: string
-}> {
-  const dir = await mkdtemp(join(tmpdir(), 'codexio-session-'))
-  const path = join(dir, 'session.json')
-  return {
-    store: new CodexSessionStore(path),
-    path
-  }
-}
-
 function createCodexAppServerMock(
   requests: Array<{
     method: string
     params: unknown
-  }>,
-  options: {
-    failResume?: boolean
-  } = {}
+  }>
 ) {
   let threadCount = 0
   return {
@@ -2093,16 +2077,6 @@ function createCodexAppServerMock(
       if (method === 'account/read') {
         return {
           account: {}
-        }
-      }
-      if (method === 'thread/resume') {
-        if (options.failResume) {
-          throw new Error('resume failed')
-        }
-        return {
-          thread: {
-            id: (params as Record<string, string>).threadId
-          }
         }
       }
       if (method === 'thread/start') {
@@ -2127,6 +2101,59 @@ function createCodexAppServerMock(
   }
 }
 
+type CodexAppServerTestHandle = {
+  start: () => Promise<void>
+  request: (method: string, params: unknown) => Promise<unknown>
+  waitForNotification: (method: string) => Promise<void>
+  stop: () => Promise<void>
+}
+
+function createCodexAgent(input: {
+  appServer: CodexAppServerTestHandle
+  config?: CodexioConfig
+  send?: (message: Message) => Promise<void>
+}): CodexAgent {
+  const config = input.config ?? ConfigSchema.parse({})
+  const configer = {
+    get: async (path: string) => {
+      const keys = path.split('.')
+      let value: unknown = config
+      for (const key of keys) {
+        value = (value as Record<string, unknown>)[key]
+      }
+      return value
+    }
+  } as unknown as Configer
+  return new CodexAgent(configer, testMetadata, {
+    send: async (message) => {
+      await input.send?.(message)
+      return Result.success(null)
+    },
+    status: async () => Result.success(null)
+  }, {
+    create: async () => input.appServer
+  } as CodexAppServerFactory)
+}
+
+async function createAgentManager(
+  config: CodexioConfig,
+  callbacks: ConstructorParameters<typeof AgentManager>[1],
+  agent: Agent
+): Promise<AgentManager> {
+  const dir = await mkdtemp(join(tmpdir(), 'codexio-agent-manager-'))
+  const configer = createTestConfiger(join(dir, 'config.yaml'))
+  await configer.init(true)
+  await configer.replace(config)
+  return new AgentManager(configer, callbacks, agent, agent)
+}
+
+function createTestConfiger(configPath: string): Configer {
+  return new Configer(new CodexioMetadata({
+    rootPath: testMetadata.rootPath,
+    configPath
+  }))
+}
+
 async function waitFor(predicate: () => boolean): Promise<void> {
   const startedAt = Date.now()
   while (!predicate()) {
@@ -2142,3 +2169,5 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 function pngBytes(): Buffer {
   return Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lS3KgwAAAABJRU5ErkJggg==', 'base64')
 }
+
+

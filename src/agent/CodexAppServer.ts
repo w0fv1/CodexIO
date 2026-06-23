@@ -1,6 +1,6 @@
 import { createInterface } from 'node:readline'
 import { execa } from 'execa'
-import { readCodexioVersion } from '../AppMetadata.js'
+import { CodexioMetadata } from '../component/CodexioMetadata.js'
 import { Logger } from '../component/Logger.js'
 
 type RpcError = {
@@ -23,6 +23,7 @@ export type CodexAppServerOptions = {
   env: NodeJS.ProcessEnv
   onNotification: (method: string, params: unknown) => void
   onStderr: (data: Buffer) => void
+  metadata: CodexioMetadata
   requestTimeoutMs?: number
 }
 
@@ -126,7 +127,7 @@ export class CodexAppServer {
       clientInfo: {
         name: 'codexio',
         title: 'Codexio',
-        version: readCodexioVersion()
+        version: this.options.metadata.readVersion()
       },
       capabilities: {
         experimentalApi: true,

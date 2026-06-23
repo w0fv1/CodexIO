@@ -2,22 +2,9 @@ import { createHash, randomUUID } from 'node:crypto'
 import { basename, extname, join, resolve } from 'node:path'
 import { copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { fileTypeFromBuffer } from 'file-type'
-import { codexioRootPath } from '../AppMetadata.js'
-
-export type StoredFile = {
-  id: string
-  mime: string
-  name: string
-  size: number
-  sha256: string
-  path: string
-  url?: string
-}
-
-export type FileStoreOptions = {
-  rootPath?: string
-  maxFileSizeBytes?: number
-}
+import { inject, injectable } from 'inversify'
+import { CodexioMetadata } from './CodexioMetadata.js'
+import { MessageFile } from '../value/Message.js'
 
 export type FileStoreBufferInput = {
   buffer: Buffer
@@ -25,7 +12,7 @@ export type FileStoreBufferInput = {
   mime?: string
 }
 
-export function isImageFile(file: Pick<StoredFile, 'mime'>): boolean {
+export function isImageFile(file: Pick<MessageFile, 'mime'>): boolean {
   return file.mime.toLowerCase().startsWith('image/')
 }
 
@@ -36,17 +23,18 @@ const imageMimeExtensions = new Map<string, string>([
   ['image/gif', '.gif']
 ])
 
+@injectable()
 export class FileStore {
   private readonly rootPath: string
   private readonly maxFileSizeBytes: number
-  private readonly files = new Map<string, StoredFile>()
+  private readonly files = new Map<string, MessageFile>()
 
-  constructor(options: FileStoreOptions = {}) {
-    this.rootPath = resolve(options.rootPath ?? join(codexioRootPath, '.codexio', 'file'))
-    this.maxFileSizeBytes = options.maxFileSizeBytes ?? 20 * 1024 * 1024
+  constructor(@inject(CodexioMetadata) metadata: CodexioMetadata) {
+    this.rootPath = resolve(join(metadata.rootPath, '.codexio', 'file'))
+    this.maxFileSizeBytes = 20 * 1024 * 1024
   }
 
-  async importPath(path: string): Promise<StoredFile> {
+  async importPath(path: string): Promise<MessageFile> {
     const resolvedPath = resolve(path)
     const metadata = await stat(resolvedPath)
     if (!metadata.isFile()) {
@@ -65,7 +53,7 @@ export class FileStore {
     return prepared
   }
 
-  async importBuffer(input: FileStoreBufferInput): Promise<StoredFile> {
+  async importBuffer(input: FileStoreBufferInput): Promise<MessageFile> {
     if (input.buffer.length > this.maxFileSizeBytes) {
       throw new Error('file is too large')
     }
@@ -83,7 +71,7 @@ export class FileStore {
     return readFile(file.path)
   }
 
-  resolve(id: string): StoredFile {
+  resolve(id: string): MessageFile {
     const file = this.files.get(id)
     if (!file) {
       throw new Error(`file not found: ${id}`)
@@ -91,11 +79,11 @@ export class FileStore {
     return file
   }
 
-  resolveMany(ids: string[]): StoredFile[] {
+  resolveMany(ids: string[]): MessageFile[] {
     return ids.map((id) => this.resolve(id))
   }
 
-  resolveUrl(url: string): StoredFile | undefined {
+  resolveUrl(url: string): MessageFile | undefined {
     const match = /^\/api\/files\/([^/?#]+)/.exec(url.trim())
     if (!match) {
       return undefined
@@ -103,7 +91,7 @@ export class FileStore {
     return this.files.get(decodeURIComponent(match[1]))
   }
 
-  private async prepare(buffer: Buffer, name: string, inputMime?: string): Promise<StoredFile> {
+  private async prepare(buffer: Buffer, name: string, inputMime?: string): Promise<MessageFile> {
     const detected = await fileTypeFromBuffer(buffer)
     const providedMime = inputMime?.trim().toLowerCase()
     const mime = detected?.mime ?? (providedMime && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(providedMime) ? providedMime : 'application/octet-stream')

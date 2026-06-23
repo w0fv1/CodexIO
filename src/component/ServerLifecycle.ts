@@ -1,13 +1,14 @@
 import { spawn } from 'node:child_process'
-import { createServer as createNetServer } from 'node:net'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, join, relative } from 'node:path'
 import { argv, execPath, pid } from 'node:process'
+import { inject, injectable, optional } from 'inversify'
 import { z } from 'zod'
-import { codexioRootPath } from '../AppMetadata.js'
-import { Configer } from '../config/Configer.js'
-import { CodexioConfig } from '../config/ConfigDefinition.js'
+import { Configer } from './Configer.js'
+import { Result } from '../value/Result.js'
+import { ChannelManager } from '../channel/ChannelManager.js'
+import { isServerPortAvailable } from '../util/Network.js'
 
 const require = createRequire(import.meta.url)
 
@@ -37,23 +38,47 @@ export type ServeProcessSpec = {
 }
 
 export type ServeProcessSpecOptions = {
-  autoPort?: boolean
   supervisorPid?: number
 }
 
 type SupervisorAction = 'restart' | 'stop'
 
+@injectable()
 export class SupervisorClient {
-  private readonly configer: Configer
-
-  constructor(configPath?: string) {
-    this.configer = new Configer(configPath)
+  constructor(
+    @inject(Configer) private readonly configer: Configer,
+    @inject(ChannelManager) @optional() private readonly channelManager?: ChannelManager
+  ) {
+    if (!this.channelManager) {
+      return
+    }
+    this.configer.subscribe([
+      'server',
+      'channels.web'
+    ], () => {
+      setImmediate(() => {
+        void this.restart().then(() => {
+        }).catch(async (error) => {
+          const failed = Result.fromError(error)
+          await this.channelManager?.sendSystem(`Codexio 重启失败：${failed.message}`)
+        })
+      })
+    })
   }
 
   async restart(): Promise<SupervisorState> {
     const supervisor = await this.requireRunning()
     await requestSupervisor(supervisor, 'restart')
     return supervisor
+  }
+
+  async initial(): Promise<void> {
+    await writeRuntimeServerState(this.configer.path, {
+      pid,
+      host: await this.configer.get('server.host'),
+      port: await this.configer.get('server.port'),
+      startedAt: new Date().toISOString()
+    })
   }
 
   async stop(): Promise<boolean> {
@@ -80,44 +105,28 @@ export class SupervisorClient {
     await removeSupervisorState(this.configer.path)
     await removeRuntimeServerState(this.configer.path)
   }
-}
 
-export async function stopServer(configPath?: string): Promise<boolean> {
-  return new SupervisorClient(configPath).stop()
-}
-
-export async function restartServer(configPath?: string): Promise<SupervisorState> {
-  return new SupervisorClient(configPath).restart()
+  async clearRuntime(): Promise<void> {
+    await removeRuntimeServerState(this.configer.path)
+  }
 }
 
 async function stopRuntimeServer(configer: Configer): Promise<boolean> {
-  const config = await configer.read()
   const state = await readRuntimeServerState(configer.path)
   const targets = uniqueRuntimeTargets([
     state,
     {
-      host: config.server.host,
-      port: config.server.port
+      host: await configer.get('server.host'),
+      port: await configer.get('server.port')
     }
   ])
+  const token = await configer.get('server.token')
   for (const target of targets) {
-    if (await requestRuntimeServerStop(target, config)) {
+    if (await requestRuntimeServerStop(target, token)) {
       return true
     }
   }
   return false
-}
-
-export async function resolveAvailableServerPort(host: string, preferredPort: number): Promise<number> {
-  let port = preferredPort
-  while (port < 65536) {
-    const available = await isServerPortAvailable(host, port)
-    if (available) {
-      return port
-    }
-    port += 1
-  }
-  throw new Error(`no available server port found from ${preferredPort}`)
 }
 
 export async function writeRuntimeServerState(configPath: string, state: RuntimeServerState): Promise<void> {
@@ -163,15 +172,12 @@ export async function removeSupervisorState(configPath: string): Promise<void> {
   })
 }
 
-export function createServeProcessSpec(configPath: string, entryPath = argv[1], options: ServeProcessSpecOptions = {}): ServeProcessSpec {
+export function createServeProcessSpec(configPath: string, entryPath = argv[1], options: ServeProcessSpecOptions = {}, rootPath = process.cwd()): ServeProcessSpec {
   const serveArgs = [
     'serve',
     '--config',
     configPath
   ]
-  if (options.autoPort) {
-    serveArgs.push('--auto-port')
-  }
   if (entryPath?.endsWith('.ts')) {
     const tsxPackagePath = require.resolve('tsx/package.json')
     const tsxCliPath = join(dirname(tsxPackagePath), 'dist', 'cli.mjs')
@@ -179,10 +185,10 @@ export function createServeProcessSpec(configPath: string, entryPath = argv[1], 
       command: execPath,
       args: [
         tsxCliPath,
-        relative(codexioRootPath, entryPath),
+        relative(rootPath, entryPath),
         ...serveArgs
       ],
-      cwd: codexioRootPath,
+      cwd: rootPath,
       ...createServeProcessEnvField(options)
     }
   }
@@ -195,13 +201,13 @@ export function createServeProcessSpec(configPath: string, entryPath = argv[1], 
       entryPath,
       ...serveArgs
     ],
-    cwd: codexioRootPath,
+    cwd: rootPath,
     ...createServeProcessEnvField(options)
   }
 }
 
-export function spawnServeProcess(configPath: string, options: ServeProcessSpecOptions = {}) {
-  const spec = createServeProcessSpec(configPath, argv[1], options)
+export function spawnServeProcess(configPath: string, rootPath: string, options: ServeProcessSpecOptions = {}) {
+  const spec = createServeProcessSpec(configPath, argv[1], options, rootPath)
   return spawn(spec.command, spec.args, {
     cwd: spec.cwd,
     env: spec.env,
@@ -283,7 +289,7 @@ async function requestSupervisor(state: SupervisorState, action: SupervisorActio
   }
 }
 
-async function requestRuntimeServerStop(target: Pick<RuntimeServerState, 'host' | 'port'>, config: CodexioConfig): Promise<boolean> {
+async function requestRuntimeServerStop(target: Pick<RuntimeServerState, 'host' | 'port'>, token: string): Promise<boolean> {
   try {
     const status = await fetch(`http://${target.host}:${target.port}/api/status`)
     if (!status.ok) {
@@ -298,7 +304,7 @@ async function requestRuntimeServerStop(target: Pick<RuntimeServerState, 'host' 
     await fetch(`http://${target.host}:${target.port}/api/server/stop`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${config.server.token}`
+        Authorization: `Bearer ${token}`
       }
     })
     await waitForRuntimeServerStoppedByTarget(target)
@@ -349,38 +355,15 @@ async function isServerReady(state: RuntimeServerState): Promise<boolean> {
 }
 
 export function runtimeServerStatePath(_configPath: string): string {
-  return join(runtimeStateRoot(), 'server.json')
+  return join(runtimeStateRoot(_configPath), 'server.json')
 }
 
 export function supervisorStatePath(_configPath: string): string {
-  return join(runtimeStateRoot(), 'supervisor.json')
+  return join(runtimeStateRoot(_configPath), 'supervisor.json')
 }
 
-function runtimeStateRoot(): string {
-  return join(codexioRootPath, '.codexio', 'state')
-}
-
-function isServerPortAvailable(host: string, port: number): Promise<boolean> {
-  return new Promise((resolveAvailable, reject) => {
-    const probe = createNetServer()
-    probe.once('error', (error: NodeJS.ErrnoException) => {
-      if (error.code === 'EADDRINUSE' || error.code === 'EACCES') {
-        resolveAvailable(false)
-        return
-      }
-      reject(error)
-    })
-    probe.once('listening', () => {
-      probe.close((error) => {
-        if (error) {
-          reject(error)
-          return
-        }
-        resolveAvailable(true)
-      })
-    })
-    probe.listen(port, host)
-  })
+function runtimeStateRoot(_configPath: string): string {
+  return join(process.cwd(), '.codexio', 'state')
 }
 
 async function waitForRuntimeServerStoppedByTarget(target: Pick<RuntimeServerState, 'host' | 'port'>): Promise<void> {

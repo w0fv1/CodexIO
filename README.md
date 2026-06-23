@@ -7,7 +7,7 @@ pnpm install
 pnpm dev
 ```
 
-开发预览启动后打开 Web 通道地址 `http://127.0.0.1:8788`。
+开发预览启动后打开终端输出的 `codexio web listening on ...` 地址。默认 Web 通道地址是 `http://127.0.0.1:8788`，内部 API 地址是 `http://127.0.0.1:8787`。
 
 登录当前启用的 agent：
 
@@ -39,7 +39,7 @@ pnpm run restart
 `pnpm run dev` 和 `pnpm run start` 会启动 Codexio supervisor，并在同一个终端里运行 Codexio host。日志会输出在当前终端，按 `Ctrl+C` 会停止 supervisor 和 host。
 `pnpm bundle` 生成未来 exe 使用的单文件 Node bundle，产物不入库。
 运行日志按天写入 `.codexio/log/YYYY-MM-DD.log`，本机日志目录不会进入发布包。
-Codex 当前对话 ID 保存在 `.codexio/session.json`；进程重启后会恢复该 thread。`pnpm run restart` 会请求 supervisor 重启 Codexio host，日志继续输出在启动 supervisor 的终端。`$ restart` 或 `￥ restart` 只重启 agent 子进程并保留当前对话，`$ clear` 或 `￥ clear` 会开启新对话。
+Codexio 使用原生多 thread 模型。Web 通道会为每个对话生成并传递 threadId，Agent 在首次收到该 thread 的消息时创建对应 Codex thread。`pnpm run restart` 会请求 supervisor 重启 Codexio host，日志继续输出在启动 supervisor 的终端。`$ restart` 或 `￥ restart` 只重启 agent 子进程；`$ clear` 或 `￥ clear` 会清空当前 thread 并为该 thread 创建新的 Codex 对话。
 Codex 子进程的 stdout/stderr 会同步输出到启动 codexio 的终端。
 内置 agent 默认按完全访问模式运行：Codex 使用 `danger-full-access` 和 `never` approval，Claude 使用 `bypassPermissions`。
 

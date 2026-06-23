@@ -1,9 +1,14 @@
-import { CodexioConfig } from '../config/ConfigDefinition.js'
+import { mkdir } from 'node:fs/promises'
+import { inject, injectable } from 'inversify'
+import { AgentManagerCallbacksId } from '../ComponentIdentifier.js'
+import { CodexioConfig } from '../value/ConfigDefinition.js'
 import { Result } from '../value/Result.js'
-import { ClaudeAgent } from './ClaudeAgent.js'
-import { CodexAgent } from './CodexAgent.js'
-import { Agent, AgentInput, AgentLoginInProgressError } from './Agent.js'
+import { AgentLoginInProgressError, CodexAgent } from './CodexAgent.js'
+import { Agent } from './Agent.js'
 import { Logger } from '../component/Logger.js'
+import { allIoThreadId, Message } from '../value/Message.js'
+import { ClaudeAgent } from './ClaudeAgent.js'
+import { Configer } from '../component/Configer.js'
 
 const receiveConfirmationStarts = [
   '收到',
@@ -44,8 +49,7 @@ export type AgentManagerState = {
 }
 
 export type AgentManagerCallbacks = {
-  send: (text: string) => Promise<Result<null>>
-  system?: (text: string) => Promise<Result<null>>
+  send: (message: Message) => Promise<Result<null>>
   status: (text: string) => Promise<Result<null>>
 }
 
@@ -53,16 +57,11 @@ export type AgentReceiveResult = {
   action?: 'clear'
 }
 
-export type AgentFactory = () => Agent
-
-export type AgentManagerOptions = {
-  agentFactory?: AgentFactory
-}
-
+@injectable()
 export class AgentManager {
   private agent?: Agent
   private startTask?: Promise<Result<null>>
-  private receiveQueue: Promise<void> = Promise.resolve()
+  private readonly receiveQueues = new Map<string, Promise<void>>()
   private state: AgentManagerState = {
     status: 'idle',
     agent: null,
@@ -70,11 +69,28 @@ export class AgentManager {
   }
 
   constructor(
-    private config: CodexioConfig,
-    private readonly toolBaseUrl: string,
-    private readonly callbacks: AgentManagerCallbacks,
-    private readonly options: AgentManagerOptions = {}
-  ) {}
+    @inject(Configer) private readonly configer: Configer,
+    @inject(AgentManagerCallbacksId) private readonly callbacks: AgentManagerCallbacks,
+    @inject(CodexAgent) private readonly codexAgent: Agent,
+    @inject(ClaudeAgent) private readonly claudeAgent: Agent
+  ) {
+    this.configer.subscribe([
+      'agents',
+      'proxy',
+      'workspace',
+      'server'
+    ], async () => {
+      const applied = await this.applyConfig()
+      if (applied.isFailed) {
+        await this.callbacks.send({
+          ioThreadId: allIoThreadId,
+          role: 'system',
+          text: `Agent 配置应用失败：${applied.message}`,
+          createdAt: Date.now()
+        })
+      }
+    })
+  }
 
   status(): AgentManagerState {
     return {
@@ -84,10 +100,11 @@ export class AgentManager {
 
   async login(): Promise<void> {
     Logger.info('agent login requested')
-    await this.createAgent().login()
+    await this.prepareWorkspace()
+    await (await this.createAgent()).login()
   }
 
-  async start(): Promise<Result<null>> {
+  async start(ioThreadId?: string): Promise<Result<null>> {
     if (this.state.status === 'ready') {
       return Result.success(null)
     }
@@ -96,7 +113,7 @@ export class AgentManager {
     }
     this.startTask = (async () => {
       try {
-        const agent = this.agent ?? this.createAgent()
+        const agent = this.agent ?? await this.createAgent()
         this.agent = agent
         Logger.info('agent starting', {
           agent: agent.type
@@ -106,7 +123,8 @@ export class AgentManager {
           agent: agent.type,
           message: `agent starting: ${agent.type}`
         })
-        await agent.start(this.config)
+        await this.prepareWorkspace()
+        await agent.start(ioThreadId)
         this.agent = agent
         Logger.info('agent ready', {
           agent: agent.type
@@ -148,42 +166,49 @@ export class AgentManager {
     return this.startTask
   }
 
-  async receiveMessage(input: AgentInput): Promise<Result<AgentReceiveResult>> {
-    const task = this.receiveQueue.then(() => this.receiveMessageNow(input), () => this.receiveMessageNow(input))
-    this.receiveQueue = task.then(() => {}, () => {})
+  async receiveMessage(input: Message): Promise<Result<AgentReceiveResult>> {
+    const task = this.threadQueue(input.ioThreadId).then(() => this.receiveMessageNow(input), () => this.receiveMessageNow(input))
+    this.saveThreadQueue(input.ioThreadId, task)
     return task
   }
 
-  async clear(): Promise<Result<AgentReceiveResult>> {
-    const task = this.receiveQueue.then(() => this.clearNow(), () => this.clearNow())
-    this.receiveQueue = task.then(() => {}, () => {})
+  async clear(ioThreadId: string): Promise<Result<AgentReceiveResult>> {
+    const task = this.threadQueue(ioThreadId).then(() => this.clearNow(ioThreadId), () => this.clearNow(ioThreadId))
+    this.saveThreadQueue(ioThreadId, task)
     return task
   }
 
-  private async receiveMessageNow(input: AgentInput): Promise<Result<AgentReceiveResult>> {
+  private async receiveMessageNow(input: Message): Promise<Result<AgentReceiveResult>> {
     if (input.text.trim().length === 0 && (!input.files || input.files.length === 0)) {
       return Result.fail('text or file is required')
     }
-    const started = await this.start()
+    const started = await this.start(input.ioThreadId)
     if (started.isFailed) {
       return Result.fail<AgentReceiveResult>(started.message)
     }
     if (!this.agent) {
       return Result.fail<AgentReceiveResult>('agent not started')
     }
-    const received = await (this.callbacks.system ?? this.callbacks.send)(createReceiveConfirmation())
+    const received = await this.callbacks.send({
+      ioThreadId: input.ioThreadId,
+      role: 'system',
+      text: createReceiveConfirmation(),
+      createdAt: Date.now()
+    })
     if (received.isFailed) {
       return Result.fail<AgentReceiveResult>(received.message)
     }
     try {
       Logger.info('agent receive started', {
         agent: this.agent.type,
+        ioThreadId: input.ioThreadId,
         length: input.text.length,
         files: input.files?.length ?? 0
       })
       await this.agent.receive(input)
       Logger.info('agent receive accepted', {
-        agent: this.agent.type
+        agent: this.agent.type,
+        ioThreadId: input.ioThreadId
       })
       return Result.success({})
     } catch (error) {
@@ -193,7 +218,7 @@ export class AgentManager {
     }
   }
 
-  private async clearNow(): Promise<Result<AgentReceiveResult>> {
+  private async clearNow(ioThreadId: string): Promise<Result<AgentReceiveResult>> {
     if (this.state.status !== 'ready') {
       await this.agent?.stop().catch((error) => {
         Logger.warn('agent stop during clear reset failed', error)
@@ -216,9 +241,10 @@ export class AgentManager {
       return Result.fail<AgentReceiveResult>('agent not started')
     }
     Logger.info('agent clear requested', {
-      agent: this.agent.type
+      agent: this.agent.type,
+      ioThreadId
     })
-    await this.agent.clear()
+    await this.agent.clear(ioThreadId)
     await this.setState({
       status: 'ready',
       agent: this.agent.type,
@@ -248,8 +274,7 @@ export class AgentManager {
     }
   }
 
-  async applyConfig(config: CodexioConfig): Promise<Result<null>> {
-    this.config = config
+  async applyConfig(): Promise<Result<null>> {
     const stopped = await this.stop()
     if (stopped.isFailed) {
       return stopped
@@ -263,54 +288,31 @@ export class AgentManager {
     return Result.success(null)
   }
 
-  private createAgent(): Agent {
-    if (this.options.agentFactory) {
-      return this.options.agentFactory()
-    }
-    const enabledAgents = Object.entries(this.config.agents).filter(([, agentConfig]) => agentConfig.enabled)
+  private async createAgent(): Promise<Agent> {
+    const agents = await this.configer.get('agents')
+    const enabledAgents = Object.entries(agents)
+      .filter(([, agentConfig]) => agentConfig.enabled)
+      .map(([agentName]) => agentName as keyof CodexioConfig['agents'])
     if (enabledAgents.length === 0) {
       throw new Error('agent not found')
     }
     if (enabledAgents.length > 1) {
       throw new Error('only one agent can be enabled')
     }
-    const [agentName] = enabledAgents[0]
-    const send = async (value: string) => {
-      const result = await this.callbacks.send(value)
-      if (result.isFailed) {
-        throw new Error(result.message)
-      }
-    }
-    const system = async (value: string) => {
-      const result = await (this.callbacks.system ?? this.callbacks.send)(value)
-      if (result.isFailed) {
-        throw new Error(result.message)
-      }
-    }
+    const agentName = enabledAgents[0]
     if (agentName === 'codex') {
-      return new CodexAgent({
-        workspacePath: this.config.workspace.path,
-        config: this.config,
-        toolBaseUrl: this.toolBaseUrl,
-        send,
-        system,
-        onLoginRequired: async (message) => {
-          await this.setState({
-            status: 'loginRequired',
-            agent: 'codex',
-            message
-          })
-        }
-      })
+      return this.codexAgent
     }
     if (agentName === 'claude') {
-      return new ClaudeAgent({
-        workspacePath: this.config.workspace.path,
-        config: this.config,
-        send
-      })
+      return this.claudeAgent
     }
     throw new Error(`agent not supported: ${agentName}`)
+  }
+
+  private async prepareWorkspace(): Promise<void> {
+    await mkdir(await this.configer.get('workspace.path'), {
+      recursive: true
+    })
   }
 
   private async setState(state: AgentManagerState): Promise<void> {
@@ -318,4 +320,19 @@ export class AgentManager {
     Logger.info('agent state changed', state)
     await this.callbacks.status(state.message)
   }
+
+  private threadQueue(ioThreadId: string): Promise<void> {
+    return this.receiveQueues.get(ioThreadId) ?? Promise.resolve()
+  }
+
+  private saveThreadQueue(ioThreadId: string, task: Promise<unknown>): void {
+    const queue = task.then(() => {}, () => {})
+    this.receiveQueues.set(ioThreadId, queue)
+    void queue.finally(() => {
+      if (this.receiveQueues.get(ioThreadId) === queue) {
+        this.receiveQueues.delete(ioThreadId)
+      }
+    })
+  }
+
 }

@@ -1,16 +1,15 @@
 import { existsSync, statSync } from 'node:fs'
-import { mkdir } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { z } from 'zod'
-import { codexioRootPath } from '../AppMetadata.js'
 
 export type CodexioConfig = {
   server: {
     host: string
     port: number
     token: string
+    autoPort: boolean
   }
   proxy: {
     enabled: boolean
@@ -92,14 +91,13 @@ type ConfigField = ConfigFieldDescriptor & {
 
 type ConfigObject = Record<string, unknown>
 
-export const defaultConfigPath = join(codexioRootPath, '.codexio', 'config.yaml')
-
 const positiveInt = z.number().int().positive()
 
 const configFields: ConfigField[] = [
   field('server.host', 'Server', 'Host', 'string', '重启 Codexio', z.string(), '127.0.0.1'),
   field('server.port', 'Server', 'Port', 'number', '重启 Codexio', positiveInt, 8787),
   field('server.token', 'Server', 'Token', 'password', '重启 Codexio', z.string(), ''),
+  field('server.autoPort', 'Server', 'Auto Port', 'boolean', '重启 Codexio', z.boolean(), false),
   field('proxy.enabled', 'Proxy', 'Enabled', 'boolean', '重启 Agent', z.boolean(), false),
   field('proxy.host', 'Proxy', 'Host', 'string', '重启 Agent', z.string(), '127.0.0.1'),
   field('proxy.port', 'Proxy', 'Port', 'number', '重启 Agent', positiveInt, 7890),
@@ -147,22 +145,21 @@ export const configFieldDescriptors: ConfigFieldDescriptor[] = configFields.map(
 
 export const ConfigSchema = z.preprocess((value) => deepMergeConfig(defaultConfigObject(), value), createConfigSchema())
 
-export function createDefaultConfig(workspacePath = join(codexioRootPath, '.codexio', 'workspace')): CodexioConfig {
+export function createDefaultConfig(workspacePath = '.'): CodexioConfig {
   const config = ConfigSchema.parse(defaultConfigObject())
   config.server.token = createToken()
-  config.workspace.path = normalizeWorkspacePath(workspacePath, dirname(defaultConfigPath))
+  config.workspace.path = normalizeWorkspacePath(workspacePath)
   return config
 }
 
-export async function parseCodexioConfig(value: unknown, configPath = defaultConfigPath): Promise<CodexioConfig> {
+export async function parseCodexioConfig(value: unknown, configPath: string): Promise<CodexioConfig> {
   const resolved = resolveReferences(value ?? {})
   const config = ConfigSchema.parse(resolved)
   config.workspace.path = normalizeWorkspacePath(config.workspace.path, dirname(resolve(configPath)))
-  await ensureManagedWorkspace(config.workspace.path, resolve(configPath))
   return config
 }
 
-export function normalizeWorkspacePath(path: string, basePath = codexioRootPath): string {
+export function normalizeWorkspacePath(path: string, basePath = process.cwd()): string {
   const trimmedPath = path.trim()
   if (trimmedPath === '~') {
     return homedir()
@@ -188,9 +185,7 @@ export function validateCodexioConfig(config: CodexioConfig): void {
   if (enabledAgents.length > 1) {
     issues.push('only one agent can be enabled')
   }
-  if (!existsSync(config.workspace.path)) {
-    issues.push(`workspace.path does not exist: ${config.workspace.path}`)
-  } else if (!statSync(config.workspace.path).isDirectory()) {
+  if (existsSync(config.workspace.path) && !statSync(config.workspace.path).isDirectory()) {
     issues.push(`workspace.path is not a directory: ${config.workspace.path}`)
   }
   const enabledChannels = Object.entries(config.channels).filter(([, channelConfig]) => channelConfig?.enabled)
@@ -331,20 +326,6 @@ function resolveReferencePath(root: unknown, path: string): unknown {
     current = (current as Record<string, unknown>)[key]
   }
   return current
-}
-
-async function ensureManagedWorkspace(path: string, configPath: string): Promise<void> {
-  const normalizedPath = resolve(path)
-  const managedPaths = [
-    join(codexioRootPath, '.codexio', 'workspace'),
-    normalizeWorkspacePath('codexio/.codexio/workspace', dirname(configPath))
-  ].map((item) => resolve(item))
-  if (!managedPaths.includes(normalizedPath)) {
-    return
-  }
-  await mkdir(normalizedPath, {
-    recursive: true
-  })
 }
 
 function requireValue(issues: string[], value: string, message: string): void {

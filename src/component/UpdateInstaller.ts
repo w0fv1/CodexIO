@@ -4,11 +4,12 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { spawn } from 'node:child_process'
-import { CodexioConfig } from '../config/ConfigDefinition.js'
-import { codexioRootPath, readCodexioReleaseMetadata, readCodexioVersion } from '../AppMetadata.js'
+import { inject, injectable } from 'inversify'
+import { CodexioMetadata } from './CodexioMetadata.js'
 import { Result } from '../value/Result.js'
 import { Logger } from './Logger.js'
 import { runtimeServerStatePath, supervisorStatePath } from './ServerLifecycle.js'
+import { Configer } from './Configer.js'
 
 type LatestReleaseResponse = {
   isf?: unknown
@@ -38,23 +39,25 @@ type UpdateManifest = {
   updateRoot: string
 }
 
+@injectable()
 export class UpdateInstaller {
   constructor(
-    private readonly config: CodexioConfig,
-    private readonly configPath: string
+    @inject(Configer) private readonly configer: Configer,
+    @inject(CodexioMetadata) private readonly metadata: CodexioMetadata
   ) {}
 
   async update(): Promise<Result<string>> {
     try {
-      if (!this.config.update.enabled) {
+      if (!await this.configer.get('update.enabled')) {
         return Result.fail('update is disabled')
       }
-      const releaseMetadata = readCodexioReleaseMetadata()
+      const releaseMetadata = this.metadata.readReleaseMetadata()
       if (!releaseMetadata.platform) {
         return Result.fail('当前是源码模式，不支持自动安装更新。')
       }
-      const latest = await this.fetchLatestRelease(releaseMetadata.platform)
-      const currentVersion = readCodexioVersion()
+      const updateBaseUrl = await this.configer.get('update.baseUrl')
+      const latest = await this.fetchLatestRelease(releaseMetadata.platform, updateBaseUrl)
+      const currentVersion = this.metadata.readVersion()
       if (compareVersion(latest.version, currentVersion) <= 0) {
         return Result.success(`Codexio 已是最新版本 ${currentVersion}。`)
       }
@@ -65,7 +68,7 @@ export class UpdateInstaller {
         fileName: latest.fileName,
         fileSizeBytes: latest.fileSizeBytes
       })
-      const installRoot = dirname(codexioRootPath)
+      const installRoot = dirname(this.metadata.rootPath)
       const updateRoot = join(tmpdir(), 'codexio-update', shortHash(installRoot), `${currentVersion}-${latest.version}-${formatTimestamp(new Date())}`)
       const downloadRoot = join(updateRoot, 'download')
       const stageParent = join(updateRoot, 'stage')
@@ -88,7 +91,7 @@ export class UpdateInstaller {
       Logger.info('codexio update download started', {
         archivePath
       })
-      await this.downloadRelease(latest, archivePath)
+      await this.downloadRelease(latest, archivePath, updateBaseUrl)
       const actualSha256 = await sha256File(archivePath)
       if (actualSha256.toLowerCase() !== latest.sha256.toLowerCase()) {
         await rm(archivePath, {
@@ -113,9 +116,9 @@ export class UpdateInstaller {
         installRoot,
         stageRoot,
         backupRoot,
-        configPath: this.configPath,
-        supervisorStatePath: supervisorStatePath(this.configPath),
-        serverStatePath: runtimeServerStatePath(this.configPath),
+        configPath: this.configer.path,
+        supervisorStatePath: supervisorStatePath(this.configer.path),
+        serverStatePath: runtimeServerStatePath(this.configer.path),
         startCommand: join(installRoot, 'start.cmd'),
         updateRoot
       }
@@ -144,8 +147,8 @@ export class UpdateInstaller {
     }
   }
 
-  private async fetchLatestRelease(platform: string): Promise<LatestRelease> {
-    const baseUrl = this.config.update.baseUrl.replace(/\/+$/, '')
+  private async fetchLatestRelease(platform: string, updateBaseUrl: string): Promise<LatestRelease> {
+    const baseUrl = updateBaseUrl.replace(/\/+$/, '')
     const url = new URL('/api/download/release/codexio/latest', `${baseUrl}/`)
     url.searchParams.set('platform', platform)
     const response = await fetch(url)
@@ -159,8 +162,8 @@ export class UpdateInstaller {
     return parseLatestRelease(body.data)
   }
 
-  private async downloadRelease(latest: LatestRelease, archivePath: string): Promise<void> {
-    const baseUrl = this.config.update.baseUrl.replace(/\/+$/, '')
+  private async downloadRelease(latest: LatestRelease, archivePath: string, updateBaseUrl: string): Promise<void> {
+    const baseUrl = updateBaseUrl.replace(/\/+$/, '')
     const url = new URL('/api/download/release/codexio/latest/file', `${baseUrl}/`)
     url.searchParams.set('platform', latest.platform)
     const response = await fetch(url)

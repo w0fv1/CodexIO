@@ -1,31 +1,17 @@
-import { CodexioConfig } from '../config/ConfigDefinition.js'
+import { CodexioConfig } from '../value/ConfigDefinition.js'
 import { Result } from '../value/Result.js'
-import { StoredFile } from '../component/FileStore.js'
+import { Message } from '../value/Message.js'
 
 export type ChannelReceiveResult = {
   action?: 'clear' | 'restart' | 'update'
+  ioThreadId?: string
 }
 
 export type ChannelType = keyof CodexioConfig['channels']
 
-export type ChannelFile = StoredFile
-
-export type ChannelInput = {
-  text: string
-  files?: ChannelFile[]
-}
-
-export type ChannelMessage = {
-  role: 'user' | 'agent' | 'system'
-  text: string
-  createdAt: number
-  source?: string
-  files?: ChannelFile[]
-}
-
 export interface Channel {
   type: ChannelType
-  start(config: CodexioConfig): void
-  send(message: ChannelMessage): Promise<Result<null>>
+  start(): Promise<void>
+  send(message: Message): Promise<Result<null>>
   stop(): Promise<Result<null>>
 }
