@@ -35,21 +35,21 @@ export const webPageHtml = `<!doctype html>
 
     <aside
       id="threads"
-      class="fixed inset-y-0 left-0 z-30 flex w-[min(82vw,280px)] -translate-x-full flex-col border-r transition-transform duration-200 lg:static lg:z-auto lg:w-auto lg:translate-x-0"
+      class="fixed inset-y-0 left-0 z-30 flex w-[min(82vw,280px)] -translate-x-full flex-col transition-transform duration-200 lg:static lg:z-auto lg:w-auto lg:translate-x-0"
       :class="[
         sidebarOpen ? 'translate-x-0' : '',
-        theme === 'dark' ? 'border-slate-800 bg-slate-950' : 'border-slate-200 bg-white'
+        theme === 'dark' ? 'bg-slate-950' : 'bg-white'
       ]"
     >
-      <div class="flex h-14 shrink-0 items-center justify-between gap-3 border-b px-3" :class="theme === 'dark' ? 'border-slate-800' : 'border-slate-200'">
+      <div class="flex h-14 shrink-0 items-center justify-between gap-3 px-3">
         <div class="flex min-w-0 items-center gap-2">
           <span class="grid size-8 shrink-0 place-items-center rounded-lg text-sm font-black" :class="theme === 'dark' ? 'bg-slate-50 text-slate-950' : 'bg-slate-950 text-white'">C</span>
           <span class="truncate text-sm font-semibold tracking-normal" :class="theme === 'dark' ? 'text-slate-50' : 'text-slate-950'">Codexio</span>
         </div>
         <button
           type="button"
-          class="grid size-8 shrink-0 cursor-pointer place-items-center rounded-md border bg-transparent transition lg:hidden"
-          :class="theme === 'dark' ? 'border-slate-700 text-slate-300 hover:bg-slate-900' : 'border-slate-200 text-slate-700 hover:bg-slate-50'"
+          class="grid size-8 shrink-0 cursor-pointer place-items-center rounded-md bg-transparent transition lg:hidden"
+          :class="theme === 'dark' ? 'text-slate-300 hover:bg-slate-900' : 'text-slate-700 hover:bg-slate-50'"
           aria-label="关闭对话列表"
           title="关闭对话列表"
           @click="sidebarOpen = false"
@@ -58,7 +58,7 @@ export const webPageHtml = `<!doctype html>
         </button>
       </div>
 
-      <div class="border-b p-3" :class="theme === 'dark' ? 'border-slate-800' : 'border-slate-200'">
+      <div class="p-3">
         <button
           type="button"
           class="flex h-10 w-full cursor-pointer items-center justify-center gap-2 rounded-lg text-sm font-semibold transition active:translate-y-px"
@@ -74,8 +74,8 @@ export const webPageHtml = `<!doctype html>
         <template x-for="thread in threads" :key="thread.id">
           <button
             type="button"
-            class="mb-1 flex h-11 w-full cursor-pointer items-center gap-2 rounded-lg border border-transparent px-2.5 text-left text-sm transition"
-            :class="thread.id === activeIoThreadId ? (theme === 'dark' ? 'border-slate-700 bg-slate-900 text-slate-50' : 'border-slate-200 bg-slate-100 text-slate-950') : (theme === 'dark' ? 'text-slate-400 hover:bg-slate-900 hover:text-slate-100' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950')"
+            class="mb-1 flex h-11 w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 text-left text-sm transition"
+            :class="thread.id === activeIoThreadId ? (theme === 'dark' ? 'bg-slate-900 text-slate-50' : 'bg-slate-100 text-slate-950') : (theme === 'dark' ? 'text-slate-400 hover:bg-slate-900 hover:text-slate-100' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950')"
             :title="thread.title || '新对话'"
             @click="switchThread(thread.id)"
           >
@@ -88,25 +88,20 @@ export const webPageHtml = `<!doctype html>
             ></span>
           </button>
         </template>
-        <div
-          class="grid h-28 place-items-center text-xs"
-          :class="theme === 'dark' ? 'text-slate-600' : 'text-slate-400'"
-          x-show="threads.length === 0"
-        >Ready</div>
       </nav>
     </aside>
 
     <section class="grid h-screen w-full min-w-0 overflow-hidden grid-rows-[auto_minmax(0,1fr)_auto]">
       <header
-        class="h-14 w-full min-w-0 border-b px-3 backdrop-blur sm:px-6"
-        :class="theme === 'dark' ? 'border-slate-800 bg-slate-950/90' : 'border-slate-200 bg-white/90'"
+        class="h-14 w-full min-w-0 px-3 backdrop-blur sm:px-6"
+        :class="theme === 'dark' ? 'bg-slate-950/90' : 'bg-white/90'"
       >
         <div class="mx-auto flex h-full w-full max-w-5xl min-w-0 items-center justify-between gap-3">
           <div class="flex min-w-0 flex-1 items-center gap-2">
             <button
               type="button"
-              class="grid size-8 shrink-0 cursor-pointer place-items-center rounded-md border bg-transparent transition lg:hidden"
-              :class="theme === 'dark' ? 'border-slate-700 text-slate-300 hover:bg-slate-900' : 'border-slate-200 text-slate-700 hover:bg-slate-50'"
+              class="grid size-8 shrink-0 cursor-pointer place-items-center rounded-md bg-transparent transition lg:hidden"
+              :class="theme === 'dark' ? 'text-slate-300 hover:bg-slate-900' : 'text-slate-700 hover:bg-slate-50'"
               aria-label="打开对话列表"
               title="打开对话列表"
               @click="sidebarOpen = true"
@@ -123,19 +118,10 @@ export const webPageHtml = `<!doctype html>
               :class="connected ? 'bg-emerald-500' : 'bg-rose-500'"
               aria-hidden="true"
             ></span>
-            <a
-              href="/config"
-              class="grid size-8 cursor-pointer place-items-center rounded-md border bg-transparent transition"
-              :class="theme === 'dark' ? 'border-slate-700 text-slate-300 hover:bg-slate-900' : 'border-slate-200 text-slate-700 hover:bg-slate-50'"
-              aria-label="打开配置"
-              title="打开配置"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.51a2 2 0 0 1 1-1.72l.15-.1a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
-            </a>
             <button
               type="button"
-              class="grid size-8 cursor-pointer place-items-center rounded-md border bg-transparent transition"
-              :class="theme === 'dark' ? 'border-slate-700 text-slate-300 hover:bg-slate-900' : 'border-slate-200 text-slate-700 hover:bg-slate-50'"
+              class="grid size-8 cursor-pointer place-items-center rounded-md bg-transparent transition"
+              :class="theme === 'dark' ? 'text-slate-300 hover:bg-slate-900' : 'text-slate-700 hover:bg-slate-50'"
               :aria-label="theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'"
               :title="theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'"
               @click="toggleTheme()"
@@ -154,12 +140,6 @@ export const webPageHtml = `<!doctype html>
       @scroll="handleScroll()"
     >
       <div class="mx-auto flex min-h-full w-full max-w-5xl min-w-0 flex-col gap-3">
-        <div
-          class="grid flex-1 place-items-center text-sm"
-          :class="theme === 'dark' ? 'text-slate-500' : 'text-slate-400'"
-          x-show="messages.length === 0"
-        >Ready</div>
-
         <template x-for="message in messages" :key="message.id">
           <div
             class="group flex items-start gap-2"
@@ -178,7 +158,7 @@ export const webPageHtml = `<!doctype html>
             <template x-if="message.type === 'user'">
               <div class="flex max-w-[88%] min-w-0 items-start gap-2 sm:max-w-[78%]">
                 <div class="message-actions hidden shrink-0 pt-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 sm:block">
-                  <button type="button" class="grid size-8 cursor-pointer place-items-center rounded-[10px] border shadow-sm transition active:translate-y-px" :class="theme === 'dark' ? 'border-slate-700 bg-slate-900/80 text-slate-400 shadow-none hover:border-slate-600 hover:bg-slate-800 hover:text-slate-50' : 'border-slate-200 bg-white/80 text-slate-500 hover:border-slate-300 hover:bg-white hover:text-slate-900'" :aria-label="copiedId === message.id ? '已复制' : '复制消息'" :title="copiedId === message.id ? '已复制' : '复制消息'" @click="copyMessage(message)">
+                  <button type="button" class="grid size-8 cursor-pointer place-items-center rounded-[10px] transition active:translate-y-px" :class="theme === 'dark' ? 'bg-slate-900/80 text-slate-400 hover:bg-slate-800 hover:text-slate-50' : 'bg-white/80 text-slate-500 hover:bg-white hover:text-slate-900'" :aria-label="copiedId === message.id ? '已复制' : '复制消息'" :title="copiedId === message.id ? '已复制' : '复制消息'" @click="copyMessage(message)">
                     <svg x-cloak x-show="copiedId !== message.id" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
                     <svg x-cloak x-show="copiedId === message.id" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
                   </button>
@@ -236,7 +216,7 @@ export const webPageHtml = `<!doctype html>
                   </div>
                 </div>
                 <div class="message-actions hidden shrink-0 pt-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 sm:block">
-                  <button type="button" class="grid size-8 cursor-pointer place-items-center rounded-[10px] border shadow-sm transition active:translate-y-px" :class="theme === 'dark' ? 'border-slate-700 bg-slate-900/80 text-slate-400 shadow-none hover:border-slate-600 hover:bg-slate-800 hover:text-slate-50' : 'border-slate-200 bg-white/80 text-slate-500 hover:border-slate-300 hover:bg-white hover:text-slate-900'" :aria-label="copiedId === message.id ? '已复制' : '复制消息'" :title="copiedId === message.id ? '已复制' : '复制消息'" @click="copyMessage(message)">
+                  <button type="button" class="grid size-8 cursor-pointer place-items-center rounded-[10px] transition active:translate-y-px" :class="theme === 'dark' ? 'bg-slate-900/80 text-slate-400 hover:bg-slate-800 hover:text-slate-50' : 'bg-white/80 text-slate-500 hover:bg-white hover:text-slate-900'" :aria-label="copiedId === message.id ? '已复制' : '复制消息'" :title="copiedId === message.id ? '已复制' : '复制消息'" @click="copyMessage(message)">
                     <svg x-cloak x-show="copiedId !== message.id" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
                     <svg x-cloak x-show="copiedId === message.id" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
                   </button>
@@ -251,8 +231,8 @@ export const webPageHtml = `<!doctype html>
       <footer class="w-full min-w-0 overflow-hidden px-3 pb-3 pt-2 sm:px-6 sm:pb-5" :class="theme === 'dark' ? 'bg-slate-950' : 'bg-slate-100'">
       <form id="form" class="mx-auto w-full max-w-5xl min-w-0" @submit.prevent="send()">
         <div
-          class="rounded-2xl border p-2 transition focus-within:border-blue-500 focus-within:ring-4 focus-within:ring-blue-500/10"
-          :class="dragActive ? (theme === 'dark' ? 'border-blue-500 bg-slate-900 shadow-[0_0_0_4px_rgba(59,130,246,0.18),0_14px_26px_rgba(0,0,0,0.32)]' : 'border-blue-600 bg-white shadow-[0_0_0_4px_rgba(37,99,235,0.1),0_10px_18px_rgba(148,163,184,0.34)]') : (theme === 'dark' ? 'border-slate-700 bg-slate-900 shadow-[0_14px_26px_rgba(0,0,0,0.32)]' : 'border-slate-300 bg-white shadow-[0_10px_18px_rgba(148,163,184,0.34)]')"
+          class="rounded-2xl p-2 transition focus-within:ring-4 focus-within:ring-blue-500/10"
+          :class="dragActive ? (theme === 'dark' ? 'bg-slate-900 shadow-[0_0_0_4px_rgba(59,130,246,0.18),0_14px_26px_rgba(0,0,0,0.32)]' : 'bg-white shadow-[0_0_0_4px_rgba(37,99,235,0.1),0_10px_18px_rgba(148,163,184,0.34)]') : (theme === 'dark' ? 'bg-slate-900 shadow-[0_14px_26px_rgba(0,0,0,0.32)]' : 'bg-white shadow-[0_10px_18px_rgba(148,163,184,0.34)]')"
           @paste="handlePaste($event)"
           @dragenter.prevent="handleDragEnter($event)"
           @dragover.prevent="handleDragOver($event)"
@@ -296,7 +276,7 @@ export const webPageHtml = `<!doctype html>
             </div>
             <div class="flex items-center justify-end gap-2">
               <input x-ref="file" type="file" multiple class="hidden" @change="uploadFiles($event)">
-              <button type="button" class="grid size-8 cursor-pointer place-items-center rounded-[10px] border shadow-sm transition active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50" :class="theme === 'dark' ? 'border-slate-700 bg-slate-900/80 text-slate-400 shadow-none hover:border-slate-600 hover:bg-slate-800 hover:text-slate-50' : 'border-slate-200 bg-white/80 text-slate-500 hover:border-slate-300 hover:bg-white hover:text-slate-900'" aria-label="上传文件" title="上传文件" :disabled="!connected || uploading" @click="$refs.file.click()">
+              <button type="button" class="grid size-8 cursor-pointer place-items-center rounded-[10px] transition active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50" :class="theme === 'dark' ? 'bg-slate-900/80 text-slate-400 hover:bg-slate-800 hover:text-slate-50' : 'bg-white/80 text-slate-500 hover:bg-white hover:text-slate-900'" aria-label="上传文件" title="上传文件" :disabled="!connected || uploading" @click="$refs.file.click()">
                 <svg xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m16 6-8.4 8.4a2 2 0 0 0 2.8 2.8l8.4-8.4a4 4 0 1 0-5.6-5.6L4.8 11.6a6 6 0 1 0 8.4 8.4L21 12.2"/></svg>
               </button>
               <button

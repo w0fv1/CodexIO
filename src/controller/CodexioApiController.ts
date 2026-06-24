@@ -12,21 +12,12 @@ import { FileStore } from '../component/FileStore.js'
 import { configFieldDescriptors } from '../value/ConfigDefinition.js'
 import { Configer } from '../component/Configer.js'
 import { configPageHtml } from './ConfigPage.js'
-import { MessageFile } from '../value/Message.js'
 import { Result } from '../value/Result.js'
 import { webPageHtml } from '../channel/WebPage.js'
 import { WebChannelHub } from '../channel/WebChannel.js'
 import { resolveAvailableServerPort } from '../util/Network.js'
 import { EventBus } from '../component/EventBus.js'
 import { AppEvent } from '../value/Event.js'
-
-const AgentMessageBodySchema = z.object({
-  ioThreadId: z.string().min(1),
-  text: z.string().default(''),
-  files: z.array(z.object({
-    path: z.string().min(1)
-  })).default([])
-}).refine((value) => value.text.trim().length > 0 || value.files.length > 0)
 
 const FileParamsSchema = z.object({
   id: z.string().min(1)
@@ -186,49 +177,6 @@ export class CodexioApiController {
           message: error instanceof Error ? error.message : String(error)
         })
         response.status(404).json(Result.fail('file not found'))
-      }
-    })
-
-    this.web.post('/api/agent/message', async (request, response) => {
-      try {
-        if (!await this.authorize(request)) {
-          Logger.warn('api message unauthorized')
-          response.status(401).json(Result.fail('unauthorized', '401'))
-          return
-        }
-        const body = AgentMessageBodySchema.safeParse(request.body)
-        if (!body.success) {
-          Logger.warn('api message invalid body')
-          response.json(Result.fail('invalid agent message'))
-          return
-        }
-        const files: MessageFile[] = []
-        for (const file of body.data.files) {
-          files.push(await this.fileStore.importPath(file.path))
-        }
-        Logger.info('api message received', {
-          ioThreadId: body.data.ioThreadId,
-          length: body.data.text.length,
-          files: files.length
-        })
-        const sent = await this.outputManager.sendAgent({
-          ioThreadId: body.data.ioThreadId,
-          role: 'agent',
-          text: body.data.text,
-          createdAt: Date.now(),
-          files
-        })
-        if (sent.isFailed) {
-          response.json(sent)
-          return
-        }
-        response.json(Result.success({
-          sent: true,
-          files
-        }))
-      } catch (error) {
-        Logger.error('api message failed', error)
-        response.json(Result.fromError(error))
       }
     })
 

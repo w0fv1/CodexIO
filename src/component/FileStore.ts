@@ -23,6 +23,22 @@ const imageMimeExtensions = new Map<string, string>([
   ['image/gif', '.gif']
 ])
 
+const extensionMimes = new Map<string, string>([
+  ['.txt', 'text/plain'],
+  ['.md', 'text/markdown'],
+  ['.json', 'application/json'],
+  ['.csv', 'text/csv'],
+  ['.tsv', 'text/tab-separated-values'],
+  ['.pdf', 'application/pdf'],
+  ['.zip', 'application/zip'],
+  ['.doc', 'application/msword'],
+  ['.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+  ['.xls', 'application/vnd.ms-excel'],
+  ['.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+  ['.ppt', 'application/vnd.ms-powerpoint'],
+  ['.pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation']
+])
+
 @injectable()
 export class FileStore {
   private readonly rootPath: string
@@ -94,9 +110,10 @@ export class FileStore {
   private async prepare(buffer: Buffer, name: string, inputMime?: string): Promise<MessageFile> {
     const detected = await fileTypeFromBuffer(buffer)
     const providedMime = inputMime?.trim().toLowerCase()
-    const mime = detected?.mime ?? (providedMime && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(providedMime) ? providedMime : 'application/octet-stream')
-    const id = randomUUID()
     const baseName = basename(name)
+    const inputExtension = extname(baseName).toLowerCase()
+    const mime = detected?.mime ?? (providedMime && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(providedMime) ? providedMime : extensionMimes.get(inputExtension) ?? 'application/octet-stream')
+    const id = randomUUID()
     const extension = imageMimeExtensions.get(mime) ?? (detected?.ext ? `.${detected.ext}` : extname(baseName))
     const path = join(this.rootPath, `${id}${extension}`)
     return {

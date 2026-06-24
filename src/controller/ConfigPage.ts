@@ -18,7 +18,6 @@ export const configPageHtml = String.raw`
         <input id="importFile" type="file" accept=".yaml,.yml,text/yaml,text/plain" class="hidden">
         <button id="importConfig" type="button" class="rounded-md border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:bg-slate-900">导入配置</button>
         <button id="exportConfig" type="button" class="rounded-md border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:bg-slate-900">导出配置</button>
-        <a href="/" class="rounded-md border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:bg-slate-900">返回会话</a>
       </div>
     </header>
     <section id="status" class="hidden rounded-md border border-slate-800 bg-slate-900 px-4 py-3 text-sm text-slate-300"></section>

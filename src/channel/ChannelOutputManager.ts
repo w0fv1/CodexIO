@@ -3,20 +3,19 @@ import { Result } from '../value/Result.js'
 import { allIoThreadId, Message, MessageFile } from '../value/Message.js'
 import { ChannelOutput } from './Channel.js'
 import { Logger } from '../component/Logger.js'
-import { FileStore } from '../component/FileStore.js'
 import { Configer } from '../component/Configer.js'
+import { FileStore } from '../component/FileStore.js'
 import { EmailChannelOutput } from './EmailChannel.js'
 import { FeishuChannelOutput } from './FeishuChannel.js'
 import { FeishuWebhookChannelOutput } from './FeishuWebhookChannel.js'
 import { WebChannelOutput } from './WebChannel.js'
-
-const markdownImagePattern = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g
-const localImagePathPattern = /(?:[A-Za-z]:[\\/][^\r\n"'<>|?*]+?\.(?:png|jpe?g|webp|gif)|\/[^\r\n"'<>]+?\.(?:png|jpe?g|webp|gif))/gi
+import { parseMarkdownFileReferences } from '../util/Markdown.js'
 
 @injectable()
 export class ChannelOutputManager {
   private readonly availableOutputs: ChannelOutput[]
   private readonly outputs = new Map<string, ChannelOutput>()
+  private readonly outputQueues = new Map<string, Promise<void>>()
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
@@ -61,10 +60,10 @@ export class ChannelOutputManager {
   }
 
   async sendAgent(message: Message): Promise<Result<null>> {
-    return this.send({
+    return this.send(await this.prepareAgentMessage({
       ...message,
       role: 'agent'
-    })
+    }))
   }
 
   async sendSystem(text: string, source = 'unknown', ioThreadId?: string): Promise<Result<null>> {
@@ -92,6 +91,7 @@ export class ChannelOutputManager {
 
   async stop(): Promise<Result<null>> {
     const failures: string[] = []
+    await this.flushOutputs()
     for (const output of this.outputs.values()) {
       const result = await output.stop()
       if (result.isFailed) {
@@ -106,6 +106,7 @@ export class ChannelOutputManager {
 
   async applyConfig(): Promise<Result<null>> {
     const failures: string[] = []
+    await this.flushOutputs()
     for (const output of this.outputs.values()) {
       const result = await output.stop()
       if (result.isFailed) {
@@ -134,106 +135,84 @@ export class ChannelOutputManager {
     if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
       return Result.fail('text or file is required')
     }
+    return this.broadcast(message)
+  }
+
+  private async prepareAgentMessage(message: Message): Promise<Message> {
+    const parsed = parseMarkdownFileReferences(message.text)
+    if (parsed.files.length === 0) {
+      return message
+    }
     const files = new Map<string, MessageFile>()
     for (const file of message.files ?? []) {
       files.set(file.id, file)
     }
-    const importedPaths = new Map<string, MessageFile>()
-    let text = message.text
-    const markdownParts: string[] = []
-    let markdownLastIndex = 0
-    markdownImagePattern.lastIndex = 0
-    for (;;) {
-      const match = markdownImagePattern.exec(text)
-      if (!match) {
-        break
-      }
-      const alt = match[1]
-      const url = match[2]
-      markdownParts.push(text.slice(markdownLastIndex, match.index))
-      let file = this.fileStore.resolveUrl(url)
-      if (!file && !/^https?:\/\//i.test(url)) {
-        const path = url.replaceAll('/', '\\')
-        file = importedPaths.get(path)
-        if (!file) {
-          try {
-            file = await this.fileStore.importPath(path)
-            importedPaths.set(path, file)
-          } catch {
-          }
-        }
-      }
+    for (const reference of parsed.files) {
+      const file = await this.resolveFileReference(reference.path)
       if (file) {
         files.set(file.id, file)
-      } else {
-        markdownParts.push(alt.trim().length > 0 ? `${alt} ${url}` : url)
       }
-      markdownLastIndex = match.index + match[0].length
     }
-    markdownParts.push(text.slice(markdownLastIndex))
-    text = markdownParts.join('')
-    const localPathParts: string[] = []
-    let localPathLastIndex = 0
-    localImagePathPattern.lastIndex = 0
-    for (;;) {
-      const match = localImagePathPattern.exec(text)
-      if (!match) {
-        break
-      }
-      const value = match[0]
-      localPathParts.push(text.slice(localPathLastIndex, match.index))
-      const path = value.replaceAll('/', '\\')
-      let file = importedPaths.get(path)
-      if (!file) {
-        try {
-          file = await this.fileStore.importPath(path)
-          importedPaths.set(path, file)
-        } catch {
-        }
-      }
-      if (file) {
-        files.set(file.id, file)
-      } else {
-        localPathParts.push(value)
-      }
-      localPathLastIndex = match.index + value.length
-    }
-    localPathParts.push(text.slice(localPathLastIndex))
-    text = localPathParts.join('')
-      .replace(/[ \t]+\n/g, '\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim()
-    return this.broadcast({
+    return {
       ...message,
-      text,
+      text: parsed.text,
       files: files.size > 0 ? [...files.values()] : undefined
-    })
+    }
+  }
+
+  private async resolveFileReference(path: string): Promise<MessageFile | undefined> {
+    try {
+      if (path.startsWith('/api/files/')) {
+        return this.fileStore.resolveUrl(path)
+      }
+      return await this.fileStore.importPath(path.replaceAll('/', '\\'))
+    } catch (error) {
+      Logger.warn('agent markdown file reference ignored', {
+        path,
+        message: error instanceof Error ? error.message : String(error)
+      })
+      return undefined
+    }
   }
 
   private async broadcast(message: Message): Promise<Result<null>> {
     if (this.outputs.size === 0) {
       return Result.fail('channel output not found')
     }
-    const failures: string[] = []
     for (const output of this.outputs.values()) {
+      this.enqueueOutput(output, message)
+    }
+    return Result.success(null)
+  }
+
+  private enqueueOutput(output: ChannelOutput, message: Message): void {
+    const previous = this.outputQueues.get(output.type) ?? Promise.resolve()
+    const task = previous.catch(() => {}).then(async () => {
       try {
         const result = await output.send(message)
         if (result.isFailed) {
-          failures.push(`${output.type}: ${result.message}`)
+          Logger.warn('channel output failed', {
+            type: output.type,
+            message: result.message
+          })
         }
       } catch (error) {
         const failed = Result.fromError(error)
-        failures.push(`${output.type}: ${failed.message}`)
+        Logger.warn('channel output failed', {
+          type: output.type,
+          message: failed.message
+        })
       }
-    }
-    if (failures.length === this.outputs.size) {
-      return Result.fail(failures.join('\n'))
-    }
-    if (failures.length > 0) {
-      Logger.warn('channel output partially failed', {
-        failures
-      })
-    }
-    return Result.success(null)
+    })
+    this.outputQueues.set(output.type, task)
+    void task.finally(() => {
+      if (this.outputQueues.get(output.type) === task) {
+        this.outputQueues.delete(output.type)
+      }
+    })
+  }
+
+  private async flushOutputs(): Promise<void> {
+    await Promise.allSettled(this.outputQueues.values())
   }
 }

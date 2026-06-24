@@ -7,15 +7,15 @@ import { createProcessEnv } from '../src/util/ProcessEnvironment.js'
 import { AgentManager } from '../src/agent/AgentManager.js'
 import { CodexAppServer } from '../src/agent/CodexAppServer.js'
 import { AgentLoginInProgressError, CodexAgent, createCodexCommand } from '../src/agent/CodexAgent.js'
+import { CodexMessageStreamer } from '../src/agent/CodexMessageStreamer.js'
 import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
 import { CommandExecutor, parseCommandInput } from '../src/controller/CommandExecutor.js'
 import { FeishuMessageSender } from '../src/channel/FeishuMessageSender.js'
 import { parseFeishuMessageText } from '../src/channel/FeishuMessageContent.js'
 import { ChannelOutputManager } from '../src/channel/ChannelOutputManager.js'
-import { AgentMessageClient } from '../src/agent/AgentMessageClient.js'
 import { ThreadBinder } from '../src/value/ThreadBinder.js'
 import { Logger } from '../src/component/Logger.js'
-import { renderMarkdownHtml } from '../src/component/Markdown.js'
+import { parseMarkdownFileReferences, renderMarkdownHtml } from '../src/util/Markdown.js'
 import { createUpdaterScript } from '../src/component/Updater.js'
 import { FileStore } from '../src/component/FileStore.js'
 import { Configer, diffConfigPaths } from '../src/component/Configer.js'
@@ -311,8 +311,8 @@ describe('core', () => {
         '::1'
       ],
       {
-        CODEXIO_API_URL: 'http://127.0.0.1:8787',
-        CODEXIO_TOKEN: 'runtime-token'
+        CUSTOM_RUNTIME_URL: 'http://127.0.0.1:8787',
+        CUSTOM_RUNTIME_TOKEN: 'runtime-token'
       }
     )
     expect(env.HTTP_PROXY).toBe('http://proxy.local:8080')
@@ -321,8 +321,8 @@ describe('core', () => {
     expect(env.NO_PROXY).toContain('127.0.0.1')
     expect(env.NO_PROXY).toContain('localhost')
     expect(env.no_proxy).toBe(env.NO_PROXY)
-    expect(env.CODEXIO_API_URL).toBe('http://127.0.0.1:8787')
-    expect(env.CODEXIO_TOKEN).toBe('runtime-token')
+    expect(env.CUSTOM_RUNTIME_URL).toBe('http://127.0.0.1:8787')
+    expect(env.CUSTOM_RUNTIME_TOKEN).toBe('runtime-token')
     expect(env.CODEX_HOME).toContain('.codexio')
     expect(env.CODEX_HOME).toContain('codex')
     expect(existsSync(testCodexHomePath)).toBe(true)
@@ -330,8 +330,8 @@ describe('core', () => {
     expect(codexConfig).toContain('[shell_environment_policy]')
     expect(codexConfig).toContain('"HTTPS_PROXY" = "http://proxy.local:8080"')
     expect(codexConfig).toContain('"NO_PROXY" = "localhost,127.0.0.1,::1"')
-    expect(codexConfig).toContain('"CODEXIO_API_URL" = "http://127.0.0.1:8787"')
-    expect(codexConfig).toContain('"CODEXIO_TOKEN" = "runtime-token"')
+    expect(codexConfig).toContain('"CUSTOM_RUNTIME_URL" = "http://127.0.0.1:8787"')
+    expect(codexConfig).toContain('"CUSTOM_RUNTIME_TOKEN" = "runtime-token"')
   })
 
   it('resolves bundled codex command by default', () => {
@@ -555,21 +555,14 @@ describe('core', () => {
     const threadStart = requests.find((request) => request.method === 'thread/start')
     expect(threadStart?.params).toMatchObject({
       ephemeral: false,
-      developerInstructions: expect.stringContaining('$apiUrl/api/agent/message')
+      developerInstructions: expect.stringContaining('Codexio Runtime')
     })
     const developerInstructions = (threadStart?.params as Record<string, unknown>).developerInstructions
-    expect(developerInstructions).toContain('Bearer $token')
-    expect(developerInstructions).toContain('"test-token"')
-    expect(developerInstructions).toContain('CODEXIO_API_URL')
-    expect(developerInstructions).toContain('http://127.0.0.1:8787')
-    expect(developerInstructions).toContain('[System.Text.Encoding]::UTF8.GetBytes')
-    expect(developerInstructions).toContain('application/json; charset=utf-8')
-    expect(developerInstructions).toContain('Never send local images as Markdown image links')
-    expect(developerInstructions).toContain('ioThreadId = "io-thread"')
-    expect(developerInstructions).toContain('"ioThreadId": "io-thread"')
-    expect(developerInstructions).not.toContain('${toolBaseUrl}')
-    expect(developerInstructions).not.toContain('${token}')
+    expect(developerInstructions).toContain('[日志](C:\\tmp\\result.txt)')
+    expect(developerInstructions).toContain('[截图](C:\\tmp\\preview.png)')
+    expect(developerInstructions).toContain('do not use Markdown image syntax')
     expect(developerInstructions).not.toContain('${ioThreadId}')
+    expect(developerInstructions).not.toContain('Invoke-RestMethod')
   })
 
   it('codex agent does not create a thread during startup', async () => {
@@ -2078,7 +2071,345 @@ describe('core', () => {
     expect(html).toContain('const value = 1')
     expect(html).not.toContain('<script>')
   })
+
+  it('parses markdown file links and leaves remote links in text', () => {
+    const parsed = parseMarkdownFileReferences([
+      '结果如下：',
+      '',
+      '[日志](C:\\tmp\\result.txt)',
+      '[远程](https://example.test/result.txt)',
+      '![旧图片](C:\\tmp\\image.png)'
+    ].join('\n'))
+    expect(parsed).toEqual({
+      text: [
+        '结果如下：',
+        '',
+        '`C:\\tmp\\result.txt`',
+        '[远程](https://example.test/result.txt)',
+        '![旧图片](C:\\tmp\\image.png)'
+      ].join('\n'),
+      files: [
+        {
+          label: '日志',
+          path: 'C:\\tmp\\result.txt'
+        }
+      ]
+    })
+  })
+
+  it('parses markdown file links with parentheses in path', () => {
+    const parsed = parseMarkdownFileReferences('查看：[日志](C:\\tmp\\run (1)\\result.txt)。')
+    expect(parsed).toEqual({
+      text: '查看：`C:\\tmp\\run (1)\\result.txt`。',
+      files: [
+        {
+          label: '日志',
+          path: 'C:\\tmp\\run (1)\\result.txt'
+        }
+      ]
+    })
+  })
+
+  it('streams codex markdown file links as files', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-stream-file-'))
+    const path = join(dir, 'result.txt')
+    await writeFile(path, 'ok', 'utf8')
+    const sent: Message[] = []
+    const outputManager = await createRecordingChannelOutputManager(sent)
+    const result = await outputManager.sendAgent({
+      ioThreadId: 'io-thread',
+      role: 'agent',
+      text: `日志已生成：[日志](${path})`,
+      createdAt: Date.now()
+    })
+
+    expect(result.isFailed).toBe(false)
+    expect(sent).toHaveLength(1)
+    expect(sent[0].text).toBe(`日志已生成：\`${path}\``)
+    expect(sent[0].files?.[0]).toMatchObject({
+      name: 'result.txt',
+      mime: 'text/plain'
+    })
+  })
+
+  it('keeps unresolved codex markdown file links in text', async () => {
+    const sent: Message[] = []
+    const outputManager = await createRecordingChannelOutputManager(sent)
+    const result = await outputManager.sendAgent({
+      ioThreadId: 'io-thread',
+      role: 'agent',
+      text: '[缺失](C:\\missing\\result.txt)',
+      createdAt: Date.now()
+    })
+
+    expect(result.isFailed).toBe(false)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toMatchObject({
+      text: '`C:\\missing\\result.txt`'
+    })
+    expect(sent[0].files).toBeUndefined()
+  })
+
+  it('does not let slow output channels block fast channel streaming', async () => {
+    const fast: string[] = []
+    const slowStarted: string[] = []
+    let releaseSlow: () => void = () => {}
+    const slowReleased = new Promise<void>((resolve) => {
+      releaseSlow = resolve
+    })
+    const outputManager = await createRecordingChannelOutputManager([], {
+      web: async (message) => {
+        fast.push(message.text)
+        return Result.success(null)
+      },
+      email: async (message) => {
+        slowStarted.push(message.text)
+        await slowReleased
+        return Result.success(null)
+      }
+    })
+
+    await outputManager.sendAgent({
+      ioThreadId: 'io-thread',
+      role: 'agent',
+      text: '第一段',
+      createdAt: Date.now()
+    })
+    await outputManager.sendAgent({
+      ioThreadId: 'io-thread',
+      role: 'agent',
+      text: '第二段',
+      createdAt: Date.now()
+    })
+
+    await waitUntil(() => fast.length === 2)
+    expect(fast).toEqual([
+      '第一段',
+      '第二段'
+    ])
+    expect(slowStarted).toEqual([
+      '第一段'
+    ])
+    releaseSlow()
+    await waitUntil(() => slowStarted.length === 2)
+  })
+
+  it('does not duplicate streamed text when completed item id is missing', async () => {
+    const sent: Message[] = []
+    const outputManager = createOutputManager({
+      sendAgent: async (message) => {
+        sent.push(message)
+        return Result.success(null)
+      }
+    })
+    const streamer = new CodexMessageStreamer(outputManager)
+    const thread = {
+      ioThreadId: 'io-thread',
+      agentThreadId: 'agent-thread'
+    }
+    await streamer.append(thread, 'delta-item', '第一段。')
+    await streamer.complete(thread, [
+      {
+        itemId: 'completed-turn-0',
+        text: '第一段。'
+      }
+    ])
+
+    expect(sent.map((message) => message.text)).toEqual([
+      '第一段。'
+    ])
+  })
+
+  it('serializes concurrent codex stream flushes without resending prefixes', async () => {
+    let releaseFirst: () => void = () => {}
+    const firstSendReleased = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    const sent: Message[] = []
+    const outputManager = createOutputManager({
+      sendAgent: async (message) => {
+        sent.push(message)
+        if (sent.length === 1) {
+          await firstSendReleased
+        }
+        return Result.success(null)
+      }
+    })
+    const streamer = new CodexMessageStreamer(outputManager)
+    const thread = {
+      ioThreadId: 'io-thread',
+      agentThreadId: 'agent-thread'
+    }
+    const first = streamer.append(thread, 'item-1', '这是一段中间消息，用来触发第一次发送，并且让发送过程暂时卡住，模拟飞书发送较慢。\n\n')
+    await waitUntil(() => sent.length === 1)
+    const second = streamer.append(thread, 'item-1', '后续新增内容。\n\n')
+    releaseFirst()
+    await Promise.all([
+      first,
+      second
+    ])
+
+    expect(sent.map((message) => message.text)).toEqual([
+      '这是一段中间消息，用来触发第一次发送，并且让发送过程暂时卡住，模拟飞书发送较慢。',
+      '后续新增内容。'
+    ])
+  })
+
+  it('waits for double newline before streaming codex text', async () => {
+    const sent: Message[] = []
+    const outputManager = createOutputManager({
+      sendAgent: async (message) => {
+        sent.push(message)
+        return Result.success(null)
+      }
+    })
+    const streamer = new CodexMessageStreamer(outputManager)
+    const thread = {
+      ioThreadId: 'io-thread',
+      agentThreadId: 'agent-thread'
+    }
+    await streamer.append(thread, 'item-1', '我只读不')
+    expect(sent).toEqual([])
+    await streamer.append(thread, 'item-1', '改。\n\n下一段未完成')
+    expect(sent.map((message) => message.text)).toEqual([
+      '我只读不改。'
+    ])
+    await streamer.complete(thread, [
+      {
+        itemId: 'item-1',
+        text: '我只读不改。\n\n下一段未完成'
+      }
+    ])
+    expect(sent.map((message) => message.text)).toEqual([
+      '我只读不改。',
+      '下一段未完成'
+    ])
+  })
+
+  it('flushes unfinished codex text when the item completes', async () => {
+    const sent: Message[] = []
+    const outputManager = createOutputManager({
+      sendAgent: async (message) => {
+        sent.push(message)
+        return Result.success(null)
+      }
+    })
+    const streamer = new CodexMessageStreamer(outputManager)
+    const thread = {
+      ioThreadId: 'io-thread',
+      agentThreadId: 'agent-thread'
+    }
+    await streamer.append(thread, 'item-1', '没有双换行，但 item 已经结束。')
+
+    expect(sent).toEqual([])
+
+    await streamer.completeItem(thread, 'item-1')
+
+    expect(sent.map((message) => message.text)).toEqual([
+      '没有双换行，但 item 已经结束。'
+    ])
+  })
+
+  it('does not resend completed codex items at turn completion', async () => {
+    const sent: Message[] = []
+    const outputManager = createOutputManager({
+      sendAgent: async (message) => {
+        sent.push(message)
+        return Result.success(null)
+      }
+    })
+    const streamer = new CodexMessageStreamer(outputManager)
+    const thread = {
+      ioThreadId: 'io-thread',
+      agentThreadId: 'agent-thread'
+    }
+    await streamer.append(thread, 'item-1', 'item 完成时已发送。')
+    await streamer.completeItem(thread, 'item-1')
+    await streamer.complete(thread, [
+      {
+        itemId: 'item-1',
+        text: 'item 完成时已发送。'
+      }
+    ])
+
+    expect(sent.map((message) => message.text)).toEqual([
+      'item 完成时已发送。'
+    ])
+  })
+
+  it('does not resend completed codex items when turn item ids are synthetic', async () => {
+    const sent: Message[] = []
+    const outputManager = createOutputManager({
+      sendAgent: async (message) => {
+        sent.push(message)
+        return Result.success(null)
+      }
+    })
+    const streamer = new CodexMessageStreamer(outputManager)
+    const thread = {
+      ioThreadId: 'io-thread',
+      agentThreadId: 'agent-thread'
+    }
+    await streamer.append(thread, 'delta-item', 'item 完成时已发送。')
+    await streamer.completeItem(thread, 'delta-item')
+    await streamer.complete(thread, [
+      {
+        itemId: 'completed-turn-0',
+        text: 'item 完成时已发送。'
+      }
+    ])
+
+    expect(sent.map((message) => message.text)).toEqual([
+      'item 完成时已发送。'
+    ])
+  })
+
+  it('streams every completed double-newline segment immediately from buffer', async () => {
+    const sent: Message[] = []
+    const outputManager = createOutputManager({
+      sendAgent: async (message) => {
+        sent.push(message)
+        return Result.success(null)
+      }
+    })
+    const streamer = new CodexMessageStreamer(outputManager)
+    const thread = {
+      ioThreadId: 'io-thread',
+      agentThreadId: 'agent-thread'
+    }
+    await streamer.append(thread, 'item-1', '第一段。\n\n第二段。\n\n第三段未完成')
+
+    expect(sent.map((message) => message.text)).toEqual([
+      '第一段。',
+      '第二段。'
+    ])
+
+    await streamer.complete(thread, [
+      {
+        itemId: 'item-1',
+        text: '第一段。\n\n第二段。\n\n第三段未完成'
+      }
+    ])
+
+    expect(sent.map((message) => message.text)).toEqual([
+      '第一段。',
+      '第二段。',
+      '第三段未完成'
+    ])
+  })
 })
+
+async function waitUntil(predicate: () => boolean): Promise<void> {
+  const startedAt = Date.now()
+  while (!predicate()) {
+    if (Date.now() - startedAt > 4000) {
+      throw new Error('condition timeout')
+    }
+    await new Promise((resolve) => {
+      setTimeout(resolve, 10)
+    })
+  }
+}
 
 function createCodexAppServerMock(
   requests: Array<{
@@ -2149,11 +2480,13 @@ function createCodexAgent(input: {
       return input.appServer
     }
   }
-  return new TestCodexAgent(configer, testMetadata, {
-    send: async (message: Message) => {
+  const outputManager = createOutputManager({
+    sendAgent: async (message: Message) => {
       await input.send?.(message)
+      return Result.success(null)
     }
-  } as AgentMessageClient)
+  })
+  return new TestCodexAgent(configer, testMetadata, outputManager, new CodexMessageStreamer(outputManager))
 }
 
 async function createAgentManager(
@@ -2180,6 +2513,31 @@ function createOutputManager(input: {
     sendAgent: input.sendAgent ?? (async () => Result.success(null)),
     clear: input.clear ?? (async () => Result.success(null))
   } as ChannelOutputManager
+}
+
+async function createRecordingChannelOutputManager(sent: Message[], sends: Partial<Record<'web' | 'feishu' | 'feishuWebhook' | 'email', (message: Message) => Promise<Result<null>>>> = {}): Promise<ChannelOutputManager> {
+  const configer = {
+    subscribe: () => {}
+  } as unknown as Configer
+  const output = (type: string, enabled: boolean) => ({
+    type,
+    start: async () => enabled || Boolean(sends[type as keyof typeof sends]),
+    send: sends[type as keyof typeof sends] ?? (async (message: Message) => {
+      sent.push(message)
+      return Result.success(null)
+    }),
+    stop: async () => Result.success(null)
+  })
+  const manager = new ChannelOutputManager(
+    configer,
+    new FileStore(testMetadata),
+    output('web', true) as never,
+    output('feishu', false) as never,
+    output('feishuWebhook', false) as never,
+    output('email', false) as never
+  )
+  await manager.start()
+  return manager
 }
 
 function createTestConfiger(configPath: string): Configer {

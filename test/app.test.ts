@@ -52,7 +52,12 @@ describe('server', () => {
     expect(webPageHtml).not.toContain('WebSocket 已断开')
     expect(webPageHtml).not.toContain('WebSocket 连接异常')
     expect(webPageHtml).not.toContain('>重连</button>')
-    expect(webPageHtml).toContain('href="/config"')
+    expect(webPageHtml).not.toContain('>Ready</div>')
+    expect(webPageHtml).not.toContain('href="/config"')
+    expect(webPageHtml).not.toContain('打开配置')
+    expect(webPageHtml).not.toContain('rounded-2xl border p-2')
+    expect(webPageHtml).not.toContain('border-b p-3')
+    expect(webPageHtml).not.toContain('border-r transition-transform')
     expect(webPageHtml).toContain("if (message.role === 'system')")
     expect(webPageHtml).toContain('whitespace-pre-wrap break-words')
     expect(webPageHtml).toContain('@paste="handlePaste($event)"')
@@ -428,6 +433,7 @@ describe('server', () => {
     expect(pageText).toContain('Codexio Config')
     expect(pageText).toContain('导入配置')
     expect(pageText).toContain('导出配置')
+    expect(pageText).not.toContain('返回会话')
     expect(pageText).not.toContain('/api/config/actions/')
 
     const readResponse = await fetch(`${baseUrl}/api/config`)
@@ -495,341 +501,6 @@ describe('server', () => {
     await closeTestServer(listener)
   })
 
-  it('accepts agent output through the configured default channel', async () => {
-    const { baseUrl, listener } = await startTestServer()
-    const socket = await openWebSocket(baseUrl)
-    const messages = recordWebSocket(socket)
-    const response = await fetch(`${baseUrl}/api/agent/message`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${testToken}`
-      },
-      body: JSON.stringify({
-        ioThreadId: 'api-thread',
-        text: 'agent output'
-      })
-    })
-    const result = await response.json() as {
-      isFailed: boolean
-    }
-    await waitForWebSocketMessages(messages, 1)
-    expect(result.isFailed).toBe(false)
-    expect(messages[0]).toMatchObject({
-      event: 'message',
-      role: 'agent',
-      ioThreadId: 'api-thread',
-      text: 'agent output'
-    })
-    await closeWebSocket(socket)
-    await closeTestServer(listener)
-  })
-
-  it('accepts agent output for an explicit thread id', async () => {
-    const { baseUrl, listener } = await startTestServer()
-    const socket = await openWebSocket(baseUrl)
-    const messages = recordWebSocket(socket)
-    const response = await fetch(`${baseUrl}/api/agent/message`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${testToken}`
-      },
-      body: JSON.stringify({
-        ioThreadId: 'api-thread',
-        text: 'thread output'
-      })
-    })
-    const result = await response.json() as {
-      isFailed: boolean
-    }
-    await waitForWebSocketMessages(messages, 1)
-    expect(result.isFailed).toBe(false)
-    expect(messages[0]).toMatchObject({
-      event: 'message',
-      role: 'agent',
-      ioThreadId: 'api-thread',
-      text: 'thread output'
-    })
-    await closeWebSocket(socket)
-    await closeTestServer(listener)
-  })
-
-  it('accepts agent image output through local paths', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'codexio-agent-image-'))
-    const imagePath = join(dir, 'agent.png')
-    await writeFile(imagePath, pngBytes())
-    const { baseUrl, listener } = await startTestServer()
-    const socket = await openWebSocket(baseUrl)
-    const messages = recordWebSocket(socket)
-    const response = await fetch(`${baseUrl}/api/agent/message`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${testToken}`
-      },
-      body: JSON.stringify({
-        ioThreadId: 'api-thread',
-        text: 'agent image',
-        files: [
-          {
-            path: imagePath
-          }
-        ]
-      })
-    })
-    const result = await response.json() as {
-      isFailed: boolean
-      data: {
-        sent: boolean
-        files: Array<{
-          id: string
-          mime: string
-          url: string
-        }>
-      }
-    }
-    await waitForWebSocketMessages(messages, 1)
-    expect(result.isFailed).toBe(false)
-    expect(result.data.sent).toBe(true)
-    expect(result.data.files[0]).toMatchObject({
-      mime: 'image/png',
-      url: `/api/files/${result.data.files[0].id}`
-    })
-    expect(messages[0]).toMatchObject({
-      event: 'message',
-      role: 'agent',
-      ioThreadId: 'api-thread',
-      text: 'agent image',
-      files: [
-        {
-          id: result.data.files[0].id,
-          mime: 'image/png',
-          url: `/api/files/${result.data.files[0].id}`
-        }
-      ]
-    })
-    const fileResponse = await fetch(`${baseUrl}${result.data.files[0].url}`)
-    expect(fileResponse.headers.get('content-type')).toContain('image/png')
-    expect(Buffer.from(await fileResponse.arrayBuffer()).equals(pngBytes())).toBe(true)
-    await closeWebSocket(socket)
-    await closeTestServer(listener)
-  })
-
-  it('promotes local file markdown images to channel files', async () => {
-    const { baseUrl, listener } = await startTestServer()
-    const socket = await openWebSocket(baseUrl)
-    const messages = recordWebSocket(socket)
-    const form = new FormData()
-    form.append('file', new Blob([pngBytes()], {
-      type: 'image/png'
-    }), 'agent-markdown.png')
-    const uploadResponse = await fetch(`${baseUrl}/api/files`, {
-      method: 'POST',
-      body: form
-    })
-    const upload = await uploadResponse.json() as {
-      isFailed: boolean
-      data: {
-        file: {
-          id: string
-          url: string
-        }
-      }
-    }
-    expect(upload.isFailed).toBe(false)
-
-    const response = await fetch(`${baseUrl}/api/agent/message`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${testToken}`
-      },
-      body: JSON.stringify({
-        ioThreadId: 'api-thread',
-        text: `图片如下：\n\n![agent image](${upload.data.file.url})`
-      })
-    })
-    const result = await response.json() as {
-      isFailed: boolean
-    }
-
-    await waitForWebSocketMessages(messages, 1)
-    expect(result.isFailed).toBe(false)
-    expect(messages[0]).toMatchObject({
-      event: 'message',
-      role: 'agent',
-      ioThreadId: 'api-thread',
-      text: '图片如下：',
-      files: [
-        {
-          id: upload.data.file.id,
-          url: upload.data.file.url
-        }
-      ]
-    })
-    expect(JSON.stringify(messages[0])).not.toContain('![agent image]')
-    await closeWebSocket(socket)
-    await closeTestServer(listener)
-  })
-
-  it('promotes local image paths in agent text to channel files', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'codexio-agent-path-image-'))
-    const imagePath = join(dir, 'agent-output.png')
-    await writeFile(imagePath, pngBytes())
-    const { baseUrl, listener } = await startTestServer()
-    const socket = await openWebSocket(baseUrl)
-    const messages = recordWebSocket(socket)
-
-    const response = await fetch(`${baseUrl}/api/agent/message`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${testToken}`
-      },
-      body: JSON.stringify({
-        ioThreadId: 'api-thread',
-        text: `截图预览：\n\n截图预览 ${imagePath.replaceAll('\\', '/')}`
-      })
-    })
-    const result = await response.json() as {
-      isFailed: boolean
-    }
-
-    await waitForWebSocketMessages(messages, 1)
-    expect(result.isFailed).toBe(false)
-    expect(messages[0]).toMatchObject({
-      event: 'message',
-      role: 'agent',
-      ioThreadId: 'api-thread',
-      text: '截图预览：\n\n截图预览',
-      files: [
-        {
-          mime: 'image/png',
-          name: 'agent-output.png',
-          url: expect.stringMatching(/^\/api\/files\//)
-        }
-      ]
-    })
-    expect(JSON.stringify(messages[0])).not.toContain(imagePath.replaceAll('\\', '/'))
-    await closeWebSocket(socket)
-    await closeTestServer(listener)
-  })
-
-  it('sends sanitized markdown html to web channel', async () => {
-    const { baseUrl, listener } = await startTestServer()
-    const socket = await openWebSocket(baseUrl)
-    const messages = recordWebSocket(socket)
-    const response = await fetch(`${baseUrl}/api/agent/message`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${testToken}`
-      },
-      body: JSON.stringify({
-        ioThreadId: 'api-thread',
-        text: '**done**\n\n<script>alert(1)</script>'
-      })
-    })
-    const result = await response.json() as {
-      isFailed: boolean
-    }
-    await waitForWebSocketMessages(messages, 1)
-    expect(result.isFailed).toBe(false)
-    expect(messages[0]).toMatchObject({
-      event: 'message',
-      role: 'agent',
-      ioThreadId: 'api-thread',
-      text: '**done**\n\n<script>alert(1)</script>'
-    })
-    expect(messages[0].html).toContain('<strong>done</strong>')
-    expect(messages[0].html).not.toContain('<script>')
-    await closeWebSocket(socket)
-    await closeTestServer(listener)
-  })
-
-  it('rejects unauthenticated agent output', async () => {
-    const { baseUrl, listener } = await startTestServer()
-    const response = await fetch(`${baseUrl}/api/agent/message`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        text: 'agent output'
-      })
-    })
-    const result = await response.json() as {
-      isFailed: boolean
-      message: string
-    }
-    expect(response.status).toBe(401)
-    expect(result.isFailed).toBe(true)
-    expect(result.message).toBe('unauthorized')
-    await closeTestServer(listener)
-  })
-
-  it('authorizes agent output with current config token after config patch', async () => {
-    const nextToken = 'test-message-token-next'
-    const { baseUrl, listener } = await startTestServer()
-    const socket = await openWebSocket(baseUrl)
-    const messages = recordWebSocket(socket)
-    const patchResponse = await fetch(`${baseUrl}/api/config`, {
-      method: 'PATCH',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        patch: {
-          server: {
-            token: nextToken
-          }
-        }
-      })
-    })
-    const patchResult = await patchResponse.json() as {
-      isFailed: boolean
-    }
-    expect(patchResult.isFailed).toBe(false)
-
-    const staleResponse = await fetch(`${baseUrl}/api/agent/message`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${testToken}`
-      },
-      body: JSON.stringify({
-        text: 'stale token output'
-      })
-    })
-    expect(staleResponse.status).toBe(401)
-    
-    const currentResponse = await fetch(`${baseUrl}/api/agent/message`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${nextToken}`
-      },
-      body: JSON.stringify({
-        ioThreadId: 'api-thread',
-        text: 'current token output'
-      })
-    })
-    const currentResult = await currentResponse.json() as {
-      isFailed: boolean
-    }
-    await waitForWebSocketMessages(messages, 1)
-    expect(currentResult.isFailed).toBe(false)
-    expect(messages.at(-1)).toMatchObject({
-      event: 'message',
-      role: 'agent',
-      ioThreadId: 'api-thread',
-      text: 'current token output'
-    })
-    await closeWebSocket(socket)
-    await closeTestServer(listener)
-  })
-
   it('stops the host server through the authenticated admin endpoint', async () => {
     const { baseUrl, listener } = await startTestServer()
     const unauthorized = await fetch(`${baseUrl}/api/server/stop`, {
@@ -875,48 +546,6 @@ describe('server', () => {
     expect(result.isFailed).toBe(false)
     await closed
     expect(messages).toEqual([])
-  })
-
-  it('broadcasts agent output to every web connection', async () => {
-    const { baseUrl, listener } = await startTestServer()
-    const first = await openWebSocket(baseUrl)
-    const second = await openWebSocket(baseUrl)
-    const firstMessages = recordWebSocket(first)
-    const secondMessages = recordWebSocket(second)
-    const response = await fetch(`${baseUrl}/api/agent/message`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${testToken}`
-      },
-      body: JSON.stringify({
-        ioThreadId: 'api-thread',
-        text: 'broadcast output'
-      })
-    })
-    const result = await response.json() as {
-      isFailed: boolean
-    }
-    await waitForWebSocketMessages(firstMessages, 1)
-    await waitForWebSocketMessages(secondMessages, 1)
-    const firstMessage = firstMessages[0]
-    const secondMessage = secondMessages[0]
-    expect(result.isFailed).toBe(false)
-    expect(firstMessage).toMatchObject({
-      event: 'message',
-      role: 'agent',
-      ioThreadId: 'api-thread',
-      text: 'broadcast output'
-    })
-    expect(secondMessage).toMatchObject({
-      event: 'message',
-      role: 'agent',
-      ioThreadId: 'api-thread',
-      text: 'broadcast output'
-    })
-    await closeWebSocket(first)
-    await closeWebSocket(second)
-    await closeTestServer(listener)
   })
 
   it('broadcasts user input to every web connection', async () => {
@@ -1054,27 +683,14 @@ async function startTestServer(): Promise<{
     'workspace:',
     `  path: ${workspace}`
   ].join('\n'), 'utf8')
-  let baseUrl = ''
-  const server = await createTestCodexioApp(createTestConfiger(configPath), new TestAgent(async (message) => {
-      await fetch(`${baseUrl}/api/agent/message`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${testToken}`
-        },
-        body: JSON.stringify({
-          ioThreadId: message.ioThreadId,
-          text: message.text
-        })
-      })
-    }))
+  const server = await createTestCodexioApp(createTestConfiger(configPath), new TestAgent())
   const listener = server.listen(0)
   await new Promise<void>((resolve) => listener.once('listening', resolve))
   const address = listener.address()
   if (!address || typeof address === 'string') {
     throw new Error('server address not found')
   }
-  baseUrl = `http://127.0.0.1:${address.port}`
+  const baseUrl = `http://127.0.0.1:${address.port}`
   return {
     baseUrl,
     configPath,
@@ -1117,6 +733,14 @@ async function createTestCodexioApp(configer: Configer, claudeAgent: Agent): Pro
     new FeishuWebhookChannelOutput(configer),
     emailOutput
   )
+  if (claudeAgent instanceof TestAgent) {
+    claudeAgent.setSend(async (message) => {
+      const sent = await outputManager.sendAgent(message)
+      if (sent.isFailed) {
+        throw new Error(sent.message)
+      }
+    })
+  }
   const agentManager = new AgentManager(configer, outputManager, claudeAgent, claudeAgent)
   const updater = new Updater(configer, metadata, outputManager)
   const commandExecutor = new CommandExecutor(outputManager, agentManager, updater)

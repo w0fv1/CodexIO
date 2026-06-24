@@ -4,7 +4,11 @@ import { Message } from '../src/value/Message.js'
 export class TestAgent implements Agent {
   readonly type = 'test'
 
-  constructor(private readonly send: (message: Message) => Promise<void>) {}
+  constructor(private send: (message: Message) => Promise<void> = async () => {}) {}
+
+  setSend(send: (message: Message) => Promise<void>): void {
+    this.send = send
+  }
 
   async login(): Promise<void> {}
 

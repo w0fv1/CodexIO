@@ -11,7 +11,8 @@ import { Configer } from '../component/Configer.js'
 import { Logger } from '../component/Logger.js'
 import { isImageFile } from '../component/FileStore.js'
 import { allIoThreadId, Message } from '../value/Message.js'
-import { AgentMessageClient } from './AgentMessageClient.js'
+import { ChannelOutputManager } from '../channel/ChannelOutputManager.js'
+import { CodexMessageStreamer } from './CodexMessageStreamer.js'
 
 const codexEntryPath = createRequire(import.meta.url).resolve('@openai/codex/bin/codex.js')
 
@@ -42,7 +43,6 @@ type CodexThread = {
   ioThreadId: string
   agentThreadId: string
   turnId?: string
-  messages: Map<string, string>
 }
 
 const codexLoginInProgressMessage = '请先完成 Codex 登录。'
@@ -66,7 +66,8 @@ export class CodexAgent implements Agent {
   constructor(
     @inject(Configer) private readonly configer: Configer,
     @inject(CodexioMetadata) private readonly metadata: CodexioMetadata,
-    @inject(AgentMessageClient) private readonly messageClient: AgentMessageClient
+    @inject(ChannelOutputManager) private readonly outputManager: ChannelOutputManager,
+    @inject(CodexMessageStreamer) private readonly messageStreamer: CodexMessageStreamer
   ) {}
 
   async login(): Promise<void> {
@@ -194,6 +195,7 @@ export class CodexAgent implements Agent {
     })
     if (thread) {
       await this.interruptActiveTurn(thread)
+      this.messageStreamer.clearThread(ioThreadId)
       this.ioThreadIdByAgentThreadId.delete(thread.agentThreadId)
       this.threads.delete(ioThreadId)
     }
@@ -213,6 +215,7 @@ export class CodexAgent implements Agent {
     await this.appServer?.stop()
     this.appServer = undefined
     this.loginTask = undefined
+    this.messageStreamer.clear()
     this.threads.clear()
     this.ioThreadIdByAgentThreadId.clear()
     this.started = false
@@ -227,13 +230,12 @@ export class CodexAgent implements Agent {
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
       ephemeral: false,
-      developerInstructions: await this.readDeveloperInstructions(ioThreadId)
+      developerInstructions: await this.readDeveloperInstructions()
     })
     const agentThreadId = this.readThreadId(response)
     const thread: CodexThread = {
       ioThreadId,
-      agentThreadId,
-      messages: new Map<string, string>()
+      agentThreadId
     }
     this.threads.set(ioThreadId, thread)
     this.ioThreadIdByAgentThreadId.set(agentThreadId, ioThreadId)
@@ -244,14 +246,8 @@ export class CodexAgent implements Agent {
     return thread
   }
 
-  private async readDeveloperInstructions(ioThreadId: string): Promise<string> {
-    const serverHost = await this.configer.get('server.host')
-    const serverPort = await this.configer.get('server.port')
-    const token = await this.configer.get('server.token')
-    return (await readFile(join(this.metadata.rootPath, 'instruction.md'), 'utf8'))
-      .replaceAll('${toolBaseUrl}', `http://${serverHost}:${serverPort}`)
-      .replaceAll('${token}', token)
-      .replaceAll('${ioThreadId}', ioThreadId)
+  private async readDeveloperInstructions(): Promise<string> {
+    return readFile(join(this.metadata.rootPath, 'instruction.md'), 'utf8')
   }
 
   private readThreadId(response: unknown): string {
@@ -352,7 +348,7 @@ export class CodexAgent implements Agent {
       text: message,
       createdAt: Date.now()
     }
-    await this.sendSystem(loginMessage)
+    await this.sendAgent(loginMessage)
     const appServer = this.appServer
     const task = (async () => {
       await appServer.waitForNotification('account/login/completed')
@@ -364,7 +360,7 @@ export class CodexAgent implements Agent {
         text: completedMessage,
         createdAt: Date.now()
       }
-      await this.sendSystem(completionMessage)
+      await this.sendAgent(completionMessage)
       await this.restartAfterLogin()
     })()
     this.loginTask = task
@@ -447,8 +443,14 @@ export class CodexAgent implements Agent {
     }
     if (method === 'item/agentMessage/delta') {
       if (thread && typeof data.itemId === 'string' && typeof data.delta === 'string') {
-        const current = thread.messages.get(data.itemId) ?? ''
-        thread.messages.set(data.itemId, current + data.delta)
+        await this.messageStreamer.append(thread, data.itemId, data.delta)
+      } else {
+        Logger.warn('codex stream delta ignored', {
+          hasThread: Boolean(thread),
+          threadId: typeof data.threadId === 'string' ? data.threadId : null,
+          itemIdType: typeof data.itemId,
+          deltaType: typeof data.delta
+        })
       }
       return
     }
@@ -456,6 +458,12 @@ export class CodexAgent implements Agent {
       const item = data.item
       if (item && typeof item === 'object' && (item as Record<string, unknown>).type === 'commandExecution' && typeof (item as Record<string, unknown>).command === 'string') {
         process.stdout.write(`\n$ ${(item as Record<string, string>).command}\n`)
+      } else {
+        Logger.info('codex item started', {
+          type: readObjectString(item, 'type'),
+          itemId: readObjectString(item, 'id'),
+          threadId: readObjectString(data, 'threadId')
+        })
       }
       return
     }
@@ -463,6 +471,15 @@ export class CodexAgent implements Agent {
       const item = data.item
       if (item && typeof item === 'object' && (item as Record<string, unknown>).type === 'commandExecution' && typeof (item as Record<string, unknown>).aggregatedOutput === 'string') {
         process.stdout.write((item as Record<string, string>).aggregatedOutput)
+      } else {
+        if (thread && item && typeof item === 'object' && (item as Record<string, unknown>).type === 'agentMessage' && typeof (item as Record<string, unknown>).id === 'string') {
+          await this.messageStreamer.completeItem(thread, (item as Record<string, string>).id)
+        }
+        Logger.info('codex item completed', {
+          type: readObjectString(item, 'type'),
+          itemId: readObjectString(item, 'id'),
+          threadId: readObjectString(data, 'threadId')
+        })
       }
       return
     }
@@ -476,34 +493,30 @@ export class CodexAgent implements Agent {
         thread.turnId = undefined
       }
       const items = (turn as Record<string, unknown>).items
-      const messages: string[] = []
+      const messages: Array<{ itemId: string, text: string }> = []
       if (Array.isArray(items)) {
+        let index = 0
         for (const item of items) {
           if (item && typeof item === 'object' && (item as Record<string, unknown>).type === 'agentMessage' && typeof (item as Record<string, unknown>).text === 'string') {
             const text = (item as Record<string, string>).text.trim()
             if (text.length > 0) {
-              messages.push(text)
+              const itemId = typeof (item as Record<string, unknown>).id === 'string' ? (item as Record<string, string>).id : `completed-${turnId}-${index}`
+              messages.push({
+                itemId,
+                text
+              })
             }
           }
+          index += 1
         }
       }
-      if (messages.length === 0) {
-        for (const value of thread.messages.values()) {
-          const text = value.trim()
-          if (text.length > 0) {
-            messages.push(text)
-          }
-        }
-      }
-      thread.messages.clear()
-      if (messages.length > 0) {
-        await this.messageClient.send({
-          ioThreadId: thread.ioThreadId,
-          role: 'agent',
-          text: messages.join('\n\n'),
-          createdAt: Date.now()
-        })
-      }
+      Logger.info('codex turn completed', {
+        ioThreadId: thread.ioThreadId,
+        agentThreadId: thread.agentThreadId,
+        turnId,
+        agentMessages: messages.length
+      })
+      await this.messageStreamer.complete(thread, messages)
       return
     }
     if (method === 'error') {
@@ -515,14 +528,23 @@ export class CodexAgent implements Agent {
           await this.startDeviceLogin(thread?.ioThreadId ?? this.firstIoThreadId())
           return
         }
-        await this.sendSystem({
+        await this.sendAgent({
           ioThreadId: thread?.ioThreadId ?? this.firstIoThreadId() ?? allIoThreadId,
           role: 'agent',
           text: message,
           createdAt: Date.now()
         })
       }
+      return
     }
+    Logger.info('codex notification ignored', {
+      method,
+      threadId: readObjectString(data, 'threadId'),
+      itemId: readObjectString(data, 'itemId'),
+      itemType: readObjectString(data.item, 'type'),
+      turnId: readObjectString(data.turn, 'id'),
+      keys: Object.keys(data)
+    })
   }
 
   private resolveThread(agentThreadId: unknown): CodexThread | undefined {
@@ -540,16 +562,14 @@ export class CodexAgent implements Agent {
     return this.threads.keys().next().value
   }
 
-  private async sendSystem(message: Message): Promise<void> {
-    await this.messageClient.send(message).catch(() => {})
+  private async sendAgent(message: Message): Promise<void> {
+    await this.outputManager.sendAgent(message).catch(() => {})
   }
 
   protected async createAppServer(onNotification: (method: string, params: unknown) => void): Promise<CodexAppServerHandle> {
     const bundled = await this.configer.get('agents.codex.bundled')
     const bundledEnabled = bundled ?? true
     const serverHost = await this.configer.get('server.host')
-    const serverPort = await this.configer.get('server.port')
-    const serverToken = await this.configer.get('server.token')
     const workspacePath = await this.configer.get('workspace.path')
     const proxyEnabled = await this.configer.get('proxy.enabled')
     const proxyHost = await this.configer.get('proxy.host')
@@ -572,11 +592,7 @@ export class CodexAgent implements Agent {
           '127.0.0.1',
           '::1',
           serverHost
-        ] : [],
-        {
-          CODEXIO_API_URL: `http://${serverHost}:${serverPort}`,
-          CODEXIO_TOKEN: serverToken
-        }
+        ] : []
       ),
       metadata: this.metadata,
       onNotification,
@@ -588,4 +604,12 @@ export class CodexAgent implements Agent {
       }
     })
   }
+}
+
+function readObjectString(value: unknown, key: string): string | null {
+  if (!value || typeof value !== 'object') {
+    return null
+  }
+  const item = (value as Record<string, unknown>)[key]
+  return typeof item === 'string' ? item : null
 }

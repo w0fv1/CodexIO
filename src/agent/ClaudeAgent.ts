@@ -6,7 +6,7 @@ import { createProcessEnv } from '../util/ProcessEnvironment.js'
 import { Logger } from '../component/Logger.js'
 import { Message } from '../value/Message.js'
 import { Configer } from '../component/Configer.js'
-import { AgentMessageClient } from './AgentMessageClient.js'
+import { ChannelOutputManager } from '../channel/ChannelOutputManager.js'
 
 const require = createRequire(import.meta.url)
 const claudeEntryPath = require.resolve('@anthropic-ai/claude-code/cli-wrapper.cjs')
@@ -24,7 +24,7 @@ export class ClaudeAgent implements Agent {
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
-    @inject(AgentMessageClient) private readonly messageClient: AgentMessageClient
+    @inject(ChannelOutputManager) private readonly outputManager: ChannelOutputManager
   ) {}
 
   async login(): Promise<void> {
@@ -163,7 +163,7 @@ export class ClaudeAgent implements Agent {
   }
 
   private async send(message: Message): Promise<void> {
-    await this.messageClient.send(message)
+    await this.outputManager.sendAgent(message)
   }
 
 }
