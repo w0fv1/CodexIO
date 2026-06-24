@@ -12,9 +12,10 @@ pnpm dev
 正式安装包通过 Windows Service 运行：
 
 ```cmd
-install.cmd
 start.cmd
 ```
+
+首次运行 `start.cmd` 会自动请求管理员权限，安装 Windows Service，然后启动服务。需要手动只安装服务时再运行 `install.cmd`。
 
 停止、重启或卸载服务：
 

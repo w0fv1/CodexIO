@@ -1100,7 +1100,7 @@ describe('core', () => {
       'account/login/start',
       'account/read'
     ])
-    expect(outbound).toContain('Codex login completed.')
+    expect(outbound).toContain('Codex 登录已完成。')
   })
 
   it('codex app-server ignores malformed JSON lines and times out pending requests', async () => {
@@ -1442,6 +1442,11 @@ describe('core', () => {
     expect(config.proxy.port).toBe(7890)
   })
 
+  it('ships package config with automatic port fallback enabled', async () => {
+    const text = await readFile(join(testMetadata.rootPath, 'config.example.yaml'), 'utf8')
+    expect(text).toContain('autoPort: true')
+  })
+
   it('loads update base url from config', () => {
     const config = ConfigSchema.parse({
       update: {
@@ -1462,8 +1467,8 @@ describe('core', () => {
   it('updater waits for restarted server pid', () => {
     const script = createUpdaterScript()
     expect(script).toContain('Assert-UpdatePath $manifestData.serviceCommand')
-    expect(script).toContain('Start-Process -FilePath $manifestData.serviceCommand -ArgumentList @("stop")')
-    expect(script).toContain('Start-Process -FilePath $manifestData.serviceCommand -ArgumentList @("start")')
+    expect(script).toContain('Start-Process -FilePath "powershell" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $manifestData.serviceCommand, "-Action", "stop")')
+    expect(script).toContain('Start-Process -FilePath "powershell" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $manifestData.serviceCommand, "-Action", "start")')
     expect(script).toContain('$serverState = Get-Content -Raw -LiteralPath $manifestData.serverStatePath | ConvertFrom-Json')
     expect(script).toContain('$serverResponse.data.pid -eq $serverState.pid')
     expect(script).not.toContain('supervisorStatePath')
@@ -1474,8 +1479,9 @@ describe('core', () => {
     const script = createUpdaterScript()
     expect(script).toContain('function Replace-Current')
     expect(script).toContain('if ($item.Name -eq ".codexio")')
-    expect(script).toContain('$releaseTarget = Join-Path $manifestData.installRoot ".codexio\\release.json"')
-    expect(script).toContain('Copy-Item -Force -LiteralPath $releaseSource -Destination $releaseTarget')
+    expect(script).toContain('function Copy-CodexioPackageItems')
+    expect(script).toContain('foreach ($item in @("codexio-service.exe", "codexio-service.xml", "node", "pnpm", "release.json"))')
+    expect(script).toContain('Copy-CodexioPackageItems -SourceRoot $manifestData.stageRoot -TargetRoot $manifestData.installRoot')
     expect(script).not.toContain('preserved-codexio-data')
   })
 
@@ -1499,10 +1505,43 @@ describe('core', () => {
 
   it('updater installs the Windows service package layout', () => {
     const script = createUpdaterScript()
-    expect(script).toContain('"codexio-service.exe", "codexio-service.xml", "install.cmd", "uninstall.cmd", "start.cmd", "stop.cmd", "restart.cmd", "dist\\Server.js", ".codexio\\config.yaml", ".codexio\\release.json"')
+    expect(script).toContain('".codexio\\codexio-service.exe", ".codexio\\codexio-service.xml", "install.cmd", "uninstall.cmd", "start.cmd", "stop.cmd", "restart.cmd", "service.ps1", "nodew.ps1", "dist\\Server.js", ".codexio\\config.yaml", ".codexio\\release.json"')
     expect(script).toContain('function Backup-Current')
     expect(script).toContain('function Restore-Backup')
     expect(script).not.toContain('Join-Path $manifestData.installRoot "supervisor.json"')
+  })
+
+  it('release start command installs the Windows service before starting when missing', async () => {
+    const script = await readFile(join(testMetadata.rootPath, 'scripts', 'release.ps1'), 'utf8')
+    expect(script).toContain('WinSW-x64.exe')
+    expect(script).toContain('function New-ServiceScriptFile')
+    expect(script).toContain('function New-ServiceCommandFile')
+    expect(script).toContain('New-ServiceCommandFiles -DestinationRoot $PnpmRoot -EnsureDependencies')
+    expect(script).toContain('Install-ProductionDependencies')
+    expect(script).toContain('function Invoke-ServiceAction')
+    expect(script).toContain('function Start-ServiceProcess')
+    expect(script).toContain('function Uninstall-ServiceProcess')
+    expect(script).toContain('function Test-ServiceMatchesPackage')
+    expect(script).toContain('function Remove-ServiceRegistration')
+    expect(script).toContain('Get-Service -Name "codexio"')
+    expect(script).toContain('Get-CimInstance Win32_Service -Filter "Name=\'codexio\'"')
+    const serviceMain = script.slice(script.indexOf('try {'))
+    expect(serviceMain.indexOf('Install-ProductionDependencies')).toBeLessThan(serviceMain.indexOf('if (-not (Test-Administrator))'))
+    expect(script).toContain('Install-Service')
+    expect(script).toContain('service path changed, reinstalling service')
+    expect(script).toContain('Invoke-LocalCommand -FilePath "sc.exe" -Arguments @("delete", "codexio")')
+    expect(script).toContain('service is already running')
+    expect(script).toContain('Stop-ServiceProcess')
+    expect(script).toContain('uninstalling service')
+    expect(script).toContain('$ServiceCommand = Join-Path $Root ".codexio\\codexio-service.exe"')
+    expect(script).toContain('Invoke-LocalCommand -FilePath $ServiceCommand -Arguments @("install")')
+    expect(script).toContain('Invoke-LocalCommand -FilePath $ServiceCommand -Arguments @("stop")')
+    expect(script).toContain('Invoke-LocalCommand -FilePath $ServiceCommand -Arguments @("uninstall")')
+    expect(script).not.toContain('& (Join-Path $Root "codexio-service.exe") status')
+    expect(script).not.toContain('nodew.cmd')
+    expect(script).not.toContain('function Ensure-ServiceInstalled')
+    expect(script).not.toContain('function New-PnpmStartCommandFile')
+    expect(script).not.toContain('function New-PnpmCommandFile')
   })
 
   it('loads channel credentials from config', () => {

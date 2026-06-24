@@ -146,7 +146,7 @@ export class Updater {
         backupRoot,
         configPath: this.configer.path,
         serverStatePath: this.metadata.serverStatePath,
-        serviceCommand: join(installRoot, 'codexio-service.exe'),
+        serviceCommand: join(installRoot, 'service.ps1'),
         updateRoot
       }
       const manifestPath = join(updaterRoot, 'update-manifest.json')
@@ -337,23 +337,24 @@ function powershellPath(): string {
 
 async function validateStage(stageRoot: string, platform: string): Promise<void> {
   const required = [
-    'codexio-service.exe',
-    'codexio-service.xml',
+    '.codexio/codexio-service.exe',
+    '.codexio/codexio-service.xml',
     'install.cmd',
     'uninstall.cmd',
     'start.cmd',
     'stop.cmd',
     'restart.cmd',
+    'service.ps1',
+    'nodew.ps1',
     'dist/Server.js',
     '.codexio/config.yaml',
     '.codexio/release.json'
   ]
   if (platform === 'windows-x64-pnpm') {
-    required.push('nodew.cmd')
-    required.push('runtime/pnpm/bin/pnpm.cjs')
+    required.push('.codexio/pnpm/bin/pnpm.cjs')
   }
   if (platform === 'windows-x64-standalone') {
-    required.push('runtime/node/node.exe')
+    required.push('.codexio/node/node.exe')
   }
   for (const item of required) {
     await readFile(join(stageRoot, item))
@@ -436,22 +437,48 @@ function Stop-InstallRootProcess {
 
 function Assert-InstallLayout {
     param([Parameter(Mandatory = $true)] [string] $Root)
-    foreach ($item in @("codexio-service.exe", "codexio-service.xml", "install.cmd", "uninstall.cmd", "start.cmd", "stop.cmd", "restart.cmd", "dist\\Server.js", ".codexio\\config.yaml", ".codexio\\release.json")) {
+    foreach ($item in @(".codexio\\codexio-service.exe", ".codexio\\codexio-service.xml", "install.cmd", "uninstall.cmd", "start.cmd", "stop.cmd", "restart.cmd", "service.ps1", "nodew.ps1", "dist\\Server.js", ".codexio\\config.yaml", ".codexio\\release.json")) {
         Assert-UpdatePath (Join-Path $Root $item)
+    }
+}
+
+function Copy-CodexioPackageItems {
+    param(
+        [Parameter(Mandatory = $true)] [string] $SourceRoot,
+        [Parameter(Mandatory = $true)] [string] $TargetRoot
+    )
+    $sourceCodexio = Join-Path $SourceRoot ".codexio"
+    $targetCodexio = Join-Path $TargetRoot ".codexio"
+    New-Item -ItemType Directory -Force -Path $targetCodexio | Out-Null
+    foreach ($item in @("codexio-service.exe", "codexio-service.xml", "node", "pnpm", "release.json")) {
+        $source = Join-Path $sourceCodexio $item
+        $target = Join-Path $targetCodexio $item
+        if (Test-Path -LiteralPath $target) {
+            Remove-UpdateItem -Path $target
+        }
+        if (Test-Path -LiteralPath $source) {
+            Copy-Item -Recurse -Force -LiteralPath $source -Destination $target
+        }
+    }
+    if (-not (Test-Path -LiteralPath $manifestData.configPath)) {
+        $configSource = Join-Path $sourceCodexio "config.yaml"
+        if (Test-Path -LiteralPath $configSource) {
+            Copy-Item -Force -LiteralPath $configSource -Destination $manifestData.configPath
+        }
     }
 }
 
 function Stop-Codexio {
     Assert-UpdatePath $manifestData.serviceCommand
     Write-UpdateLog "stop codexio service"
-    Start-Process -FilePath $manifestData.serviceCommand -ArgumentList @("stop") -WorkingDirectory $manifestData.installRoot -Wait
+    Start-Process -FilePath "powershell" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $manifestData.serviceCommand, "-Action", "stop") -WorkingDirectory $manifestData.installRoot -Wait
     Stop-InstallRootProcess
 }
 
 function Start-Codexio {
     Assert-UpdatePath $manifestData.serviceCommand
     Write-UpdateLog "start codexio service"
-    Start-Process -FilePath $manifestData.serviceCommand -ArgumentList @("start") -WorkingDirectory $manifestData.installRoot -Wait
+    Start-Process -FilePath "powershell" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $manifestData.serviceCommand, "-Action", "start") -WorkingDirectory $manifestData.installRoot -Wait
 }
 
 function Backup-Current {
@@ -462,6 +489,7 @@ function Backup-Current {
     New-Item -ItemType Directory -Force -Path $manifestData.backupRoot | Out-Null
     foreach ($item in Get-ChildItem -Force -LiteralPath $manifestData.installRoot) {
         if ($item.Name -eq ".codexio") {
+            Copy-CodexioPackageItems -SourceRoot $manifestData.installRoot -TargetRoot $manifestData.backupRoot
             continue
         }
         Copy-Item -Recurse -Force -LiteralPath $item.FullName -Destination (Join-Path $manifestData.backupRoot $item.Name)
@@ -478,16 +506,7 @@ function Replace-Current {
     }
     foreach ($item in Get-ChildItem -Force -LiteralPath $manifestData.stageRoot) {
         if ($item.Name -eq ".codexio") {
-            $releaseSource = Join-Path $item.FullName "release.json"
-            $releaseTarget = Join-Path $manifestData.installRoot ".codexio\\release.json"
-            Assert-UpdatePath $releaseSource
-            Copy-Item -Force -LiteralPath $releaseSource -Destination $releaseTarget
-            if (-not (Test-Path -LiteralPath $manifestData.configPath)) {
-                $configSource = Join-Path $item.FullName "config.yaml"
-                if (Test-Path -LiteralPath $configSource) {
-                    Copy-Item -Force -LiteralPath $configSource -Destination $manifestData.configPath
-                }
-            }
+            Copy-CodexioPackageItems -SourceRoot $manifestData.stageRoot -TargetRoot $manifestData.installRoot
             continue
         }
         Copy-Item -Recurse -Force -LiteralPath $item.FullName -Destination (Join-Path $manifestData.installRoot $item.Name)
@@ -504,6 +523,10 @@ function Restore-Backup {
         Remove-UpdateItem -Path $item.FullName
     }
     foreach ($item in Get-ChildItem -Force -LiteralPath $manifestData.backupRoot) {
+        if ($item.Name -eq ".codexio") {
+            Copy-CodexioPackageItems -SourceRoot $manifestData.backupRoot -TargetRoot $manifestData.installRoot
+            continue
+        }
         Copy-Item -Recurse -Force -LiteralPath $item.FullName -Destination (Join-Path $manifestData.installRoot $item.Name)
     }
     Assert-InstallLayout -Root $manifestData.installRoot

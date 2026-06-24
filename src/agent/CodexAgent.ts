@@ -338,8 +338,7 @@ export class CodexAgent implements Agent {
     const message = [
       'Codex 登录已失效，请重新登录。',
       `打开：${data.verificationUrl}`,
-      `验证码：${data.userCode}`,
-      '登录完成后 Codexio 会自动恢复。'
+      `验证码：${data.userCode}`
     ].join('\n')
     process.stdout.write(`${message}\n`)
     const loginMessage: Message = {
@@ -352,7 +351,7 @@ export class CodexAgent implements Agent {
     const appServer = this.appServer
     const task = (async () => {
       await appServer.waitForNotification('account/login/completed')
-      const completedMessage = 'Codex login completed.'
+      const completedMessage = 'Codex 登录已完成。'
       process.stdout.write(`${completedMessage}\n`)
       const completionMessage: Message = {
         ioThreadId: ioThreadId ?? allIoThreadId,
