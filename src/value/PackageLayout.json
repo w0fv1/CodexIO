@@ -1,0 +1,61 @@
+{
+  "common": [
+    "codexio/.codexio/codexio-service.exe",
+    "codexio/.codexio/codexio-service.xml",
+    "codexio/install.cmd",
+    "codexio/uninstall.cmd",
+    "codexio/start.cmd",
+    "codexio/stop.cmd",
+    "codexio/restart.cmd",
+    "codexio/service.ps1",
+    "codexio/.codexio/config.yaml",
+    "codexio/.codexio/release.json",
+    "codexio/dist/Server.js",
+    "codexio/dist/value/PackageLayout.json",
+    "codexio/package.json",
+    "codexio/pnpm-lock.yaml",
+    "codexio/nodew.ps1"
+  ],
+  "platforms": {
+    "windows-x64-pnpm": [
+      "codexio/.codexio/pnpm/bin/pnpm.cjs"
+    ],
+    "windows-x64-standalone": [
+      "codexio/.codexio/node/node.exe",
+      "codexio/node_modules/@openai/codex/bin/codex.js",
+      "codexio/node_modules/@openai/codex-win32-x64/package.json",
+      "codexio/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs",
+      "codexio/node_modules/@anthropic-ai/claude-code-win32-x64/package.json"
+    ]
+  },
+  "updateCommon": [
+    ".codexio/codexio-service.exe",
+    ".codexio/codexio-service.xml",
+    "install.cmd",
+    "uninstall.cmd",
+    "start.cmd",
+    "stop.cmd",
+    "restart.cmd",
+    "service.ps1",
+    "nodew.ps1",
+    "dist/Server.js",
+    "dist/value/PackageLayout.json",
+    ".codexio/config.yaml",
+    ".codexio/release.json"
+  ],
+  "updateRuntimeItems": [
+    "codexio-service.exe",
+    "codexio-service.xml",
+    "node",
+    "pnpm",
+    "release.json"
+  ],
+  "updatePlatforms": {
+    "windows-x64-pnpm": [
+      ".codexio/pnpm/bin/pnpm.cjs"
+    ],
+    "windows-x64-standalone": [
+      ".codexio/node/node.exe"
+    ]
+  }
+}

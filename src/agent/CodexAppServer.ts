@@ -27,6 +27,13 @@ export type CodexAppServerOptions = {
   requestTimeoutMs?: number
 }
 
+export class CodexAppServerRequestError extends Error {
+  constructor(readonly code: number, message: string) {
+    super(message)
+    this.name = 'CodexAppServerRequestError'
+  }
+}
+
 export class CodexAppServer {
   private readonly requestTimeoutMs: number
   private child?: ReturnType<typeof execa>
@@ -86,7 +93,7 @@ export class CodexAppServer {
         this.pending.delete(message.id)
         clearTimeout(request.timeout)
         if (message.error) {
-          request.reject(new Error(message.error.message))
+          request.reject(new CodexAppServerRequestError(message.error.code, message.error.message))
           return
         }
         request.resolve(message.result)

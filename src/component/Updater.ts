@@ -3,12 +3,22 @@ import { createReadStream, createWriteStream } from 'node:fs'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { inject, injectable } from 'inversify'
 import { ChannelOutputManager } from '../channel/ChannelOutputManager.js'
 import { CodexioMetadata } from './CodexioMetadata.js'
 import { Result } from '../value/Result.js'
 import { Logger } from './Logger.js'
 import { Configer } from './Configer.js'
+
+type PackageLayout = {
+  updateCommon: string[]
+  updateRuntimeItems: string[]
+  updatePlatforms: Record<string, string[]>
+}
+
+const require = createRequire(import.meta.url)
+const packageLayout = require('../value/PackageLayout.json') as PackageLayout
 
 type LatestReleaseResponse = {
   isf?: unknown
@@ -336,26 +346,14 @@ function powershellPath(): string {
 }
 
 async function validateStage(stageRoot: string, platform: string): Promise<void> {
+  const platformEntries = packageLayout.updatePlatforms[platform]
+  if (!platformEntries) {
+    throw new Error(`update package platform is not supported: ${platform}`)
+  }
   const required = [
-    '.codexio/codexio-service.exe',
-    '.codexio/codexio-service.xml',
-    'install.cmd',
-    'uninstall.cmd',
-    'start.cmd',
-    'stop.cmd',
-    'restart.cmd',
-    'service.ps1',
-    'nodew.ps1',
-    'dist/Server.js',
-    '.codexio/config.yaml',
-    '.codexio/release.json'
+    ...packageLayout.updateCommon,
+    ...platformEntries
   ]
-  if (platform === 'windows-x64-pnpm') {
-    required.push('.codexio/pnpm/bin/pnpm.cjs')
-  }
-  if (platform === 'windows-x64-standalone') {
-    required.push('.codexio/node/node.exe')
-  }
   for (const item of required) {
     await readFile(join(stageRoot, item))
   }
@@ -374,7 +372,17 @@ function formatTimestamp(value: Date): string {
   ].join('')
 }
 
+function toPowerShellPath(value: string): string {
+  return value.replaceAll('/', '\\')
+}
+
+function formatPowerShellStringArray(values: string[]): string {
+  return `@(${values.map((value) => `"${value.replaceAll('`', '``').replaceAll('"', '`"')}"`).join(', ')})`
+}
+
 export function createUpdaterScript(): string {
+  const installLayoutItems = formatPowerShellStringArray(packageLayout.updateCommon.map(toPowerShellPath))
+  const runtimeItems = formatPowerShellStringArray(packageLayout.updateRuntimeItems.map(toPowerShellPath))
   return `
 param(
     [Parameter(Mandatory = $true)] [string] $Manifest
@@ -437,7 +445,7 @@ function Stop-InstallRootProcess {
 
 function Assert-InstallLayout {
     param([Parameter(Mandatory = $true)] [string] $Root)
-    foreach ($item in @(".codexio\\codexio-service.exe", ".codexio\\codexio-service.xml", "install.cmd", "uninstall.cmd", "start.cmd", "stop.cmd", "restart.cmd", "service.ps1", "nodew.ps1", "dist\\Server.js", ".codexio\\config.yaml", ".codexio\\release.json")) {
+    foreach ($item in ${installLayoutItems}) {
         Assert-UpdatePath (Join-Path $Root $item)
     }
 }
@@ -450,7 +458,7 @@ function Copy-CodexioPackageItems {
     $sourceCodexio = Join-Path $SourceRoot ".codexio"
     $targetCodexio = Join-Path $TargetRoot ".codexio"
     New-Item -ItemType Directory -Force -Path $targetCodexio | Out-Null
-    foreach ($item in @("codexio-service.exe", "codexio-service.xml", "node", "pnpm", "release.json")) {
+    foreach ($item in ${runtimeItems}) {
         $source = Join-Path $sourceCodexio $item
         $target = Join-Path $targetCodexio $item
         if (Test-Path -LiteralPath $target) {

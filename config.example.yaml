@@ -10,7 +10,7 @@ proxy:
 agents:
   codex:
     enabled: true
-    bundled: true
+    bundled: false
   claude:
     enabled: false
 channels:

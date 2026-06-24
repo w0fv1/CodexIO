@@ -100,7 +100,7 @@ const configFields: ConfigField[] = [
   field('proxy.host', 'Proxy', 'Host', 'string', '重启 Agent', z.string(), '127.0.0.1'),
   field('proxy.port', 'Proxy', 'Port', 'number', '重启 Agent', positiveInt, 7890),
   field('agents.codex.enabled', 'Agents', 'Codex', 'boolean', '重启 Agent', z.boolean(), true),
-  field('agents.codex.bundled', 'Agents', 'Bundled Codex', 'boolean', '重启 Agent', z.boolean(), true),
+  field('agents.codex.bundled', 'Agents', 'Bundled Codex', 'boolean', '重启 Agent', z.boolean(), false),
   field('agents.claude.enabled', 'Agents', 'Claude', 'boolean', '重启 Agent', z.boolean(), false),
   field('workspace.path', 'Workspace', 'Path', 'string', '重启 Agent', z.string().min(1), '.'),
   field('channels.web.enabled', 'Web', 'Enabled', 'boolean', '重启 Codexio', z.boolean(), true),

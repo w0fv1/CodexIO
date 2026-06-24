@@ -5,7 +5,7 @@ import { execa } from 'execa'
 import { inject, injectable } from 'inversify'
 import { Agent } from './Agent.js'
 import { createProcessEnv } from '../util/ProcessEnvironment.js'
-import { CodexAppServer } from './CodexAppServer.js'
+import { CodexAppServer, CodexAppServerRequestError } from './CodexAppServer.js'
 import { CodexioMetadata } from '../component/CodexioMetadata.js'
 import { Configer } from '../component/Configer.js'
 import { Logger } from '../component/Logger.js'
@@ -13,6 +13,7 @@ import { isImageFile } from '../component/FileStore.js'
 import { allIoThreadId, Message } from '../value/Message.js'
 import { ChannelOutputManager } from '../channel/ChannelOutputManager.js'
 import { CodexMessageStreamer } from './CodexMessageStreamer.js'
+import { Result } from '../value/Result.js'
 
 const codexEntryPath = createRequire(import.meta.url).resolve('@openai/codex/bin/codex.js')
 
@@ -22,7 +23,7 @@ export type CodexCommand = {
 }
 
 export function createCodexCommand(bundled: boolean | undefined, args: string[]): CodexCommand {
-  if (bundled ?? true) {
+  if (bundled ?? false) {
     return {
       command: process.execPath,
       args: [
@@ -73,7 +74,7 @@ export class CodexAgent implements Agent {
   async login(): Promise<void> {
     const workspacePath = await this.configer.get('workspace.path')
     const bundled = await this.configer.get('agents.codex.bundled')
-    const bundledEnabled = bundled ?? true
+    const bundledEnabled = bundled ?? false
     const proxyEnabled = await this.configer.get('proxy.enabled')
     const proxyHost = await this.configer.get('proxy.host')
     const proxyPort = await this.configer.get('proxy.port')
@@ -325,9 +326,19 @@ export class CodexAgent implements Agent {
     if (this.loginTask) {
       return
     }
-    const login = await this.appServer.request('account/login/start', {
-      type: 'chatgptDeviceCode'
-    })
+    let login: unknown
+    try {
+      login = await this.appServer.request('account/login/start', {
+        type: 'chatgptDeviceCode'
+      })
+    } catch (error) {
+      const failed = Result.fromError(error)
+      throw new Error([
+        'Codex 登录请求失败，可能是网络或代理配置无法访问 OpenAI 登录服务。',
+        '请在 config.yaml 开启或修正 proxy 配置后重试。',
+        `原始错误：${failed.message}`
+      ].join('\n'))
+    }
     if (!login || typeof login !== 'object') {
       throw new Error('codex login response not found')
     }
@@ -387,6 +398,9 @@ export class CodexAgent implements Agent {
   }
 
   private isAuthenticationInvalidated(error: unknown): boolean {
+    if (error instanceof CodexAppServerRequestError && error.code === 401) {
+      return true
+    }
     const values = this.collectAuthenticationErrorValues(error).join('\n').toLowerCase()
     return [
       'refresh_token_invalidated',
@@ -567,7 +581,7 @@ export class CodexAgent implements Agent {
 
   protected async createAppServer(onNotification: (method: string, params: unknown) => void): Promise<CodexAppServerHandle> {
     const bundled = await this.configer.get('agents.codex.bundled')
-    const bundledEnabled = bundled ?? true
+    const bundledEnabled = bundled ?? false
     const serverHost = await this.configer.get('server.host')
     const workspacePath = await this.configer.get('workspace.path')
     const proxyEnabled = await this.configer.get('proxy.enabled')

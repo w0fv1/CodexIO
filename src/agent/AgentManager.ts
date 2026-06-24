@@ -173,6 +173,7 @@ export class AgentManager {
     }
     const started = await this.start(input.ioThreadId)
     if (started.isFailed) {
+      await this.outputManager.sendSystem(started.message, 'agent', input.ioThreadId)
       return Result.fail<AgentReceiveResult>(started.message)
     }
     if (!this.agent) {

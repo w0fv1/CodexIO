@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { createProcessEnv } from '../src/util/ProcessEnvironment.js'
 import { AgentManager } from '../src/agent/AgentManager.js'
-import { CodexAppServer } from '../src/agent/CodexAppServer.js'
+import { CodexAppServer, CodexAppServerRequestError } from '../src/agent/CodexAppServer.js'
 import { AgentLoginInProgressError, CodexAgent, createCodexCommand } from '../src/agent/CodexAgent.js'
 import { CodexMessageStreamer } from '../src/agent/CodexMessageStreamer.js'
 import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
@@ -261,6 +261,7 @@ describe('core', () => {
   })
 
   it('agent manager does not queue user messages behind an active login flow', async () => {
+    const systemMessages: string[] = []
     const manager = await createAgentManager(ConfigSchema.parse({
       agents: {
         codex: {
@@ -270,7 +271,12 @@ describe('core', () => {
           enabled: false
         }
       }
-    }), createOutputManager(), {
+    }), createOutputManager({
+      sendSystem: async (text) => {
+        systemMessages.push(text)
+        return Result.success(null)
+      }
+    }), {
       type: 'codex',
       async login(): Promise<void> {},
       async start(): Promise<void> {
@@ -298,6 +304,57 @@ describe('core', () => {
       status: 'loginRequired',
       message: '请先完成 Codex 登录。'
     })
+    expect(systemMessages).toEqual([
+      '请先完成 Codex 登录。',
+      '请先完成 Codex 登录。'
+    ])
+  })
+
+  it('agent manager reports startup failures to the current thread', async () => {
+    const systemMessages: Array<{
+      text: string
+      ioThreadId?: string
+    }> = []
+    const manager = await createAgentManager(ConfigSchema.parse({
+      agents: {
+        codex: {
+          enabled: true
+        },
+        claude: {
+          enabled: false
+        }
+      }
+    }), createOutputManager({
+      sendSystem: async (text, _source, ioThreadId) => {
+        systemMessages.push({
+          text,
+          ioThreadId
+        })
+        return Result.success(null)
+      }
+    }), {
+      type: 'codex',
+      async login(): Promise<void> {},
+      async start(): Promise<void> {
+        throw new Error('Codex 登录请求失败，可能是网络或代理配置无法访问 OpenAI 登录服务。')
+      },
+      async receive(): Promise<void> {},
+      async clear(): Promise<void> {},
+      async stop(): Promise<void> {}
+    })
+
+    const result = await manager.receiveMessage({
+      ioThreadId: 'test-thread',
+      text: 'hello'
+    })
+
+    expect(result.isFailed).toBe(true)
+    expect(systemMessages).toEqual([
+      {
+        text: 'Codex 登录请求失败，可能是网络或代理配置无法访问 OpenAI 登录服务。',
+        ioThreadId: 'test-thread'
+      }
+    ])
   })
 
   it('agents apply proxy env internally', async () => {
@@ -334,8 +391,23 @@ describe('core', () => {
     expect(codexConfig).toContain('"CUSTOM_RUNTIME_TOKEN" = "runtime-token"')
   })
 
-  it('resolves bundled codex command by default', () => {
+  it('resolves public codex command by default', () => {
     const command = createCodexCommand(undefined, [
+      'app-server',
+      '--stdio'
+    ])
+
+    expect(command).toEqual({
+      command: 'codex',
+      args: [
+        'app-server',
+        '--stdio'
+      ]
+    })
+  })
+
+  it('resolves bundled codex command when bundled is enabled', () => {
+    const command = createCodexCommand(true, [
       'app-server',
       '--stdio'
     ])
@@ -346,7 +418,7 @@ describe('core', () => {
     expect(command.args[0]).toContain('@openai')
   })
 
-  it('resolves public codex command when bundled is disabled', () => {
+  it('preserves public codex home when bundled is disabled', () => {
     const previousCodexHome = process.env.CODEX_HOME
     process.env.CODEX_HOME = 'C:\\Users\\test\\.codex'
     try {
@@ -944,6 +1016,32 @@ describe('core', () => {
     expect(outbound[0]).toContain('WXYZ-1234')
   })
 
+  it('codex agent explains device-code network failures', async () => {
+    const appServer = {
+      async start(): Promise<void> {},
+      async request(method: string): Promise<unknown> {
+        if (method === 'account/read') {
+          return {}
+        }
+        if (method === 'account/login/start') {
+          throw new CodexAppServerRequestError(403, 'failed to request device code: device code request failed with status 403 Forbidden')
+        }
+        return {}
+      },
+      async waitForNotification(): Promise<void> {},
+      async stop(): Promise<void> {}
+    }
+    const agent = createCodexAgent({
+      appServer
+    })
+
+    await expect(agent.start('login-thread')).rejects.toThrow([
+      'Codex 登录请求失败，可能是网络或代理配置无法访问 OpenAI 登录服务。',
+      '请在 config.yaml 开启或修正 proxy 配置后重试。',
+      '原始错误：failed to request device code: device code request failed with status 403 Forbidden'
+    ].join('\n'))
+  })
+
   it('codex agent turns runtime token invalidation into one login flow', async () => {
     const outbound: string[] = []
     const requests: Array<{
@@ -1134,6 +1232,42 @@ describe('core', () => {
     await server.start()
     await expect(server.request('never/replies', {})).rejects.toThrow('codex app-server request timed out: never/replies')
     expect(stderr.join('')).toContain('codex app-server sent invalid JSON')
+    await server.stop()
+  })
+
+  it('codex app-server preserves JSON-RPC error codes', async () => {
+    const script = [
+      'const readline = require("node:readline");',
+      'const rl = readline.createInterface({ input: process.stdin });',
+      'rl.on("line", (line) => {',
+      '  const message = JSON.parse(line);',
+      '  if (message.method === "initialize") {',
+      '    process.stdout.write(JSON.stringify({ id: message.id, result: {} }) + "\\n");',
+      '    return;',
+      '  }',
+      '  process.stdout.write(JSON.stringify({ id: message.id, error: { code: 401, message: "unauthorized" } }) + "\\n");',
+      '});'
+    ].join('\n')
+    const server = new CodexAppServer({
+      command: process.execPath,
+      args: [
+        '-e',
+        script
+      ],
+      cwd: '.',
+      env: process.env,
+      metadata: testMetadata,
+      requestTimeoutMs: 500,
+      onNotification: () => {},
+      onStderr: () => {}
+    })
+    await server.start()
+    const error = await server.request('account/read', {}).catch((caught) => caught)
+    expect(error).toBeInstanceOf(CodexAppServerRequestError)
+    expect(error).toMatchObject({
+      code: 401,
+      message: 'unauthorized'
+    })
     await server.stop()
   })
 
@@ -1505,7 +1639,7 @@ describe('core', () => {
 
   it('updater installs the Windows service package layout', () => {
     const script = createUpdaterScript()
-    expect(script).toContain('".codexio\\codexio-service.exe", ".codexio\\codexio-service.xml", "install.cmd", "uninstall.cmd", "start.cmd", "stop.cmd", "restart.cmd", "service.ps1", "nodew.ps1", "dist\\Server.js", ".codexio\\config.yaml", ".codexio\\release.json"')
+    expect(script).toContain('".codexio\\codexio-service.exe", ".codexio\\codexio-service.xml", "install.cmd", "uninstall.cmd", "start.cmd", "stop.cmd", "restart.cmd", "service.ps1", "nodew.ps1", "dist\\Server.js", "dist\\value\\PackageLayout.json", ".codexio\\config.yaml", ".codexio\\release.json"')
     expect(script).toContain('function Backup-Current')
     expect(script).toContain('function Restore-Backup')
     expect(script).not.toContain('Join-Path $manifestData.installRoot "supervisor.json"')
@@ -1516,27 +1650,37 @@ describe('core', () => {
     expect(script).toContain('WinSW-x64.exe')
     expect(script).toContain('function New-ServiceScriptFile')
     expect(script).toContain('function New-ServiceCommandFile')
+    expect(script).toContain('Copy-TemplateFile -TemplateName "service.ps1"')
+    expect(script).toContain('Copy-TemplateFile -TemplateName "nodew.ps1"')
+    expect(script).toContain('Read-PackageLayout')
+    expect(script).toContain('Get-ArchiveEntries')
     expect(script).toContain('New-ServiceCommandFiles -DestinationRoot $PnpmRoot -EnsureDependencies')
-    expect(script).toContain('Install-ProductionDependencies')
-    expect(script).toContain('function Invoke-ServiceAction')
-    expect(script).toContain('function Start-ServiceProcess')
-    expect(script).toContain('function Uninstall-ServiceProcess')
-    expect(script).toContain('function Test-ServiceMatchesPackage')
-    expect(script).toContain('function Remove-ServiceRegistration')
-    expect(script).toContain('Get-Service -Name "codexio"')
-    expect(script).toContain('Get-CimInstance Win32_Service -Filter "Name=\'codexio\'"')
-    const serviceMain = script.slice(script.indexOf('try {'))
-    expect(serviceMain.indexOf('Install-ProductionDependencies')).toBeLessThan(serviceMain.indexOf('if (-not (Test-Administrator))'))
-    expect(script).toContain('Install-Service')
-    expect(script).toContain('service path changed, reinstalling service')
-    expect(script).toContain('Invoke-LocalCommand -FilePath "sc.exe" -Arguments @("delete", "codexio")')
-    expect(script).toContain('service is already running')
-    expect(script).toContain('Stop-ServiceProcess')
-    expect(script).toContain('uninstalling service')
-    expect(script).toContain('$ServiceCommand = Join-Path $Root ".codexio\\codexio-service.exe"')
-    expect(script).toContain('Invoke-LocalCommand -FilePath $ServiceCommand -Arguments @("install")')
-    expect(script).toContain('Invoke-LocalCommand -FilePath $ServiceCommand -Arguments @("stop")')
-    expect(script).toContain('Invoke-LocalCommand -FilePath $ServiceCommand -Arguments @("uninstall")')
+    expect(script).not.toContain('$text = @\'')
+    expect(script).not.toContain('$script = @"')
+    const serviceTemplate = await readFile(join(testMetadata.rootPath, 'scripts', 'templates', 'service.ps1'), 'utf8')
+    expect(serviceTemplate).toContain('function Assert-ProductionDependencies')
+    expect(serviceTemplate).toContain('Read-PackagePlatform')
+    expect(serviceTemplate).toContain('windows-x64-standalone')
+    expect(serviceTemplate).toContain('windows-x64-pnpm')
+    expect(serviceTemplate).toContain('function Invoke-ServiceAction')
+    expect(serviceTemplate).toContain('function Start-ServiceProcess')
+    expect(serviceTemplate).toContain('function Uninstall-ServiceProcess')
+    expect(serviceTemplate).toContain('function Test-ServiceMatchesPackage')
+    expect(serviceTemplate).toContain('function Remove-ServiceRegistration')
+    expect(serviceTemplate).toContain('Get-Service -Name "codexio"')
+    expect(serviceTemplate).toContain('Get-CimInstance Win32_Service -Filter "Name=\'codexio\'"')
+    const serviceMain = serviceTemplate.slice(serviceTemplate.indexOf('try {'))
+    expect(serviceMain.indexOf('Assert-ProductionDependencies')).toBeLessThan(serviceMain.indexOf('if (-not (Test-Administrator))'))
+    expect(serviceTemplate).toContain('Install-Service')
+    expect(serviceTemplate).toContain('service path changed, reinstalling service')
+    expect(serviceTemplate).toContain('Invoke-LocalCommand -FilePath "sc.exe" -Arguments @("delete", "codexio")')
+    expect(serviceTemplate).toContain('service is already running')
+    expect(serviceTemplate).toContain('Stop-ServiceProcess')
+    expect(serviceTemplate).toContain('uninstalling service')
+    expect(serviceTemplate).toContain('$ServiceCommand = Join-Path $CodexioRoot "codexio-service.exe"')
+    expect(serviceTemplate).toContain('Invoke-LocalCommand -FilePath $ServiceCommand -Arguments @("install")')
+    expect(serviceTemplate).toContain('Invoke-LocalCommand -FilePath $ServiceCommand -Arguments @("stop")')
+    expect(serviceTemplate).toContain('Invoke-LocalCommand -FilePath $ServiceCommand -Arguments @("uninstall")')
     expect(script).not.toContain('& (Join-Path $Root "codexio-service.exe") status')
     expect(script).not.toContain('nodew.cmd')
     expect(script).not.toContain('function Ensure-ServiceInstalled')

@@ -202,6 +202,8 @@ export class WebChannelHub {
         })
         socket.send(JSON.stringify({
           event: 'error',
+          ioThreadId,
+          allIoThreadId,
           message: result.message
         }))
       }

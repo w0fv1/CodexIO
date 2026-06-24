@@ -34,13 +34,13 @@ Codexio 使用原生多 thread 模型。Web 通道会为每个对话生成并传
 Codex 子进程的 stdout/stderr 会同步输出到启动 codexio 的终端。
 内置 agent 默认按完全访问模式运行：Codex 使用 `danger-full-access` 和 `never` approval，Claude 使用 `bypassPermissions`。
 
-Codex 默认使用 Codexio 随包携带的 `@openai/codex`。如需接入本机公共 Codex CLI，并共享 Codex App、VS Code Codex 使用的账号和配置，把 `agents.codex.bundled` 改为 `false`：
+Codex 默认使用本机公共 Codex CLI，并共享 Codex App、VS Code Codex 使用的账号和配置。如需使用 Codexio 随包携带的 `@openai/codex`，把 `agents.codex.bundled` 改为 `true`：
 
 ```yaml
 agents:
   codex:
     enabled: true
-    bundled: false
+    bundled: true
 ```
 
 Feishu 开放平台通道只绑定一个群组或私聊会话。启动后，用户先在飞书里给机器人发一条消息，终端会输出 `feishu chat connected: <chat_id>`。需要启动后立即使用固定会话时，把这个值写入配置：

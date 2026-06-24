@@ -19,6 +19,8 @@ $PnpmRoot = Join-Path $BuildRoot "pnpm\codexio"
 $NodeRuntimeVersion = "22.20.0"
 $PnpmRuntimeVersion = "10.33.4"
 $WinSWVersion = "2.12.0"
+$TemplateRoot = Join-Path $PSScriptRoot "templates"
+$PackageLayoutPath = Join-Path $ProjectRoot "src\value\PackageLayout.json"
 
 function Write-Step {
     param([Parameter(Mandatory)] [string] $Text)
@@ -75,6 +77,44 @@ function Write-Utf8File {
     )
     $utf8 = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($Path, $Text, $utf8)
+}
+
+function Copy-TemplateFile {
+    param(
+        [Parameter(Mandatory)] [string] $TemplateName,
+        [Parameter(Mandatory)] [string] $DestinationPath,
+        [hashtable] $Replacements = @{}
+    )
+    $templatePath = Join-Path $TemplateRoot $TemplateName
+    Assert-PathExists $templatePath
+    $text = Get-Content -Raw -Path $templatePath
+    foreach ($key in $Replacements.Keys) {
+        $text = $text.Replace([string]$key, [string]$Replacements[$key])
+    }
+    Write-Utf8File -Path $DestinationPath -Text ($text -replace "`r?`n", "`r`n")
+}
+
+function Read-PackageLayout {
+    Assert-PathExists $PackageLayoutPath
+    return Get-Content -Raw -Path $PackageLayoutPath | ConvertFrom-Json
+}
+
+function Join-PackageEntries {
+    param([Parameter(Mandatory)] [object[]] $Entries)
+    return @($Entries | ForEach-Object { [string]$_ })
+}
+
+function Get-ArchiveEntries {
+    param(
+        [Parameter(Mandatory)] [object] $Layout,
+        [Parameter(Mandatory)] [string] $Platform
+    )
+    $platformProperty = $Layout.platforms.PSObject.Properties[$Platform]
+    $platformEntries = if ($null -eq $platformProperty) { $null } else { $platformProperty.Value }
+    if ($null -eq $platformEntries) {
+        throw "Package layout is missing platform: $Platform"
+    }
+    return @(Join-PackageEntries $Layout.common) + @(Join-PackageEntries $platformEntries)
 }
 
 function Assert-ArchiveContains {
@@ -260,11 +300,7 @@ function New-ServiceXml {
   <onfailure action="restart" delay="10 sec"/>
   <resetfailure>1 hour</resetfailure>
   <logpath>%BASE%\log\winsw</logpath>
-  <log mode="roll-by-size-time">
-    <sizeThreshold>10485760</sizeThreshold>
-    <pattern>yyyyMMdd</pattern>
-    <keepFiles>30</keepFiles>
-  </log>
+  <log mode="append"/>
 </service>
 "@
     Write-Utf8File -Path $Path -Text $text.Replace("`n", "`r`n")
@@ -308,476 +344,14 @@ exit /b %ERRORLEVEL%
 
 function New-ServiceScriptFile {
     param([Parameter(Mandatory)] [string] $Path)
-    $text = @'
-param(
-    [Parameter(Mandatory)]
-    [ValidateSet("install", "uninstall", "start", "stop", "restart")]
-    [string] $Action,
-    [switch] $EnsureDependencies
-)
-
-$ErrorActionPreference = "Stop"
-Set-StrictMode -Version Latest
-
-$Root = $PSScriptRoot
-$LogRoot = Join-Path $Root ".codexio\log"
-$ServiceCommand = Join-Path $Root ".codexio\codexio-service.exe"
-New-Item -ItemType Directory -Force -Path $LogRoot | Out-Null
-$LogPath = Join-Path $LogRoot ("command-{0}-{1:yyyyMMdd-HHmmss}.log" -f $Action, (Get-Date))
-
-function Write-CommandLog {
-    param([Parameter(Mandatory)] [string] $Text)
-    Write-Host $Text
-    Add-Content -LiteralPath $LogPath -Value $Text -Encoding utf8
-}
-
-function Test-Administrator {
-    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
-    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
-
-function Start-Elevated {
-    if ($env:CODEXIO_SKIP_ELEVATION -eq "1") {
-        throw "Administrator privileges are required."
-    }
-    $arguments = @(
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        "`"$PSCommandPath`"",
-        "-Action",
-        $Action
-    )
-    if ($EnsureDependencies) {
-        $arguments += "-EnsureDependencies"
-    }
-    Write-CommandLog "[codexio] administrator privileges are required, requesting elevation"
-    Start-Process -FilePath "powershell" -ArgumentList $arguments -Verb RunAs | Out-Null
-}
-
-function Invoke-LocalCommand {
-    param(
-        [Parameter(Mandatory)] [string] $FilePath,
-        [Parameter(Mandatory)] [string[]] $Arguments
-    )
-    & $FilePath @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "Command failed with exit code $LASTEXITCODE`: $FilePath $($Arguments -join ' ')"
-    }
-}
-
-function Test-ProductionDependencies {
-    return (Test-Path -LiteralPath (Join-Path $Root "node_modules\@openai\codex\bin\codex.js")) `
-        -and (Test-Path -LiteralPath (Join-Path $Root "node_modules\@openai\codex-win32-x64\package.json")) `
-        -and (Test-Path -LiteralPath (Join-Path $Root "node_modules\@anthropic-ai\claude-code\cli-wrapper.cjs")) `
-        -and (Test-Path -LiteralPath (Join-Path $Root "node_modules\@anthropic-ai\claude-code-win32-x64\package.json"))
-}
-
-function Install-ProductionDependencies {
-    if (-not $EnsureDependencies) {
-        return
-    }
-    Write-CommandLog "[codexio] checking production dependencies"
-    if (Test-ProductionDependencies) {
-        Write-CommandLog "[codexio] dependencies are ready"
-        return
-    }
-    Write-CommandLog "[codexio] dependencies are missing, installing production dependencies"
-    Invoke-LocalCommand -FilePath "powershell" -Arguments @(
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        (Join-Path $Root "nodew.ps1"),
-        "pnpm",
-        "install",
-        "--prod",
-        "--dir",
-        $Root,
-        "--config.node-linker=hoisted"
-    )
-    Write-CommandLog "[codexio] dependencies installed"
-    foreach ($bootstrapPath in @((Join-Path $Root ".codexio\pnpm"), (Join-Path $Root ".codexio\download"))) {
-        if (Test-Path -LiteralPath $bootstrapPath) {
-            Write-CommandLog "[codexio] removing bootstrap path: $bootstrapPath"
-            Remove-Item -Recurse -Force -LiteralPath $bootstrapPath
-        }
-    }
-}
-
-function Test-ServiceInstalled {
-    $service = Get-Service -Name "codexio" -ErrorAction SilentlyContinue
-    return $null -ne $service
-}
-
-function Get-ServicePathName {
-    $service = Get-CimInstance Win32_Service -Filter "Name='codexio'" -ErrorAction SilentlyContinue
-    if ($null -eq $service) {
-        return $null
-    }
-    return [string]$service.PathName
-}
-
-function Resolve-ServiceExecutablePath {
-    param([Parameter(Mandatory)] [string] $PathName)
-    $trimmed = $PathName.Trim()
-    if ($trimmed.StartsWith('"')) {
-        $end = $trimmed.IndexOf('"', 1)
-        if ($end -gt 1) {
-            return [System.IO.Path]::GetFullPath($trimmed.Substring(1, $end - 1))
-        }
-    }
-    $space = $trimmed.IndexOf(' ')
-    if ($space -gt 0) {
-        return [System.IO.Path]::GetFullPath($trimmed.Substring(0, $space))
-    }
-    return [System.IO.Path]::GetFullPath($trimmed)
-}
-
-function Test-ServiceMatchesPackage {
-    $pathName = Get-ServicePathName
-    if ([string]::IsNullOrWhiteSpace($pathName)) {
-        return $false
-    }
-    $actualPath = Resolve-ServiceExecutablePath -PathName $pathName
-    $expectedPath = [System.IO.Path]::GetFullPath($ServiceCommand)
-    return $actualPath -eq $expectedPath
-}
-
-function Test-ServiceRunning {
-    $service = Get-Service -Name "codexio" -ErrorAction SilentlyContinue
-    return $null -ne $service -and $service.Status -eq "Running"
-}
-
-function Remove-ServiceRegistration {
-    if (-not (Test-ServiceInstalled)) {
-        return
-    }
-    if (Test-ServiceRunning) {
-        Write-CommandLog "[codexio] stopping existing service"
-        Invoke-LocalCommand -FilePath "sc.exe" -Arguments @("stop", "codexio")
-        for ($attempt = 1; $attempt -le 30; $attempt++) {
-            if (-not (Test-ServiceRunning)) {
-                break
-            }
-            Start-Sleep -Milliseconds 500
-        }
-    }
-    Write-CommandLog "[codexio] deleting existing service registration"
-    Invoke-LocalCommand -FilePath "sc.exe" -Arguments @("delete", "codexio")
-    for ($attempt = 1; $attempt -le 30; $attempt++) {
-        if (-not (Test-ServiceInstalled)) {
-            return
-        }
-        Start-Sleep -Milliseconds 500
-    }
-    throw "Existing service registration was not deleted."
-}
-
-function Install-Service {
-    if (Test-ServiceInstalled) {
-        if (Test-ServiceMatchesPackage) {
-            Write-CommandLog "[codexio] service is already installed"
-            return
-        }
-        Write-CommandLog "[codexio] service path changed, reinstalling service"
-        Remove-ServiceRegistration
-    }
-    Write-CommandLog "[codexio] installing service"
-    Invoke-LocalCommand -FilePath $ServiceCommand -Arguments @("install")
-}
-
-function Start-ServiceProcess {
-    Install-Service
-    if (Test-ServiceRunning) {
-        Write-CommandLog "[codexio] service is already running"
-        return
-    }
-    Write-CommandLog "[codexio] starting service"
-    Invoke-LocalCommand -FilePath $ServiceCommand -Arguments @("start")
-}
-
-function Stop-ServiceProcess {
-    if (-not (Test-ServiceInstalled)) {
-        Write-CommandLog "[codexio] service is not installed"
-        return
-    }
-    if (-not (Test-ServiceRunning)) {
-        Write-CommandLog "[codexio] service is not running"
-        return
-    }
-    Write-CommandLog "[codexio] stopping service"
-    Invoke-LocalCommand -FilePath $ServiceCommand -Arguments @("stop")
-}
-
-function Uninstall-ServiceProcess {
-    if (-not (Test-ServiceInstalled)) {
-        Write-CommandLog "[codexio] service is not installed"
-        return
-    }
-    Stop-ServiceProcess
-    Write-CommandLog "[codexio] uninstalling service"
-    Invoke-LocalCommand -FilePath $ServiceCommand -Arguments @("uninstall")
-}
-
-function Restart-ServiceProcess {
-    if (Test-ServiceInstalled) {
-        Stop-ServiceProcess
-    }
-    Start-ServiceProcess
-}
-
-function Invoke-ServiceAction {
-    switch ($Action) {
-        "install" { Install-Service }
-        "uninstall" { Uninstall-ServiceProcess }
-        "start" { Start-ServiceProcess }
-        "stop" { Stop-ServiceProcess }
-        "restart" { Restart-ServiceProcess }
-    }
-}
-
-try {
-    Write-CommandLog "[codexio] $Action Codexio Windows service"
-    Write-CommandLog "[codexio] working directory: $Root"
-    Write-CommandLog "[codexio] command log: $LogPath"
-    Set-Location -LiteralPath $Root
-    Install-ProductionDependencies
-    if (-not (Test-Administrator)) {
-        Start-Elevated
-        exit 0
-    }
-    Invoke-ServiceAction
-    Write-CommandLog "[codexio] $Action done"
-    exit 0
-}
-catch {
-    Write-CommandLog "[codexio] command failed: $($_.Exception.Message)"
-    Write-CommandLog "[codexio] press Enter to close"
-    [Console]::ReadLine() | Out-Null
-    exit 1
-}
-'@
-    Write-Utf8File -Path $Path -Text $text.Replace("`n", "`r`n")
+    Copy-TemplateFile -TemplateName "service.ps1" -DestinationPath $Path
 }
 
 function New-NodewFile {
     param([Parameter(Mandatory)] [string] $Path)
-    $script = @"
-`$ErrorActionPreference = "Stop"
-Set-StrictMode -Version Latest
-
-`$Root = `$PSScriptRoot
-`$RuntimeRoot = Join-Path `$Root ".codexio\node"
-`$LocalNode = Join-Path `$RuntimeRoot "node.exe"
-`$PnpmRoot = Join-Path `$Root ".codexio\pnpm"
-`$LocalPnpm = Join-Path `$PnpmRoot "bin\pnpm.cjs"
-`$NodeVersion = "$NodeRuntimeVersion"
-
-function Test-ZipArchive {
-    param([Parameter(Mandatory)] [string] `$Path)
-    try {
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        `$zip = [System.IO.Compression.ZipFile]::OpenRead(`$Path)
-        try {
-            return `$zip.Entries.Count -gt 0
-        }
-        finally {
-            `$zip.Dispose()
-        }
+    Copy-TemplateFile -TemplateName "nodew.ps1" -DestinationPath $Path -Replacements @{
+        "__NODE_RUNTIME_VERSION__" = $NodeRuntimeVersion
     }
-    catch {
-        return `$false
-    }
-}
-
-function Save-NodeArchive {
-    param(
-        [Parameter(Mandatory)] [string] `$ArchivePath,
-        [Parameter(Mandatory)] [string] `$ArchiveName
-    )
-    `$tempPath = "`$ArchivePath.tmp"
-    `$baseUrls = @()
-    if (-not [string]::IsNullOrWhiteSpace(`$env:CODEXIO_NODE_DIST_BASE_URL)) {
-        `$baseUrls += `$env:CODEXIO_NODE_DIST_BASE_URL.TrimEnd("/")
-    }
-    `$baseUrls += "https://npmmirror.com/mirrors/node"
-    `$baseUrls += "https://nodejs.org/dist"
-    foreach (`$baseUrl in `$baseUrls) {
-        `$archiveUrl = "`$baseUrl/v`$NodeVersion/`$ArchiveName"
-        if (Test-Path -LiteralPath `$tempPath) {
-            Remove-Item -Force -LiteralPath `$tempPath
-        }
-        Write-Host "[codexio nodew] downloading Node.js from `$baseUrl"
-        try {
-            Invoke-WebRequest -Uri `$archiveUrl -OutFile `$tempPath -TimeoutSec 600
-            if (Test-ZipArchive -Path `$tempPath) {
-                Move-Item -Force -LiteralPath `$tempPath -Destination `$ArchivePath
-                return
-            }
-        }
-        catch {
-            Write-Host "[codexio nodew] download failed from `$baseUrl"
-        }
-    }
-    `$fallbackUrl = "https://next.firco.cn/api/download/release/nodejs/latest/file?platform=windows-x64"
-    if (Test-Path -LiteralPath `$tempPath) {
-        Remove-Item -Force -LiteralPath `$tempPath
-    }
-    Write-Host "[codexio nodew] downloading Node.js from Nfirco mirror"
-    try {
-        Invoke-WebRequest -Uri `$fallbackUrl -OutFile `$tempPath -TimeoutSec 600
-        if (Test-ZipArchive -Path `$tempPath) {
-            Move-Item -Force -LiteralPath `$tempPath -Destination `$ArchivePath
-            return
-        }
-    }
-    catch {
-        Write-Host "[codexio nodew] download failed from Nfirco mirror"
-    }
-    if (Test-Path -LiteralPath `$tempPath) {
-        Remove-Item -Force -LiteralPath `$tempPath
-    }
-    throw "Node.js download failed. Delete .codexio\download and retry, or manually extract node-v`$NodeVersion-win-x64.zip to .codexio\node."
-}
-
-function Expand-NodeArchive {
-    param(
-        [Parameter(Mandatory)] [string] `$ArchivePath,
-        [Parameter(Mandatory)] [string] `$ExtractDir,
-        [Parameter(Mandatory)] [string] `$ExtractedRoot
-    )
-    if (Test-Path -LiteralPath `$ExtractDir) {
-        Remove-Item -Recurse -Force -LiteralPath `$ExtractDir
-    }
-    try {
-        Expand-Archive -Path `$ArchivePath -DestinationPath `$ExtractDir -Force
-    }
-    catch {
-        return `$false
-    }
-    `$node = Join-Path `$ExtractedRoot "node.exe"
-    `$corepack = Join-Path `$ExtractedRoot "corepack.cmd"
-    return (Test-Path -LiteralPath `$node) -and (Test-Path -LiteralPath `$corepack)
-}
-
-function Install-LocalNode {
-    `$archiveName = "node-v`$NodeVersion-win-x64.zip"
-    `$downloadDir = Join-Path `$Root ".codexio\download"
-    `$archivePath = Join-Path `$downloadDir `$archiveName
-    `$extractDir = Join-Path `$downloadDir "node-extract"
-    New-Item -ItemType Directory -Force -Path `$downloadDir | Out-Null
-    if (Test-Path -LiteralPath `$archivePath) {
-        if (Test-ZipArchive -Path `$archivePath) {
-            Write-Host "[codexio nodew] using cached Node.js archive"
-        } else {
-            Write-Host "[codexio nodew] cached Node.js archive is broken, deleting it"
-            Remove-Item -Force -LiteralPath `$archivePath
-        }
-    }
-    if (-not (Test-Path -LiteralPath `$archivePath)) {
-        Write-Host "[codexio nodew] Node.js was not found, downloading v`$NodeVersion"
-        Save-NodeArchive -ArchivePath `$archivePath -ArchiveName `$archiveName
-    }
-    Write-Host "[codexio nodew] extracting Node.js runtime"
-    `$extractedRoot = Join-Path `$extractDir "node-v`$NodeVersion-win-x64"
-    if (-not (Expand-NodeArchive -ArchivePath `$archivePath -ExtractDir `$extractDir -ExtractedRoot `$extractedRoot)) {
-        Write-Host "[codexio nodew] Node.js archive content is invalid, downloading again"
-        Remove-Item -Force -LiteralPath `$archivePath
-        Save-NodeArchive -ArchivePath `$archivePath -ArchiveName `$archiveName
-        if (-not (Expand-NodeArchive -ArchivePath `$archivePath -ExtractDir `$extractDir -ExtractedRoot `$extractedRoot)) {
-            throw "Node.js archive extraction failed. Delete .codexio\download and retry."
-        }
-    }
-    if (Test-Path -LiteralPath `$RuntimeRoot) {
-        Remove-Item -Recurse -Force -LiteralPath `$RuntimeRoot
-    }
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent `$RuntimeRoot) | Out-Null
-    Move-Item -LiteralPath `$extractedRoot -Destination `$RuntimeRoot
-    Write-Host "[codexio nodew] Node.js installed locally"
-}
-
-function Use-LocalNodeEnvironment {
-    `$localPath = [System.IO.Path]::GetFullPath(`$RuntimeRoot)
-    `$pathItems = @(`$localPath)
-    if (-not [string]::IsNullOrWhiteSpace(`$env:Path)) {
-        foreach (`$pathItem in `$env:Path.Split([System.IO.Path]::PathSeparator)) {
-            if ([string]::IsNullOrWhiteSpace(`$pathItem)) {
-                continue
-            }
-            `$normalizedPathItem = `$pathItem.Trim('"')
-            try {
-                if ([System.IO.Path]::GetFullPath(`$normalizedPathItem) -eq `$localPath) {
-                    continue
-                }
-            }
-            catch {}
-            `$pathItems += `$pathItem
-        }
-    }
-    `$env:Path = (`$pathItems | Select-Object -Unique) -join [System.IO.Path]::PathSeparator
-    Remove-Item -LiteralPath "Env:\NODE_OPTIONS" -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath "Env:\NODE_PATH" -ErrorAction SilentlyContinue
-    `$env:COREPACK_ENABLE_DOWNLOAD_PROMPT = "0"
-}
-
-function Resolve-Node {
-    if (-not (Test-Path -LiteralPath `$LocalNode)) {
-        Install-LocalNode
-    }
-    Use-LocalNodeEnvironment
-    Write-Host "[codexio nodew] using local Node.js"
-    return `$LocalNode
-}
-
-function Resolve-Corepack {
-    if (-not (Test-Path -LiteralPath `$LocalNode)) {
-        Install-LocalNode
-    }
-    Use-LocalNodeEnvironment
-    `$corepack = Join-Path `$RuntimeRoot "corepack.cmd"
-    if (-not (Test-Path -LiteralPath `$corepack)) {
-        throw "corepack not found"
-    }
-    Write-Host "[codexio nodew] using local Corepack"
-    return `$corepack
-}
-
-function Resolve-Pnpm {
-    if (-not (Test-Path -LiteralPath `$LocalNode)) {
-        Install-LocalNode
-    }
-    Use-LocalNodeEnvironment
-    if (-not (Test-Path -LiteralPath `$LocalPnpm)) {
-        throw "bundled pnpm not found"
-    }
-    Write-Host "[codexio nodew] using bundled pnpm"
-    return `$LocalPnpm
-}
-
-if (`$args.Count -gt 0 -and `$args[0] -eq "corepack") {
-    Write-Host "[codexio nodew] launching Corepack"
-    `$command = Resolve-Corepack
-    & `$command @(`$args | Select-Object -Skip 1)
-    exit `$LASTEXITCODE
-}
-
-if (`$args.Count -gt 0 -and `$args[0] -eq "pnpm") {
-    Write-Host "[codexio nodew] launching pnpm"
-    `$pnpm = Resolve-Pnpm
-    `$node = Resolve-Node
-    & `$node `$pnpm @(`$args | Select-Object -Skip 1)
-    exit `$LASTEXITCODE
-}
-
-Write-Host "[codexio nodew] launching Node.js"
-`$node = Resolve-Node
-& `$node @args
-exit `$LASTEXITCODE
-"@
-    Write-Utf8File -Path $Path -Text $script.Replace("`n", "`r`n")
 }
 
 function Copy-RuntimeFiles {
@@ -788,6 +362,8 @@ function Copy-RuntimeFiles {
     Write-Step "copy runtime files: $DestinationRoot"
     New-Item -ItemType Directory -Force -Path (Join-Path $DestinationRoot ".codexio") | Out-Null
     Copy-Item -Recurse -Force (Join-Path $ProjectRoot "dist") $DestinationRoot
+    New-Item -ItemType Directory -Force -Path (Join-Path $DestinationRoot "dist\value") | Out-Null
+    Copy-Item -Force $PackageLayoutPath (Join-Path $DestinationRoot "dist\value\PackageLayout.json")
     Copy-Item -Force (Join-Path $ProjectRoot "package.json") $DestinationRoot
     Copy-Item -Force (Join-Path $ProjectRoot "pnpm-lock.yaml") $DestinationRoot
     Copy-Item -Force (Join-Path $ProjectRoot "instruction.md") $DestinationRoot
@@ -940,6 +516,7 @@ try {
     $pnpmArchive = Join-Path $ReleaseRoot "$PackageName-$script:Version-windows-x64-pnpm.zip"
     $baseUrl = "https://$AppDomain"
     $adminApiHeaders = $null
+    $packageLayout = Read-PackageLayout
     Write-Step "version: $script:Version"
     Write-Step "platforms: $($selectedPlatforms -join ', ')"
     if ($buildStandalone) {
@@ -998,23 +575,7 @@ try {
 
     if ($buildPnpm) {
         $durations["compress windows-x64-pnpm"] = Measure-Step -Name "compress pnpm package" -Action {
-            Compress-Package -SourceRoot $PnpmRoot -ArchivePath $pnpmArchive -CompressionLevel ([System.IO.Compression.CompressionLevel]::NoCompression) -Entries @(
-                "codexio/.codexio/codexio-service.exe",
-                "codexio/.codexio/codexio-service.xml",
-                "codexio/install.cmd",
-                "codexio/uninstall.cmd",
-                "codexio/start.cmd",
-                "codexio/stop.cmd",
-                "codexio/restart.cmd",
-                "codexio/service.ps1",
-                "codexio/.codexio/config.yaml",
-                "codexio/.codexio/release.json",
-                "codexio/dist/Server.js",
-                "codexio/package.json",
-                "codexio/pnpm-lock.yaml",
-                "codexio/nodew.ps1",
-                "codexio/.codexio/pnpm/bin/pnpm.cjs"
-            )
+            Compress-Package -SourceRoot $PnpmRoot -ArchivePath $pnpmArchive -CompressionLevel ([System.IO.Compression.CompressionLevel]::NoCompression) -Entries (Get-ArchiveEntries -Layout $packageLayout -Platform "windows-x64-pnpm")
         }
         if (-not $BuildOnly) {
             if ($null -eq $adminApiHeaders) {
@@ -1028,25 +589,7 @@ try {
 
     if ($buildStandalone) {
         $durations["compress windows-x64-standalone"] = Measure-Step -Name "compress standalone package" -Action {
-            Compress-Package -SourceRoot $StandaloneRoot -ArchivePath $standaloneArchive -CompressionLevel ([System.IO.Compression.CompressionLevel]::Optimal) -Entries @(
-                "codexio/.codexio/codexio-service.exe",
-                "codexio/.codexio/codexio-service.xml",
-                "codexio/install.cmd",
-                "codexio/uninstall.cmd",
-                "codexio/start.cmd",
-                "codexio/stop.cmd",
-                "codexio/restart.cmd",
-                "codexio/service.ps1",
-                "codexio/.codexio/config.yaml",
-                "codexio/.codexio/release.json",
-                "codexio/nodew.ps1",
-                "codexio/.codexio/node/node.exe",
-                "codexio/dist/Server.js",
-                "codexio/node_modules/@openai/codex/bin/codex.js",
-                "codexio/node_modules/@openai/codex-win32-x64/package.json",
-                "codexio/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs",
-                "codexio/node_modules/@anthropic-ai/claude-code-win32-x64/package.json"
-            )
+            Compress-Package -SourceRoot $StandaloneRoot -ArchivePath $standaloneArchive -CompressionLevel ([System.IO.Compression.CompressionLevel]::Optimal) -Entries (Get-ArchiveEntries -Layout $packageLayout -Platform "windows-x64-standalone")
         }
         if (-not $BuildOnly) {
             if ($null -eq $adminApiHeaders) {
