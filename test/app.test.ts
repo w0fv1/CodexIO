@@ -7,30 +7,30 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
 import { resolveAvailableServerPort } from '../src/util/Network.js'
-import { createServeProcessSpec, readRunningSupervisorState, readSupervisorState, SupervisorClient, writeRuntimeServerState, writeSupervisorState } from '../src/component/ServerLifecycle.js'
 import { webPageHtml } from '../src/channel/WebPage.js'
 import { TestAgent } from './TestAgent.js'
 import { Logger } from '../src/component/Logger.js'
 import { Configer } from '../src/component/Configer.js'
 import { Result } from '../src/value/Result.js'
-import { ChannelManager } from '../src/channel/ChannelManager.js'
+import { ChannelInputManager } from '../src/channel/ChannelInputManager.js'
+import { ChannelOutputManager } from '../src/channel/ChannelOutputManager.js'
 import { AgentManager } from '../src/agent/AgentManager.js'
 import { CodexioApiController } from '../src/controller/CodexioApiController.js'
 import { Agent } from '../src/agent/Agent.js'
 import { FileStore } from '../src/component/FileStore.js'
 import { CommandExecutor } from '../src/controller/CommandExecutor.js'
-import { UpdateService } from '../src/component/UpdateService.js'
-import { UpdateInstaller } from '../src/component/UpdateInstaller.js'
-import { WebChannel } from '../src/channel/WebChannel.js'
-import { FeishuChannel } from '../src/channel/FeishuChannel.js'
-import { FeishuWebhookChannel } from '../src/channel/FeishuWebhookChannel.js'
-import { EmailChannel } from '../src/channel/EmailChannel.js'
+import { Updater } from '../src/component/Updater.js'
+import { WebChannelHub, WebChannelInput, WebChannelOutput } from '../src/channel/WebChannel.js'
+import { FeishuChannelHub, FeishuChannelInput, FeishuChannelOutput } from '../src/channel/FeishuChannel.js'
+import { FeishuWebhookChannelOutput } from '../src/channel/FeishuWebhookChannel.js'
+import { EmailChannelHub, EmailChannelInput, EmailChannelOutput } from '../src/channel/EmailChannel.js'
 import { EventBus } from '../src/component/EventBus.js'
 import { AppEvent } from '../src/value/Event.js'
 
 const testToken = 'test-message-token'
 const testMetadata = new CodexioMetadata()
 const codexioRootPath = testMetadata.rootPath
+const testServerStops = new WeakMap<HttpServer, () => Promise<Result<null>>>()
 
 describe('server', () => {
   it('serves a compact Codexio web chat page', () => {
@@ -301,14 +301,14 @@ describe('server', () => {
       ioThreadId: 'io-thread-clear',
       text: '$ clear'
     }))
-    await waitForWebSocketMessages(messages, 4)
-    const clear = messages[3]
+    await waitForWebSocketMessages(messages, 5)
+    const clear = messages[4]
     socket.send(JSON.stringify({
       ioThreadId: 'io-thread-clear',
       text: 'second'
     }))
-    await waitForWebSocketMessages(messages, 7)
-    const second = messages[6]
+    await waitForWebSocketMessages(messages, 8)
+    const second = messages[7]
     expect(clear).toMatchObject({
       event: 'clear'
     })
@@ -334,107 +334,9 @@ describe('server', () => {
       ioThreadId: 'io-thread-yuan-clear',
       text: '￥clear'
     }))
-    await waitForWebSocketMessages(messages, 4)
-    expect(messages[3]).toMatchObject({
+    await waitForWebSocketMessages(messages, 5)
+    expect(messages[4]).toMatchObject({
       event: 'clear'
-    })
-    await closeWebSocket(socket)
-    await closeTestServer(listener)
-  })
-
-  it('shows system feedback for restart command', async () => {
-    const requested: string[] = []
-    const token = 'restart-token'
-    const supervisor = await new Promise<HttpServer>((resolve, reject) => {
-      const server = new HttpServer((request, response) => {
-        if (request.headers.authorization !== `Bearer ${token}`) {
-          response.statusCode = 401
-          response.end(JSON.stringify(Result.fail('unauthorized')))
-          return
-        }
-        if (request.method === 'GET' && request.url === '/status') {
-          response.end(JSON.stringify(Result.success({
-            pid: process.pid
-          })))
-          return
-        }
-        if (request.method === 'POST' && request.url === '/restart') {
-          requested.push('restart')
-          response.end(JSON.stringify(Result.success({
-            accepted: true
-          })))
-          return
-        }
-        response.statusCode = 404
-        response.end(JSON.stringify(Result.fail('not found')))
-      })
-      server.once('error', reject)
-      server.listen(0, '127.0.0.1', () => {
-        resolve(server)
-      })
-    })
-    const restarted = await startTestServer()
-    const address = supervisor.address()
-    if (!address || typeof address === 'string') {
-      throw new Error('supervisor address not found')
-    }
-    await writeSupervisorState(restarted.configPath, {
-      pid: process.pid,
-      host: '127.0.0.1',
-      port: address.port,
-      token,
-      startedAt: new Date().toISOString()
-    })
-    const restartedSocket = await openWebSocket(restarted.baseUrl)
-    const restartedMessages = recordWebSocket(restartedSocket)
-    try {
-      restartedSocket.send(JSON.stringify({
-        text: '$restart'
-      }))
-      await waitForWebSocketMessages(restartedMessages, 2)
-      expect(restartedMessages[0]).toMatchObject({
-        event: 'message',
-        role: 'user',
-        text: '$restart'
-      })
-      expect(restartedMessages[1]).toMatchObject({
-        event: 'message',
-        role: 'system',
-        text: '正在重启 Codexio，页面会自动重连。'
-      })
-      await waitFor(() => requested.length === 1)
-      expect(requested).toEqual([
-        'restart'
-      ])
-    } finally {
-      await closeWebSocket(restartedSocket)
-      await closeTestServer(restarted.listener)
-      await closeTestServer(supervisor)
-    }
-  })
-
-  it('reports restart command failure when application lifecycle is unavailable', async () => {
-    const { baseUrl, listener } = await startTestServer()
-    const socket = await openWebSocket(baseUrl)
-    const messages = recordWebSocket(socket)
-    socket.send(JSON.stringify({
-      text: '$restart'
-    }))
-    await waitForWebSocketMessages(messages, 3)
-    expect(messages[0]).toMatchObject({
-      event: 'message',
-      role: 'user',
-      text: '$restart'
-    })
-    expect(messages[1]).toMatchObject({
-      event: 'message',
-      role: 'system',
-      text: '正在重启 Codexio，页面会自动重连。'
-    })
-    expect(messages[2]).toMatchObject({
-      event: 'message',
-      role: 'system',
-      text: '执行失败：$restart\nCodexio supervisor 未运行，请用 start.cmd 启动后再重启。'
     })
     await closeWebSocket(socket)
     await closeTestServer(listener)
@@ -928,73 +830,6 @@ describe('server', () => {
     await closeTestServer(listener)
   })
 
-  it('restarts the application through the authenticated admin endpoint', async () => {
-    const restarts: string[] = []
-    const token = 'admin-restart-token'
-    const supervisor = await new Promise<HttpServer>((resolve, reject) => {
-      const server = new HttpServer((request, response) => {
-        if (request.headers.authorization !== `Bearer ${token}`) {
-          response.statusCode = 401
-          response.end(JSON.stringify(Result.fail('unauthorized')))
-          return
-        }
-        if (request.method === 'GET' && request.url === '/status') {
-          response.end(JSON.stringify(Result.success({
-            pid: process.pid
-          })))
-          return
-        }
-        if (request.method === 'POST' && request.url === '/restart') {
-          restarts.push('restart')
-          response.end(JSON.stringify(Result.success({
-            accepted: true
-          })))
-          return
-        }
-        response.statusCode = 404
-        response.end(JSON.stringify(Result.fail('not found')))
-      })
-      server.once('error', reject)
-      server.listen(0, '127.0.0.1', () => {
-        resolve(server)
-      })
-    })
-    const { baseUrl, listener, configPath } = await startTestServer()
-    const address = supervisor.address()
-    if (!address || typeof address === 'string') {
-      throw new Error('supervisor address not found')
-    }
-    await writeSupervisorState(configPath, {
-      pid: process.pid,
-      host: '127.0.0.1',
-      port: address.port,
-      token,
-      startedAt: new Date().toISOString()
-    })
-    const unauthorized = await fetch(`${baseUrl}/api/server/restart`, {
-      method: 'POST'
-    })
-    expect(unauthorized.status).toBe(401)
-
-    const response = await fetch(`${baseUrl}/api/server/restart`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${testToken}`
-      }
-    })
-    const result = await response.json() as {
-      isFailed: boolean
-      data: string
-    }
-    expect(result.isFailed).toBe(false)
-    expect(result.data).toBe(`Codexio restart requested through supervisor 127.0.0.1:${address.port}`)
-    expect(restarts).toEqual([
-      'restart'
-    ])
-    await closeTestServer(listener)
-    await closeTestServer(supervisor)
-  })
-
   it('stops the host server through the authenticated admin endpoint', async () => {
     const { baseUrl, listener } = await startTestServer()
     const unauthorized = await fetch(`${baseUrl}/api/server/stop`, {
@@ -1022,9 +857,9 @@ describe('server', () => {
     await closed
   })
 
-  it('notifies connected users when the host server stops', async () => {
+  it('does not notify connected users when the host server stops', async () => {
     const { baseUrl, listener } = await startTestServer()
-    const { socket, messages } = await openRecordedWebSocket(baseUrl)
+    const { messages } = await openRecordedWebSocket(baseUrl)
     const closed = new Promise<void>((resolve) => {
       listener.once('close', resolve)
     })
@@ -1038,13 +873,8 @@ describe('server', () => {
       isFailed: boolean
     }
     expect(result.isFailed).toBe(false)
-    await waitForWebSocketMessages(messages, 1)
-    expect(messages[0]).toMatchObject({
-      event: 'message',
-      role: 'system',
-      text: 'Codexio server stopping.'
-    })
     await closed
+    expect(messages).toEqual([])
   })
 
   it('broadcasts agent output to every web connection', async () => {
@@ -1200,287 +1030,6 @@ describe('server', () => {
     }
   })
 
-  it('requests application restart through the running supervisor', async () => {
-    const token = 'supervisor-token'
-    const requested: string[] = []
-    const http = await new Promise<HttpServer>((resolve, reject) => {
-      const server = new HttpServer((request, response) => {
-        if (request.headers.authorization !== `Bearer ${token}`) {
-          response.statusCode = 401
-          response.end(JSON.stringify({
-            isFailed: true,
-            message: 'unauthorized'
-          }))
-          return
-        }
-        if (request.method === 'GET' && request.url === '/status') {
-          response.end(JSON.stringify({
-            isFailed: false,
-            data: {
-              pid: process.pid
-            }
-          }))
-          return
-        }
-        if (request.method === 'POST' && request.url === '/restart') {
-          requested.push('restart')
-          response.end(JSON.stringify({
-            isFailed: false,
-            data: {
-              accepted: true,
-              action: 'restart'
-            }
-          }))
-          return
-        }
-        response.statusCode = 404
-        response.end(JSON.stringify({
-          isFailed: true,
-          message: 'not found'
-        }))
-      })
-      server.once('error', reject)
-      server.listen(0, '127.0.0.1', () => {
-        resolve(server)
-      })
-    })
-    try {
-      const address = http.address()
-      if (!address || typeof address === 'string') {
-        throw new Error('supervisor address not found')
-      }
-      const dir = await mkdtemp(join(tmpdir(), 'codexio-supervisor-'))
-      const configPath = join(dir, 'config.yaml')
-      await writeSupervisorState(configPath, {
-        pid: process.pid,
-        host: '127.0.0.1',
-        port: address.port,
-        token,
-        startedAt: new Date().toISOString()
-      })
-
-      const state = await new SupervisorClient(createTestConfiger(configPath)).restart()
-
-      expect(state.port).toBe(address.port)
-      expect(requested).toEqual([
-        'restart'
-      ])
-    } finally {
-      await closeTestServer(http)
-    }
-  })
-
-  it('waits for supervisor stop before returning', async () => {
-    const token = 'supervisor-token'
-    let stopped = false
-    const http = await new Promise<HttpServer>((resolve, reject) => {
-      const server = new HttpServer((request, response) => {
-        if (request.headers.authorization !== `Bearer ${token}`) {
-          response.statusCode = 401
-          response.end(JSON.stringify({
-            isFailed: true,
-            message: 'unauthorized'
-          }))
-          return
-        }
-        if (request.method === 'GET' && request.url === '/status') {
-          response.end(JSON.stringify({
-            isFailed: false,
-            data: {
-              pid: process.pid
-            }
-          }))
-          return
-        }
-        if (request.method === 'POST' && request.url === '/stop') {
-          response.end(JSON.stringify({
-            isFailed: false,
-            data: {
-              accepted: true,
-              action: 'stop'
-            }
-          }))
-          setTimeout(() => {
-            server.close(() => {
-              stopped = true
-            })
-          }, 80)
-          return
-        }
-        response.statusCode = 404
-        response.end(JSON.stringify({
-          isFailed: true,
-          message: 'not found'
-        }))
-      })
-      server.once('error', reject)
-      server.listen(0, '127.0.0.1', () => {
-        resolve(server)
-      })
-    })
-    try {
-      const address = http.address()
-      if (!address || typeof address === 'string') {
-        throw new Error('supervisor address not found')
-      }
-      const dir = await mkdtemp(join(tmpdir(), 'codexio-supervisor-stop-'))
-      const configPath = join(dir, 'config.yaml')
-      await writeSupervisorState(configPath, {
-        pid: process.pid,
-        host: '127.0.0.1',
-        port: address.port,
-        token,
-        startedAt: new Date().toISOString()
-      })
-
-      const result = await new SupervisorClient(createTestConfiger(configPath)).stop()
-
-      expect(result).toBe(true)
-      expect(stopped).toBe(true)
-      expect(await readSupervisorState(configPath)).toBeUndefined()
-    } finally {
-      if (http.listening) {
-        await closeTestServer(http)
-      }
-    }
-  })
-
-  it('stops orphan runtime server when supervisor is unavailable', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'codexio-orphan-runtime-'))
-    const configPath = join(dir, 'config.yaml')
-    await writeFile(configPath, [
-      'server:',
-      '  host: 127.0.0.1',
-      '  port: 8787',
-      `  token: ${testToken}`,
-      'proxy:',
-      '  enabled: false',
-      '  host: 127.0.0.1',
-      '  port: 7890',
-      'agents:',
-      '  codex:',
-      '    enabled: false',
-      '  claude:',
-      '    enabled: true',
-      'channels:',
-      '  web:',
-      '    enabled: true',
-      'workspace:',
-      `  path: ${dir}`
-    ].join('\n'), 'utf8')
-    let stopped = false
-    const http = await new Promise<HttpServer>((resolve, reject) => {
-      const server = new HttpServer((request, response) => {
-        if (request.method === 'GET' && request.url === '/api/status') {
-          response.end(JSON.stringify({
-            isFailed: false,
-            data: {
-              pid: process.pid
-            }
-          }))
-          return
-        }
-        if (request.method === 'POST' && request.url === '/api/server/stop') {
-          if (request.headers.authorization !== `Bearer ${testToken}`) {
-            response.statusCode = 401
-            response.end(JSON.stringify({
-              isFailed: true,
-              message: 'unauthorized'
-            }))
-            return
-          }
-          response.end(JSON.stringify({
-            isFailed: false,
-            data: {
-              stopping: true
-            }
-          }))
-          setTimeout(() => {
-            server.close(() => {
-              stopped = true
-            })
-          }, 80)
-          return
-        }
-        response.statusCode = 404
-        response.end(JSON.stringify({
-          isFailed: true,
-          message: 'not found'
-        }))
-      })
-      server.once('error', reject)
-      server.listen(0, '127.0.0.1', () => {
-        resolve(server)
-      })
-    })
-    try {
-      const address = http.address()
-      if (!address || typeof address === 'string') {
-        throw new Error('runtime address not found')
-      }
-      await writeRuntimeServerState(configPath, {
-        pid: process.pid,
-        host: '127.0.0.1',
-        port: address.port,
-        startedAt: new Date().toISOString()
-      })
-
-      const result = await new SupervisorClient(createTestConfiger(configPath)).stop()
-
-      expect(result).toBe(true)
-      expect(stopped).toBe(true)
-      expect(await readSupervisorState(configPath)).toBeUndefined()
-    } finally {
-      if (http.listening) {
-        await closeTestServer(http)
-      }
-    }
-  })
-
-  it('cleans stale supervisor state when supervisor process is gone', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'codexio-stale-supervisor-'))
-    const configPath = join(dir, 'config.yaml')
-    await writeSupervisorState(configPath, {
-      pid: 999999,
-      host: '127.0.0.1',
-      port: 9,
-      token: 'stale-token',
-      startedAt: new Date().toISOString()
-    })
-
-    expect(await readRunningSupervisorState(configPath)).toBeUndefined()
-    expect(await readSupervisorState(configPath)).toBeUndefined()
-  })
-
-  it('resolves source and built serve process commands without npm restart branching', () => {
-    const configPath = join(codexioRootPath, '.codexio', 'config.yaml')
-    const sourceEntryPath = join(codexioRootPath, 'src', 'index.ts')
-    const builtEntryPath = join(codexioRootPath, 'dist', 'index.js')
-    const source = createServeProcessSpec(configPath, sourceEntryPath)
-    expect(source.command).toBe(process.execPath)
-    expect(source.args.slice(1)).toEqual([
-      join('src', 'index.ts'),
-      'serve',
-      '--config',
-      configPath
-    ])
-    expect(source.args[0]).toContain(join('tsx', 'dist', 'cli.mjs'))
-
-    const built = createServeProcessSpec(configPath, builtEntryPath)
-    expect(built.command).toBe(process.execPath)
-    expect(built.args).toEqual([
-      builtEntryPath,
-      'serve',
-      '--config',
-      configPath
-    ])
-
-    const supervised = createServeProcessSpec(configPath, sourceEntryPath, {
-      supervisorPid: 12345
-    })
-    expect(supervised.env?.CODEXIO_SUPERVISOR_PID).toBe('12345')
-    expect(source.env).toBeUndefined()
-  })
 })
 
 async function startTestServer(): Promise<{
@@ -1502,8 +1051,6 @@ async function startTestServer(): Promise<{
     'channels:',
     '  web:',
     '    enabled: true',
-    '    host: 127.0.0.1',
-    '    port: 8788',
     'workspace:',
     `  path: ${workspace}`
   ].join('\n'), 'utf8')
@@ -1553,47 +1100,52 @@ async function createTestCodexioApp(configer: Configer, claudeAgent: Agent): Pro
   })
   const eventBus = new EventBus()
   const fileStore = new FileStore(metadata)
-  let commandExecutor: CommandExecutor
-  const receive = async (message: Parameters<CommandExecutor['receive']>[0]) => commandExecutor.receive(message)
-  const webChannel = new WebChannel(configer, fileStore, receive)
-  const channelManager = new ChannelManager(
+  const webHub = new WebChannelHub(fileStore)
+  const webInput = new WebChannelInput(configer, webHub)
+  const webOutput = new WebChannelOutput(configer, webHub)
+  const feishuHub = new FeishuChannelHub(configer)
+  const feishuInput = new FeishuChannelInput(feishuHub)
+  const feishuOutput = new FeishuChannelOutput(feishuHub)
+  const emailHub = new EmailChannelHub(configer)
+  const emailInput = new EmailChannelInput(emailHub)
+  const emailOutput = new EmailChannelOutput(emailHub)
+  const outputManager = new ChannelOutputManager(
     configer,
     fileStore,
-    webChannel,
-    new FeishuChannel(configer, receive),
-    new FeishuWebhookChannel(configer),
-    new EmailChannel(configer, receive)
+    webOutput,
+    feishuOutput,
+    new FeishuWebhookChannelOutput(configer),
+    emailOutput
   )
-  const supervisorClient = new SupervisorClient(configer)
-  const agentManager = new AgentManager(configer, {
-    send: async (message) => channelManager.send(message),
-    status: async () => Result.success(null)
-  }, claudeAgent, claudeAgent)
-  const updateService = new UpdateService(new UpdateInstaller(configer, metadata))
-  commandExecutor = new CommandExecutor(channelManager, agentManager, updateService, supervisorClient)
-  eventBus.on(AppEvent.HttpClosed, () => {
-    void (async () => {
-      await channelManager.sendSystem('Codexio server stopping.')
-      await agentManager.stop()
-      await channelManager.stop()
-    })()
-  })
-  const apiController = new CodexioApiController(configer, channelManager, agentManager, fileStore, supervisorClient, webChannel, eventBus)
-  await channelManager.start()
-  return {
-    listen: (port?: number, host?: string) => apiController.listen(port, host),
-    stop: async () => {
-      const agentStopped = await agentManager.stop()
-      const channelStopped = await channelManager.stop()
-      if (agentStopped.isFailed) {
-        return agentStopped
-      }
-      if (channelStopped.isFailed) {
-        return channelStopped
-      }
-      return Result.success(null)
-    }
+  const agentManager = new AgentManager(configer, outputManager, claudeAgent, claudeAgent)
+  const updater = new Updater(configer, metadata, outputManager)
+  const commandExecutor = new CommandExecutor(outputManager, agentManager, updater)
+  const inputManager = new ChannelInputManager(configer, outputManager, commandExecutor, webInput, feishuInput, emailInput)
+  const apiController = new CodexioApiController(configer, outputManager, agentManager, fileStore, webHub, eventBus)
+  await outputManager.start()
+  await inputManager.start()
+  const stop = async () => {
+    await ignoreStopFailure(apiController.stop())
+    await ignoreStopFailure(inputManager.stop())
+    await ignoreStopFailure(agentManager.stop())
+    await ignoreStopFailure(outputManager.stop())
+    return Result.success(null)
   }
+  eventBus.on(AppEvent.StopRequested, () => {
+    void stop()
+  })
+  return {
+    listen: (port?: number, host?: string) => {
+      const listener = apiController.listen(port, host)
+      testServerStops.set(listener, stop)
+      return listener
+    },
+    stop
+  }
+}
+
+async function ignoreStopFailure(action: Promise<Result<null>>): Promise<void> {
+  await action.catch(() => Result.fail('stop failed'))
 }
 
 async function openWebSocket(baseUrl: string): Promise<WebSocket> {
@@ -1637,7 +1189,7 @@ function recordWebSocket(socket: WebSocket): Array<Record<string, unknown>> {
   const messages: Array<Record<string, unknown>> = []
   socket.on('message', (data) => {
     const message = JSON.parse(data.toString()) as Record<string, unknown>
-    if (message.event !== 'ready' && message.text !== 'Codexio server started.' && message.text !== 'Codexio server stopping.') {
+    if (message.event !== 'ready') {
       messages.push(message)
     }
   })
@@ -1690,6 +1242,15 @@ async function closeWebSocket(socket: WebSocket): Promise<void> {
 }
 
 async function closeTestServer(listener: HttpServer): Promise<void> {
+  const stop = testServerStops.get(listener)
+  if (stop) {
+    testServerStops.delete(listener)
+    const result = await stop()
+    if (result.isFailed) {
+      throw new Error(result.message)
+    }
+    return
+  }
   await new Promise<void>((resolve, reject) => {
     listener.close((error) => {
       if (error) {
@@ -1704,3 +1265,4 @@ async function closeTestServer(listener: HttpServer): Promise<void> {
 function pngBytes(): Buffer {
   return Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lS3KgwAAAABJRU5ErkJggg==', 'base64')
 }
+

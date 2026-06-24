@@ -28,8 +28,6 @@ export type CodexioConfig = {
   channels: {
     web?: {
       enabled: boolean
-      host: string
-      port: number
     }
     feishu?: {
       enabled: boolean
@@ -106,8 +104,6 @@ const configFields: ConfigField[] = [
   field('agents.claude.enabled', 'Agents', 'Claude', 'boolean', '重启 Agent', z.boolean(), false),
   field('workspace.path', 'Workspace', 'Path', 'string', '重启 Agent', z.string().min(1), '.'),
   field('channels.web.enabled', 'Web', 'Enabled', 'boolean', '重启 Codexio', z.boolean(), true),
-  field('channels.web.host', 'Web', 'Host', 'string', '重启 Codexio', z.string(), '127.0.0.1'),
-  field('channels.web.port', 'Web', 'Port', 'number', '重启 Codexio', positiveInt, 8788),
   field('channels.feishu.enabled', 'Feishu', 'Enabled', 'boolean', '重连 Feishu', z.boolean(), false),
   field('channels.feishu.appId', 'Feishu', 'App ID', 'string', '重连 Feishu', z.string(), ''),
   field('channels.feishu.appSecret', 'Feishu', 'App Secret', 'password', '重连 Feishu', z.string(), ''),

@@ -146,9 +146,8 @@ export const configPageHtml = String.raw`
         markDirty()
         return
       }
-      config = result.data.config
       showStatus(result.data.message)
-      render()
+      await load()
     })
     exportConfig.addEventListener('click', () => {
       window.location.href = '/api/config/export'
@@ -175,9 +174,8 @@ export const configPageHtml = String.raw`
         showStatus(result.message, 'error')
         return
       }
-      config = result.data.config
       showStatus(result.data.message)
-      render()
+      await load()
     })
     void load()
   </script>

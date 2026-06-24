@@ -1,16 +1,16 @@
 import { rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ChannelManager } from '../src/channel/ChannelManager.js'
+import { ChannelOutputManager } from '../src/channel/ChannelOutputManager.js'
 import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
-import { UpdateChecker } from '../src/component/UpdateChecker.js'
+import { Updater } from '../src/component/Updater.js'
 import { Configer } from '../src/component/Configer.js'
 import { Result } from '../src/value/Result.js'
 
 const testMetadata = new CodexioMetadata()
 const releasePath = join(testMetadata.rootPath, '.codexio', 'release.json')
 
-describe('update checker', () => {
+describe('updater', () => {
   afterEach(async () => {
     vi.unstubAllGlobals()
     await rm(releasePath, {
@@ -41,8 +41,8 @@ describe('update checker', () => {
     })))
     vi.stubGlobal('fetch', fetchMock)
 
-    const { checker } = createUpdateChecker(true, 'https://next.firco.cn')
-    const message = await checker.check()
+    const { updater } = createUpdater(true, 'https://next.firco.cn')
+    const message = await updater.check()
 
     expect(fetchMock).toHaveBeenCalledWith(new URL('https://next.firco.cn/api/download/release/codexio/latest?platform=windows-x64-pnpm'))
     expect(message).toContain(nextVersion)
@@ -56,8 +56,8 @@ describe('update checker', () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
 
-    const { checker } = createUpdateChecker(true, 'https://next.firco.cn')
-    const message = await checker.check()
+    const { updater } = createUpdater(true, 'https://next.firco.cn')
+    const message = await updater.check()
 
     expect(message).toBeUndefined()
     expect(fetchMock).not.toHaveBeenCalled()
@@ -84,9 +84,9 @@ describe('update checker', () => {
         managePath: '/manage/nfirco/release'
       }
     }))))
-    const { checker, sendSystem } = createUpdateChecker(true, 'https://next.firco.cn')
+    const { updater, sendSystem } = createUpdater(true, 'https://next.firco.cn')
 
-    checker.start()
+    updater.start()
 
     await vi.waitFor(() => {
       expect(sendSystem).toHaveBeenCalledWith(expect.stringContaining(nextVersion))
@@ -94,8 +94,8 @@ describe('update checker', () => {
   })
 })
 
-function createUpdateChecker(enabled: boolean, baseUrl: string): {
-  checker: UpdateChecker
+function createUpdater(enabled: boolean, baseUrl: string): {
+  updater: Updater
   sendSystem: ReturnType<typeof vi.fn>
 } {
   const configer = {
@@ -110,11 +110,11 @@ function createUpdateChecker(enabled: boolean, baseUrl: string): {
     }
   } as unknown as Configer
   const sendSystem = vi.fn(async () => Result.success(null))
-  const channelManager = {
+  const outputManager = {
     sendSystem
-  } as unknown as ChannelManager
+  } as unknown as ChannelOutputManager
   return {
-    checker: new UpdateChecker(configer, testMetadata, channelManager),
+    updater: new Updater(configer, testMetadata, outputManager),
     sendSystem
   }
 }

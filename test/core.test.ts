@@ -6,16 +6,17 @@ import { describe, expect, it, vi } from 'vitest'
 import { createProcessEnv } from '../src/util/ProcessEnvironment.js'
 import { AgentManager } from '../src/agent/AgentManager.js'
 import { CodexAppServer } from '../src/agent/CodexAppServer.js'
-import { AgentLoginInProgressError, CodexAgent, CodexAppServerFactory, createCodexCommand } from '../src/agent/CodexAgent.js'
+import { AgentLoginInProgressError, CodexAgent, createCodexCommand } from '../src/agent/CodexAgent.js'
 import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
 import { CommandExecutor, parseCommandInput } from '../src/controller/CommandExecutor.js'
-import { FeishuChannel } from '../src/channel/FeishuChannel.js'
 import { FeishuMessageSender } from '../src/channel/FeishuMessageSender.js'
+import { parseFeishuMessageText } from '../src/channel/FeishuMessageContent.js'
+import { ChannelOutputManager } from '../src/channel/ChannelOutputManager.js'
+import { AgentMessageClient } from '../src/agent/AgentMessageClient.js'
 import { ThreadBinder } from '../src/value/ThreadBinder.js'
 import { Logger } from '../src/component/Logger.js'
 import { renderMarkdownHtml } from '../src/component/Markdown.js'
-import { runtimeServerStatePath, supervisorStatePath } from '../src/component/ServerLifecycle.js'
-import { createUpdaterScript } from '../src/component/UpdateInstaller.js'
+import { createUpdaterScript } from '../src/component/Updater.js'
 import { FileStore } from '../src/component/FileStore.js'
 import { Configer, diffConfigPaths } from '../src/component/Configer.js'
 import { ConfigSchema, createDefaultConfig, normalizeWorkspacePath, validateCodexioConfig } from '../src/value/ConfigDefinition.js'
@@ -182,10 +183,7 @@ describe('core', () => {
           enabled: true
         }
       }
-    }), {
-      send: async () => Result.success(null),
-      status: async () => Result.success(null)
-    }, new TestAgent(async () => {}))
+    }), createOutputManager(), new TestAgent(async () => {}))
     expect(manager.status().status).toBe('idle')
     await expect(manager.login()).resolves.toBeUndefined()
   })
@@ -201,13 +199,12 @@ describe('core', () => {
           enabled: true
         }
       }
-    }), {
-      send: async (text) => {
-        outbound.push(text.text)
+    }), createOutputManager({
+      sendSystem: async (text) => {
+        outbound.push(text)
         return Result.success(null)
-      },
-      status: async () => Result.success(null)
-    }, new TestAgent(async (message) => {
+      }
+    }), new TestAgent(async (message) => {
       outbound.push(message.text)
     }))
     const result = await manager.receiveMessage({
@@ -232,18 +229,15 @@ describe('core', () => {
           enabled: true
         }
       }
-    }), {
-      send: async (text) => {
-        outbound.push(text.text)
-        if (!text.text.startsWith('test:')) {
-          await new Promise((resolve) => {
-            setTimeout(resolve, 10)
-          })
-        }
+    }), createOutputManager({
+      sendSystem: async (text) => {
+        outbound.push(text)
+        await new Promise((resolve) => {
+          setTimeout(resolve, 10)
+        })
         return Result.success(null)
-      },
-      status: async () => Result.success(null)
-    }, new TestAgent(async (message) => {
+      }
+    }), new TestAgent(async (message) => {
       outbound.push(message.text)
     }))
     const [first, second] = await Promise.all([
@@ -276,10 +270,7 @@ describe('core', () => {
           enabled: false
         }
       }
-    }), {
-      send: async () => Result.success(null),
-      status: async () => Result.success(null)
-    }, {
+    }), createOutputManager(), {
       type: 'codex',
       async login(): Promise<void> {},
       async start(): Promise<void> {
@@ -393,16 +384,6 @@ describe('core', () => {
       name: 'clear',
       args: []
     })
-    expect(parseCommandInput('$ restart')).toEqual({
-      type: 'command',
-      name: 'restart',
-      args: []
-    })
-    expect(parseCommandInput('￥restart')).toEqual({
-      type: 'command',
-      name: 'restart',
-      args: []
-    })
     expect(parseCommandInput('$ update')).toEqual({
       type: 'command',
       name: 'update',
@@ -425,16 +406,8 @@ describe('core', () => {
   })
 
   it('command executor forwards ordinary text with channel thread id', async () => {
-    const displayed: Array<{ ioThreadId: string, text: string }> = []
     const received: Array<{ ioThreadId: string, text: string }> = []
-    const executor = new CommandExecutor({
-      sendSystem: async () => Result.success(null),
-      displayUser: async (input: { ioThreadId: string, text: string }) => {
-        displayed.push(input)
-        return Result.success(null)
-      },
-      clear: async () => Result.success(null)
-    } as unknown as import('../src/channel/ChannelManager.js').ChannelManager, {
+    const executor = new CommandExecutor(createOutputManager(), {
       receiveMessage: async (input: { ioThreadId: string, text: string }) => {
         received.push(input)
         return Result.success({})
@@ -444,8 +417,6 @@ describe('core', () => {
       })
     } as unknown as AgentManager, {
       update: async () => Result.success('updated')
-    }, {
-      restart: async () => Result.success('restarted')
     })
 
     const createdAt = Date.now()
@@ -459,13 +430,6 @@ describe('core', () => {
 
     expect(result.isFailed).toBe(false)
     expect(result.data?.ioThreadId).toBe('io-thread')
-    expect(displayed[0]).toMatchObject({
-      role: 'user',
-      ioThreadId: 'io-thread',
-      text: 'hello',
-      createdAt,
-      source: 'web'
-    })
     expect(received[0]).toMatchObject({
       role: 'user',
       ioThreadId: 'io-thread',
@@ -477,22 +441,18 @@ describe('core', () => {
 
   it('command executor sends system feedback around update command', async () => {
     const systemMessages: string[] = []
-    const executor = new CommandExecutor({
+    const executor = new CommandExecutor(createOutputManager({
       sendSystem: async (text: string) => {
         systemMessages.push(text)
         return Result.success(null)
-      },
-      displayUser: async () => Result.success(null),
-      clear: async () => Result.success(null)
-    } as unknown as import('../src/channel/ChannelManager.js').ChannelManager, {
+      }
+    }), {
       receiveMessage: async () => Result.success({}),
       clear: async () => Result.success({
         action: 'clear'
       })
     } as unknown as AgentManager, {
       update: async () => Result.success('Codexio 0.4.2 更新包已准备完成，正在安装并重启。')
-    }, {
-      restart: async () => Result.success('restarted')
     })
 
     const result = await executor.receive({
@@ -515,22 +475,18 @@ describe('core', () => {
 
   it('command executor reports when update finds no newer version', async () => {
     const systemMessages: string[] = []
-    const executor = new CommandExecutor({
+    const executor = new CommandExecutor(createOutputManager({
       sendSystem: async (text: string) => {
         systemMessages.push(text)
         return Result.success(null)
-      },
-      displayUser: async () => Result.success(null),
-      clear: async () => Result.success(null)
-    } as unknown as import('../src/channel/ChannelManager.js').ChannelManager, {
+      }
+    }), {
       receiveMessage: async () => Result.success({}),
       clear: async () => Result.success({
         action: 'clear'
       })
     } as unknown as AgentManager, {
       update: async () => Result.success('Codexio 已是最新版本 0.4.2。')
-    }, {
-      restart: async () => Result.success('restarted')
     })
 
     const result = await executor.receive({
@@ -1240,10 +1196,7 @@ describe('core', () => {
       }
     })
     const agent = new TestAgent(async () => {})
-    const manager = await createAgentManager(config, {
-      send: async () => Result.success(null),
-      status: async () => Result.success(null)
-    }, agent)
+    const manager = await createAgentManager(config, createOutputManager(), agent)
 
     const started = await manager.start()
 
@@ -1279,10 +1232,10 @@ describe('core', () => {
       currentPort: number
       paths: string[]
     }> = []
-    configer.subscribe((change) => {
+    configer.subscribe('proxy.port', (change) => {
       changes.push({
-        previousPort: change.previous.proxy.port,
-        currentPort: change.current.proxy.port,
+        previousPort: change.previousValue,
+        currentPort: change.currentValue,
         paths: change.paths
       })
     })
@@ -1407,15 +1360,16 @@ describe('core', () => {
 
   it('resolves packaged managed workspace without creating it when loading default release config', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'codexio-package-'))
-    const path = join(dir, 'config.yaml')
+    const path = join(dir, '.codexio', 'config.yaml')
+    await mkdir(join(dir, '.codexio'))
     await writeFile(path, [
       'workspace:',
-      '  path: codexio/.codexio/workspace'
+      '  path: workspace'
     ].join('\n'), 'utf8')
 
     const configer = createTestConfiger(path)
 
-    expect(await configer.get('workspace.path')).toBe(join(dir, 'codexio', '.codexio', 'workspace'))
+    expect(await configer.get('workspace.path')).toBe(join(dir, '.codexio', 'workspace'))
     expect(existsSync(await configer.get('workspace.path'))).toBe(false)
   })
 
@@ -1506,52 +1460,56 @@ describe('core', () => {
   })
 
   it('stores runtime server state under codexio runtime data directory', () => {
-    expect(runtimeServerStatePath(join('C:\\app', 'config.yaml'))).toBe(join(codexioRootPath, '.codexio', 'state', 'server.json'))
-    expect(supervisorStatePath(join('C:\\app', 'config.yaml'))).toBe(join(codexioRootPath, '.codexio', 'state', 'supervisor.json'))
+    expect(new CodexioMetadata({
+      rootPath: 'C:\\app',
+      configPath: join('C:\\app', '.codexio', 'config.yaml')
+    }).serverStatePath).toBe(join('C:\\app', '.codexio', 'state', 'server.json'))
   })
 
   it('updater waits for restarted server pid', () => {
     const script = createUpdaterScript()
+    expect(script).toContain('Assert-UpdatePath $manifestData.serviceCommand')
+    expect(script).toContain('Start-Process -FilePath $manifestData.serviceCommand -ArgumentList @("stop")')
+    expect(script).toContain('Start-Process -FilePath $manifestData.serviceCommand -ArgumentList @("start")')
     expect(script).toContain('$serverState = Get-Content -Raw -LiteralPath $manifestData.serverStatePath | ConvertFrom-Json')
     expect(script).toContain('$serverResponse.data.pid -eq $serverState.pid')
-    expect(script).not.toContain('$response.data.pid -eq $state.pid')
+    expect(script).not.toContain('supervisorStatePath')
+    expect(script).not.toContain('supervisorResponse')
   })
 
   it('updater preserves runtime data in place while updating release metadata', () => {
     const script = createUpdaterScript()
-    expect(script).toContain('function Copy-CodexioAppContent')
+    expect(script).toContain('function Replace-Current')
     expect(script).toContain('if ($item.Name -eq ".codexio")')
-    expect(script).toContain('Copy-UpdateItem -Source (Join-Path $item.FullName "release.json") -Destination (Join-Path $targetData "release.json")')
+    expect(script).toContain('$releaseTarget = Join-Path $manifestData.installRoot ".codexio\\release.json"')
+    expect(script).toContain('Copy-Item -Force -LiteralPath $releaseSource -Destination $releaseTarget')
     expect(script).not.toContain('preserved-codexio-data')
   })
 
-  it('updater removes only transient application data directories', () => {
+  it('updater works inside .codexio update root and never replaces .codexio wholesale', () => {
     const script = createUpdaterScript()
-    expect(script).toContain('function Remove-TransientAppData')
-    expect(script).toContain('foreach ($item in @("download", "update"))')
-    expect(script).toContain('Join-Path $manifestData.installRoot "codexio\\.codexio"')
+    expect(script).toContain('Set-Location -LiteralPath $manifestData.updateRoot')
+    expect(script).toContain('if ($item.Name -eq ".codexio")')
+    expect(script).not.toContain('Remove-Item -Recurse -Force -LiteralPath (Join-Path $manifestData.installRoot ".codexio")')
   })
 
   it('updater terminates install-root processes and retries directory removal', () => {
     const script = createUpdaterScript()
     expect(script).toContain('Set-Location -LiteralPath $manifestData.updateRoot')
     expect(script).toContain('function Stop-InstallRootProcess')
-    expect(script).toContain('function Copy-UpdateDirectoryContent')
+    expect(script).toContain('function Remove-UpdateItem')
     expect(script).toContain('$_.ExecutablePath.StartsWith($installRoot')
     expect(script).toContain('$_.CommandLine.Contains($installRoot)')
     expect(script).toContain('for ($attempt = 1; $attempt -le 10; $attempt++)')
     expect(script).toContain('Stop-InstallRootProcess')
   })
 
-  it('updater removes legacy root runtime state files after replacement', () => {
+  it('updater installs the Windows service package layout', () => {
     const script = createUpdaterScript()
-    expect(script).toContain('function Remove-LegacyRootState')
-    expect(script).toContain('function Remove-LegacyInstallDataRoot')
-    expect(script).toContain('Join-Path $manifestData.installRoot "server.json"')
-    expect(script).toContain('Join-Path $manifestData.installRoot "supervisor.json"')
-    expect(script).toContain('Join-Path $manifestData.installRoot ".codexio"')
-    expect(script).toContain('Remove-LegacyRootState')
-    expect(script).toContain('Remove-LegacyInstallDataRoot')
+    expect(script).toContain('"codexio-service.exe", "codexio-service.xml", "install.cmd", "uninstall.cmd", "start.cmd", "stop.cmd", "restart.cmd", "dist\\Server.js", ".codexio\\config.yaml", ".codexio\\release.json"')
+    expect(script).toContain('function Backup-Current')
+    expect(script).toContain('function Restore-Backup')
+    expect(script).not.toContain('Join-Path $manifestData.installRoot "supervisor.json"')
   })
 
   it('loads channel credentials from config', () => {
@@ -1606,6 +1564,68 @@ describe('core', () => {
   it('uses empty feishu ws by default', () => {
     const config = createDefaultConfig('C:\\repo')
     expect(config.channels.feishu?.ws).toBe('')
+  })
+
+  it('parses feishu text message content without bot mention keys', () => {
+    const parsed = parseFeishuMessageText('text', JSON.stringify({
+      text: '@_user_1 开始做'
+    }), [
+      {
+        key: '@_user_1'
+      }
+    ])
+    expect(parsed).toEqual({
+      success: true,
+      text: '开始做'
+    })
+  })
+
+  it('parses feishu post message content without bot mention keys', () => {
+    const parsed = parseFeishuMessageText('post', JSON.stringify({
+      zh_cn: {
+        content: [
+          [
+            {
+              tag: 'at',
+              user_id: 'ou_bot',
+              user_name: 'Codexio'
+            },
+            {
+              tag: 'text',
+              text: ' 用Vue + Express'
+            },
+            {
+              tag: 'text',
+              text: '，用SQLite'
+            }
+          ],
+          [
+            {
+              tag: 'text',
+              text: '开始做'
+            }
+          ]
+        ]
+      }
+    }), [
+      {
+        key: '@_user_1'
+      }
+    ])
+    expect(parsed).toEqual({
+      success: true,
+      text: '用Vue + Express，用SQLite\n开始做'
+    })
+  })
+
+  it('rejects unsupported feishu message content types', () => {
+    const parsed = parseFeishuMessageText('image', JSON.stringify({
+      image_key: 'img-test'
+    }))
+    expect(parsed).toEqual({
+      success: false,
+      reason: 'unsupported'
+    })
   })
 
   it('appends feishu thread messages through message reply', async () => {
@@ -2124,27 +2144,42 @@ function createCodexAgent(input: {
       return value
     }
   } as unknown as Configer
-  return new CodexAgent(configer, testMetadata, {
-    send: async (message) => {
+  class TestCodexAgent extends CodexAgent {
+    protected override async createAppServer(): Promise<CodexAppServerTestHandle> {
+      return input.appServer
+    }
+  }
+  return new TestCodexAgent(configer, testMetadata, {
+    send: async (message: Message) => {
       await input.send?.(message)
-      return Result.success(null)
-    },
-    status: async () => Result.success(null)
-  }, {
-    create: async () => input.appServer
-  } as CodexAppServerFactory)
+    }
+  } as AgentMessageClient)
 }
 
 async function createAgentManager(
   config: CodexioConfig,
-  callbacks: ConstructorParameters<typeof AgentManager>[1],
+  outputManager: ChannelOutputManager,
   agent: Agent
 ): Promise<AgentManager> {
   const dir = await mkdtemp(join(tmpdir(), 'codexio-agent-manager-'))
   const configer = createTestConfiger(join(dir, 'config.yaml'))
   await configer.init(true)
-  await configer.replace(config)
-  return new AgentManager(configer, callbacks, agent, agent)
+  await configer.patch(config)
+  return new AgentManager(configer, outputManager, agent, agent)
+}
+
+function createOutputManager(input: {
+  sendSystem?: (text: string, source?: string, ioThreadId?: string) => Promise<Result<null>>
+  sendUser?: (message: Message) => Promise<Result<null>>
+  sendAgent?: (message: Message) => Promise<Result<null>>
+  clear?: (ioThreadId: string, source?: string) => Promise<Result<null>>
+} = {}): ChannelOutputManager {
+  return {
+    sendSystem: input.sendSystem ?? (async () => Result.success(null)),
+    sendUser: input.sendUser ?? (async () => Result.success(null)),
+    sendAgent: input.sendAgent ?? (async () => Result.success(null)),
+    clear: input.clear ?? (async () => Result.success(null))
+  } as ChannelOutputManager
 }
 
 function createTestConfiger(configPath: string): Configer {

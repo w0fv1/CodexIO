@@ -2,6 +2,7 @@ server:
   host: 127.0.0.1
   port: 8787
   token: ''
+  autoPort: false
 proxy:
   enabled: false
   host: 127.0.0.1
@@ -15,8 +16,6 @@ agents:
 channels:
   web:
     enabled: true
-    host: 127.0.0.1
-    port: 8788
   feishu:
     enabled: false
     appId: ''
@@ -47,7 +46,7 @@ channels:
     idle: true
     pollSeconds: 30
 workspace:
-  path: codexio/.codexio/workspace
+  path: workspace
 update:
   enabled: true
   baseUrl: https://next.firco.cn

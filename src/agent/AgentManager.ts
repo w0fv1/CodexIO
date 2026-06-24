@@ -1,7 +1,5 @@
 import { mkdir } from 'node:fs/promises'
 import { inject, injectable } from 'inversify'
-import { AgentManagerCallbacksId } from '../ComponentIdentifier.js'
-import { CodexioConfig } from '../value/ConfigDefinition.js'
 import { Result } from '../value/Result.js'
 import { AgentLoginInProgressError, CodexAgent } from './CodexAgent.js'
 import { Agent } from './Agent.js'
@@ -9,6 +7,7 @@ import { Logger } from '../component/Logger.js'
 import { allIoThreadId, Message } from '../value/Message.js'
 import { ClaudeAgent } from './ClaudeAgent.js'
 import { Configer } from '../component/Configer.js'
+import { ChannelOutputManager } from '../channel/ChannelOutputManager.js'
 
 const receiveConfirmationStarts = [
   '收到',
@@ -48,11 +47,6 @@ export type AgentManagerState = {
   message: string
 }
 
-export type AgentManagerCallbacks = {
-  send: (message: Message) => Promise<Result<null>>
-  status: (text: string) => Promise<Result<null>>
-}
-
 export type AgentReceiveResult = {
   action?: 'clear'
 }
@@ -70,7 +64,7 @@ export class AgentManager {
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
-    @inject(AgentManagerCallbacksId) private readonly callbacks: AgentManagerCallbacks,
+    @inject(ChannelOutputManager) private readonly outputManager: ChannelOutputManager,
     @inject(CodexAgent) private readonly codexAgent: Agent,
     @inject(ClaudeAgent) private readonly claudeAgent: Agent
   ) {
@@ -82,12 +76,7 @@ export class AgentManager {
     ], async () => {
       const applied = await this.applyConfig()
       if (applied.isFailed) {
-        await this.callbacks.send({
-          ioThreadId: allIoThreadId,
-          role: 'system',
-          text: `Agent 配置应用失败：${applied.message}`,
-          createdAt: Date.now()
-        })
+        await this.outputManager.sendSystem(`Agent 配置应用失败：${applied.message}`, 'agent', allIoThreadId)
       }
     })
   }
@@ -189,12 +178,7 @@ export class AgentManager {
     if (!this.agent) {
       return Result.fail<AgentReceiveResult>('agent not started')
     }
-    const received = await this.callbacks.send({
-      ioThreadId: input.ioThreadId,
-      role: 'system',
-      text: createReceiveConfirmation(),
-      createdAt: Date.now()
-    })
+    const received = await this.outputManager.sendSystem(createReceiveConfirmation(), 'agent', input.ioThreadId)
     if (received.isFailed) {
       return Result.fail<AgentReceiveResult>(received.message)
     }
@@ -289,24 +273,17 @@ export class AgentManager {
   }
 
   private async createAgent(): Promise<Agent> {
-    const agents = await this.configer.get('agents')
-    const enabledAgents = Object.entries(agents)
-      .filter(([, agentConfig]) => agentConfig.enabled)
-      .map(([agentName]) => agentName as keyof CodexioConfig['agents'])
+    const enabledAgents = [
+      await this.configer.get('agents.codex.enabled') ? this.codexAgent : undefined,
+      await this.configer.get('agents.claude.enabled') ? this.claudeAgent : undefined
+    ].filter((agent): agent is Agent => Boolean(agent))
     if (enabledAgents.length === 0) {
       throw new Error('agent not found')
     }
     if (enabledAgents.length > 1) {
       throw new Error('only one agent can be enabled')
     }
-    const agentName = enabledAgents[0]
-    if (agentName === 'codex') {
-      return this.codexAgent
-    }
-    if (agentName === 'claude') {
-      return this.claudeAgent
-    }
-    throw new Error(`agent not supported: ${agentName}`)
+    return enabledAgents[0]
   }
 
   private async prepareWorkspace(): Promise<void> {
@@ -318,7 +295,6 @@ export class AgentManager {
   private async setState(state: AgentManagerState): Promise<void> {
     this.state = state
     Logger.info('agent state changed', state)
-    await this.callbacks.status(state.message)
   }
 
   private threadQueue(ioThreadId: string): Promise<void> {

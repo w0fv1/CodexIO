@@ -14,6 +14,7 @@ export class CodexioMetadata {
   readonly rootPath: string
   readonly codexHomePath: string
   readonly configPath: string
+  readonly serverStatePath: string
 
   constructor(options: CodexioMetadataOptions = {}) {
     this.rootPath = options.rootPath ?? (() => {
@@ -28,6 +29,7 @@ export class CodexioMetadata {
     })()
     this.codexHomePath = join(this.rootPath, '.codexio', 'codex')
     this.configPath = resolve(options.configPath ?? join(this.rootPath, '.codexio', 'config.yaml'))
+    this.serverStatePath = join(dirname(this.configPath), 'state', 'server.json')
   }
 
   readVersion(): string {

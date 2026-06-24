@@ -1,7 +1,7 @@
 import { inject, injectable } from 'inversify'
 import { CodexioConfig } from '../value/ConfigDefinition.js'
 import { Message } from '../value/Message.js'
-import { Channel } from './Channel.js'
+import { ChannelOutput } from './Channel.js'
 import { Result } from '../value/Result.js'
 import { Logger } from '../component/Logger.js'
 import { Configer } from '../component/Configer.js'
@@ -9,18 +9,22 @@ import { Configer } from '../component/Configer.js'
 type FeishuWebhookChannelConfig = CodexioConfig['channels']['feishuWebhook']
 
 @injectable()
-export class FeishuWebhookChannel implements Channel {
+export class FeishuWebhookChannelOutput implements ChannelOutput {
   readonly type = 'feishuWebhook'
   private config?: FeishuWebhookChannelConfig
 
   constructor(@inject(Configer) private readonly configer: Configer) {}
 
-  async start(): Promise<void> {
+  async start(): Promise<boolean> {
     this.config = await this.configer.get('channels.feishuWebhook')
+    if (!this.config?.enabled) {
+      return false
+    }
     if (!this.config?.url || this.config.url.trim().length === 0) {
       throw new Error('feishu webhook url is required')
     }
     Logger.info('feishu webhook channel ready')
+    return true
   }
 
   async send(message: Message): Promise<Result<null>> {

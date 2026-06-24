@@ -18,6 +18,7 @@ $StandaloneRoot = Join-Path $BuildRoot "standalone\codexio"
 $PnpmRoot = Join-Path $BuildRoot "pnpm\codexio"
 $NodeRuntimeVersion = "22.20.0"
 $PnpmRuntimeVersion = "10.33.4"
+$WinSWVersion = "2.12.0"
 
 function Write-Step {
     param([Parameter(Mandatory)] [string] $Text)
@@ -115,6 +116,33 @@ function Invoke-CheckedCommand {
     finally {
         Pop-Location
     }
+}
+
+function Resolve-WinSW {
+    $winswRoot = Join-Path $BuildRoot "winsw"
+    $winswPath = Join-Path $winswRoot "WinSW-x64.exe"
+    if (Test-Path -Path $winswPath) {
+        return $winswPath
+    }
+    New-Item -ItemType Directory -Force -Path $winswRoot | Out-Null
+    $url = "https://github.com/winsw/winsw/releases/download/v$WinSWVersion/WinSW-x64.exe"
+    Write-Step "download WinSW: $url"
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $url -OutFile $winswPath -UseBasicParsing -TimeoutSec 300
+    }
+    catch {
+        if (Test-Path -Path $winswPath) {
+            Remove-Item -Force $winswPath
+        }
+        $curl = Get-Command curl.exe -ErrorAction Stop
+        & $curl.Source --location --fail --retry 3 --output $winswPath $url
+        if ($LASTEXITCODE -ne 0) {
+            throw "WinSW download failed with curl exit code $LASTEXITCODE"
+        }
+    }
+    Assert-PathExists $winswPath
+    return $winswPath
 }
 
 function New-HttpCommandOptions {
@@ -221,13 +249,57 @@ echo [codexio] working directory: %CD%
 $Command
 if errorlevel 1 goto failed
 echo [codexio] done
-goto end
+exit /b 0
 :failed
 echo [codexio] command failed
-:end
-pause
+exit /b 1
 "@
     Write-Utf8File -Path $Path -Text $text.Replace("`n", "`r`n")
+}
+
+function New-ServiceXml {
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [Parameter(Mandatory)] [string] $Executable,
+        [Parameter(Mandatory)] [string] $Arguments
+    )
+    $escapedExecutable = [System.Security.SecurityElement]::Escape($Executable)
+    $escapedArguments = [System.Security.SecurityElement]::Escape($Arguments)
+    $text = @"
+<service>
+  <id>codexio</id>
+  <name>Codexio</name>
+  <description>Codexio coding agent bridge</description>
+  <executable>$escapedExecutable</executable>
+  <arguments>$escapedArguments</arguments>
+  <workingdirectory>%BASE%</workingdirectory>
+  <startmode>Automatic</startmode>
+  <onfailure action="restart" delay="10 sec"/>
+  <resetfailure>1 hour</resetfailure>
+  <logpath>%BASE%\.codexio\log\winsw</logpath>
+  <log mode="roll-by-size-time">
+    <sizeThreshold>10485760</sizeThreshold>
+    <pattern>yyyyMMdd</pattern>
+    <keepFiles>30</keepFiles>
+  </log>
+</service>
+"@
+    Write-Utf8File -Path $Path -Text $text.Replace("`n", "`r`n")
+}
+
+function Copy-ServiceWrapper {
+    param([Parameter(Mandatory)] [string] $DestinationRoot)
+    $winswPath = Resolve-WinSW
+    Copy-Item -Force $winswPath (Join-Path $DestinationRoot "codexio-service.exe")
+}
+
+function New-ServiceCommandFiles {
+    param([Parameter(Mandatory)] [string] $DestinationRoot)
+    New-CommandFile -Path (Join-Path $DestinationRoot "install.cmd") -Command "codexio-service.exe install" -Title "install Codexio Windows service"
+    New-CommandFile -Path (Join-Path $DestinationRoot "uninstall.cmd") -Command "codexio-service.exe uninstall" -Title "uninstall Codexio Windows service"
+    New-CommandFile -Path (Join-Path $DestinationRoot "start.cmd") -Command "codexio-service.exe start" -Title "start Codexio Windows service"
+    New-CommandFile -Path (Join-Path $DestinationRoot "stop.cmd") -Command "codexio-service.exe stop" -Title "stop Codexio Windows service"
+    New-CommandFile -Path (Join-Path $DestinationRoot "restart.cmd") -Command "codexio-service.exe restart" -Title "restart Codexio Windows service"
 }
 
 function New-PnpmNodewFile {
@@ -458,13 +530,12 @@ exit `$LASTEXITCODE
 function New-PnpmCommandFile {
     param(
         [Parameter(Mandatory)] [string] $Path,
-        [Parameter(Mandatory)] [string] $Action,
-        [Parameter(Mandatory)] [string] $Command
+        [Parameter(Mandatory)] [string] $Action
     )
     $text = @"
 @echo off
 setlocal
-set "CODEXIO_LOG_DIR=%~dp0codexio\.codexio\log"
+set "CODEXIO_LOG_DIR=%~dp0.codexio\log"
 if not exist "%CODEXIO_LOG_DIR%" mkdir "%CODEXIO_LOG_DIR%"
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd-HHmmss"') do set "CODEXIO_COMMAND_LOG=%CODEXIO_LOG_DIR%\command-$Action-%%i.log"
 call :log "[codexio] $Action Codexio"
@@ -472,20 +543,20 @@ cd /d %~dp0
 call :log "[codexio] working directory: %CD%"
 call :log "[codexio] command log: %CODEXIO_COMMAND_LOG%"
 call :log "[codexio] checking production dependencies"
-if not exist codexio\node_modules\@openai\codex\bin\codex.js goto install
-if not exist codexio\node_modules\@openai\codex-win32-x64\package.json goto install
-if not exist codexio\node_modules\@anthropic-ai\claude-code\cli-wrapper.cjs goto install
-if not exist codexio\node_modules\@anthropic-ai\claude-code-win32-x64\package.json goto install
+if not exist node_modules\@openai\codex\bin\codex.js goto install
+if not exist node_modules\@openai\codex-win32-x64\package.json goto install
+if not exist node_modules\@anthropic-ai\claude-code\cli-wrapper.cjs goto install
+if not exist node_modules\@anthropic-ai\claude-code-win32-x64\package.json goto install
 call :log "[codexio] dependencies are ready"
 goto start
 :install
 call :log "[codexio] dependencies are missing, installing production dependencies"
-call "%~dp0codexio\nodew.cmd" pnpm install --prod --dir "%~dp0codexio" --config.node-linker=hoisted
+call "%~dp0nodew.cmd" pnpm install --prod --dir "%~dp0" --config.node-linker=hoisted
 if errorlevel 1 goto failed
 call :log "[codexio] dependencies installed"
 :start
-call :log "[codexio] running $Action"
-call "%~dp0codexio\nodew.cmd" codexio\dist\index.js $Command --config "%~dp0config.yaml"
+call :log "[codexio] running service $Action"
+codexio-service.exe $Action
 if errorlevel 1 goto failed
 call :log "[codexio] $Action done"
 exit /b 0
@@ -521,45 +592,51 @@ function Copy-RuntimeFiles {
 
 function Copy-PackageConfig {
     param([Parameter(Mandatory)] [string] $DestinationRoot)
-    Copy-Item -Force (Join-Path $ProjectRoot "config.example.yaml") (Join-Path $DestinationRoot "config.yaml")
+    New-Item -ItemType Directory -Force -Path (Join-Path $DestinationRoot ".codexio") | Out-Null
+    Copy-Item -Force (Join-Path $ProjectRoot "config.example.yaml") (Join-Path $DestinationRoot ".codexio\config.yaml")
 }
 
 function New-StandalonePackage {
     param([Parameter(Mandatory)] [string] $NodeRoot)
     New-Item -ItemType Directory -Force -Path $StandaloneRoot | Out-Null
-    $appRoot = Join-Path $StandaloneRoot "codexio"
-    New-Item -ItemType Directory -Force -Path $appRoot | Out-Null
     Copy-PackageConfig -DestinationRoot $StandaloneRoot
-    Copy-RuntimeFiles -DestinationRoot $appRoot -Platform "windows-x64-standalone"
+    Copy-RuntimeFiles -DestinationRoot $StandaloneRoot -Platform "windows-x64-standalone"
+    Copy-ServiceWrapper -DestinationRoot $StandaloneRoot
+    New-ServiceXml -Path (Join-Path $StandaloneRoot "codexio-service.xml") -Executable "%BASE%\runtime\node\node.exe" -Arguments """%BASE%\dist\Server.js"" --config ""%BASE%\.codexio\config.yaml"""
+    New-ServiceCommandFiles -DestinationRoot $StandaloneRoot
     Write-Step "copy bundled Node.js runtime"
-    New-Item -ItemType Directory -Force -Path (Join-Path $appRoot "runtime") | Out-Null
-    Copy-Item -Recurse -Force $NodeRoot (Join-Path $appRoot "runtime\node")
+    New-Item -ItemType Directory -Force -Path (Join-Path $StandaloneRoot "runtime") | Out-Null
+    Copy-Item -Recurse -Force $NodeRoot (Join-Path $StandaloneRoot "runtime\node")
     Write-Step "copy production dependencies"
-    Copy-Item -Recurse -Force (Join-Path $InstallRoot "node_modules") $appRoot
-    New-CommandFile -Path (Join-Path $StandaloneRoot "start.cmd") -Command "codexio\runtime\node\node.exe codexio\dist\index.js start --config ""%~dp0config.yaml""" -Title "start Codexio with bundled Node.js"
-    New-CommandFile -Path (Join-Path $StandaloneRoot "restart.cmd") -Command "codexio\runtime\node\node.exe codexio\dist\index.js restart --config ""%~dp0config.yaml""" -Title "restart Codexio with bundled Node.js"
-    New-CommandFile -Path (Join-Path $StandaloneRoot "update.cmd") -Command "codexio\runtime\node\node.exe codexio\dist\index.js update --config ""%~dp0config.yaml""" -Title "update Codexio with bundled Node.js"
-    Assert-PathExists (Join-Path $appRoot "runtime\node\node.exe")
-    Assert-PathExists (Join-Path $appRoot "node_modules\@openai\codex-win32-x64\package.json")
-    Assert-PathExists (Join-Path $appRoot "node_modules\@anthropic-ai\claude-code-win32-x64\package.json")
+    Copy-Item -Recurse -Force (Join-Path $InstallRoot "node_modules") $StandaloneRoot
+    Assert-PathExists (Join-Path $StandaloneRoot "codexio-service.exe")
+    Assert-PathExists (Join-Path $StandaloneRoot "codexio-service.xml")
+    Assert-PathExists (Join-Path $StandaloneRoot "runtime\node\node.exe")
+    Assert-PathExists (Join-Path $StandaloneRoot "node_modules\@openai\codex-win32-x64\package.json")
+    Assert-PathExists (Join-Path $StandaloneRoot "node_modules\@anthropic-ai\claude-code-win32-x64\package.json")
 }
 
 function New-PnpmPackage {
     param([Parameter(Mandatory)] [string] $PnpmRuntimeRoot)
     New-Item -ItemType Directory -Force -Path $PnpmRoot | Out-Null
-    $appRoot = Join-Path $PnpmRoot "codexio"
-    New-Item -ItemType Directory -Force -Path $appRoot | Out-Null
     Copy-PackageConfig -DestinationRoot $PnpmRoot
-    Copy-RuntimeFiles -DestinationRoot $appRoot -Platform "windows-x64-pnpm"
+    Copy-RuntimeFiles -DestinationRoot $PnpmRoot -Platform "windows-x64-pnpm"
+    Copy-ServiceWrapper -DestinationRoot $PnpmRoot
+    New-ServiceXml -Path (Join-Path $PnpmRoot "codexio-service.xml") -Executable "cmd.exe" -Arguments "/c """"%BASE%\nodew.cmd"" ""%BASE%\dist\Server.js"" --config ""%BASE%\.codexio\config.yaml"""""
     Write-Step "copy bundled pnpm runtime"
-    New-Item -ItemType Directory -Force -Path (Join-Path $appRoot "runtime") | Out-Null
-    Copy-Item -Recurse -Force $PnpmRuntimeRoot (Join-Path $appRoot "runtime\pnpm")
-    Assert-PathExists (Join-Path $appRoot "runtime\pnpm\bin\pnpm.cjs")
+    New-Item -ItemType Directory -Force -Path (Join-Path $PnpmRoot "runtime") | Out-Null
+    Copy-Item -Recurse -Force $PnpmRuntimeRoot (Join-Path $PnpmRoot "runtime\pnpm")
+    Assert-PathExists (Join-Path $PnpmRoot "runtime\pnpm\bin\pnpm.cjs")
     Write-Step "write pnpm package bootstrap scripts"
-    New-PnpmNodewFile -CmdPath (Join-Path $appRoot "nodew.cmd")
-    New-PnpmCommandFile -Path (Join-Path $PnpmRoot "start.cmd") -Action "start" -Command "start"
-    New-PnpmCommandFile -Path (Join-Path $PnpmRoot "restart.cmd") -Action "restart" -Command "restart"
-    New-PnpmCommandFile -Path (Join-Path $PnpmRoot "update.cmd") -Action "update" -Command "update"
+    New-PnpmNodewFile -CmdPath (Join-Path $PnpmRoot "nodew.cmd")
+    New-PnpmCommandFile -Path (Join-Path $PnpmRoot "install.cmd") -Action "install"
+    New-CommandFile -Path (Join-Path $PnpmRoot "uninstall.cmd") -Command "codexio-service.exe uninstall" -Title "uninstall Codexio Windows service"
+    New-CommandFile -Path (Join-Path $PnpmRoot "start.cmd") -Command "codexio-service.exe start" -Title "start Codexio Windows service"
+    New-CommandFile -Path (Join-Path $PnpmRoot "stop.cmd") -Command "codexio-service.exe stop" -Title "stop Codexio Windows service"
+    New-CommandFile -Path (Join-Path $PnpmRoot "restart.cmd") -Command "codexio-service.exe restart" -Title "restart Codexio Windows service"
+    Assert-PathExists (Join-Path $PnpmRoot "codexio-service.exe")
+    Assert-PathExists (Join-Path $PnpmRoot "codexio-service.xml")
+    Assert-PathExists (Join-Path $PnpmRoot "nodew.cmd")
 }
 
 function Compress-Package {
@@ -716,16 +793,20 @@ try {
     if ($buildPnpm) {
         $durations["compress windows-x64-pnpm"] = Measure-Step -Name "compress pnpm package" -Action {
             Compress-Package -SourceRoot $PnpmRoot -ArchivePath $pnpmArchive -CompressionLevel ([System.IO.Compression.CompressionLevel]::NoCompression) -Entries @(
+                "codexio/codexio-service.exe",
+                "codexio/codexio-service.xml",
+                "codexio/install.cmd",
+                "codexio/uninstall.cmd",
                 "codexio/start.cmd",
+                "codexio/stop.cmd",
                 "codexio/restart.cmd",
-                "codexio/update.cmd",
-                "codexio/config.yaml",
-                "codexio/codexio/dist/index.js",
-                "codexio/codexio/package.json",
-                "codexio/codexio/pnpm-lock.yaml",
-                "codexio/codexio/nodew.cmd",
-                "codexio/codexio/runtime/pnpm/bin/pnpm.cjs",
-                "codexio/codexio/.codexio/release.json"
+                "codexio/.codexio/config.yaml",
+                "codexio/.codexio/release.json",
+                "codexio/dist/Server.js",
+                "codexio/package.json",
+                "codexio/pnpm-lock.yaml",
+                "codexio/nodew.cmd",
+                "codexio/runtime/pnpm/bin/pnpm.cjs"
             )
         }
         if (-not $BuildOnly) {
@@ -741,17 +822,21 @@ try {
     if ($buildStandalone) {
         $durations["compress windows-x64-standalone"] = Measure-Step -Name "compress standalone package" -Action {
             Compress-Package -SourceRoot $StandaloneRoot -ArchivePath $standaloneArchive -CompressionLevel ([System.IO.Compression.CompressionLevel]::Optimal) -Entries @(
+                "codexio/codexio-service.exe",
+                "codexio/codexio-service.xml",
+                "codexio/install.cmd",
+                "codexio/uninstall.cmd",
                 "codexio/start.cmd",
+                "codexio/stop.cmd",
                 "codexio/restart.cmd",
-                "codexio/update.cmd",
-                "codexio/config.yaml",
-                "codexio/codexio/runtime/node/node.exe",
-                "codexio/codexio/dist/index.js",
-                "codexio/codexio/node_modules/@openai/codex/bin/codex.js",
-                "codexio/codexio/node_modules/@openai/codex-win32-x64/package.json",
-                "codexio/codexio/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs",
-                "codexio/codexio/node_modules/@anthropic-ai/claude-code-win32-x64/package.json",
-                "codexio/codexio/.codexio/release.json"
+                "codexio/.codexio/config.yaml",
+                "codexio/.codexio/release.json",
+                "codexio/runtime/node/node.exe",
+                "codexio/dist/Server.js",
+                "codexio/node_modules/@openai/codex/bin/codex.js",
+                "codexio/node_modules/@openai/codex-win32-x64/package.json",
+                "codexio/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs",
+                "codexio/node_modules/@anthropic-ai/claude-code-win32-x64/package.json"
             )
         }
         if (-not $BuildOnly) {

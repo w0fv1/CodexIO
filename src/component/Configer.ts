@@ -5,8 +5,6 @@ import { CodexioMetadata } from './CodexioMetadata.js'
 import { YamlFile } from './YamlFile.js'
 
 export type ConfigChange = {
-  previous: CodexioConfig
-  current: CodexioConfig
   paths: string[]
 }
 
@@ -24,7 +22,7 @@ export type ConfigSubscription = {
 }
 
 type ConfigObject = Record<string, unknown>
-type ConfigPatch<T> = {
+export type ConfigPatch<T> = {
   [K in keyof T]?: T[K] extends ConfigObject ? ConfigPatch<T[K]> : T[K]
 }
 type ConfigPath<T> = {
@@ -95,12 +93,6 @@ export class Configer {
     return config
   }
 
-  async replace(next: CodexioConfig): Promise<ConfigChange> {
-    const previous = await this.load()
-    const current = ConfigSchema.parse(next)
-    return this.saveChange(previous, current)
-  }
-
   async exportText(): Promise<string> {
     return YamlFile.stringify(await this.load())
   }
@@ -146,12 +138,10 @@ export class Configer {
     const paths = diffConfigPaths(previous, current)
     await this.write(current)
     const change = {
-      previous,
-      current,
       paths
     }
     if (paths.length > 0) {
-      await this.notify(change)
+      await this.notify(previous, current, change)
     }
     return change
   }
@@ -169,14 +159,14 @@ export class Configer {
     await YamlFile.write(this.path, ConfigSchema.parse(config))
   }
 
-  private async notify(change: ConfigChange): Promise<void> {
+  private async notify(previous: CodexioConfig, current: CodexioConfig, change: ConfigChange): Promise<void> {
     for (const entry of this.listeners) {
       if ('path' in entry) {
         if (!configPathChanged(change.paths, entry.path)) {
           continue
         }
-        const previousValue = getConfigPathValue(change.previous, entry.path)
-        const currentValue = getConfigPathValue(change.current, entry.path)
+        const previousValue = getConfigPathValue(previous, entry.path)
+        const currentValue = getConfigPathValue(current, entry.path)
         if (deepEqual(previousValue, currentValue)) {
           continue
         }

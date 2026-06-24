@@ -5,9 +5,8 @@ import { Agent } from './Agent.js'
 import { createProcessEnv } from '../util/ProcessEnvironment.js'
 import { Logger } from '../component/Logger.js'
 import { Message } from '../value/Message.js'
-import { AgentManagerCallbacksId } from '../ComponentIdentifier.js'
-import type { AgentManagerCallbacks } from './AgentManager.js'
 import { Configer } from '../component/Configer.js'
+import { AgentMessageClient } from './AgentMessageClient.js'
 
 const require = createRequire(import.meta.url)
 const claudeEntryPath = require.resolve('@anthropic-ai/claude-code/cli-wrapper.cjs')
@@ -25,7 +24,7 @@ export class ClaudeAgent implements Agent {
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
-    @inject(AgentManagerCallbacksId) private readonly callbacks: AgentManagerCallbacks
+    @inject(AgentMessageClient) private readonly messageClient: AgentMessageClient
   ) {}
 
   async login(): Promise<void> {
@@ -164,10 +163,7 @@ export class ClaudeAgent implements Agent {
   }
 
   private async send(message: Message): Promise<void> {
-    const result = await this.callbacks.send(message)
-    if (result.isFailed) {
-      throw new Error(result.message)
-    }
+    await this.messageClient.send(message)
   }
 
 }

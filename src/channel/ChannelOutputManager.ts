@@ -1,36 +1,36 @@
 import { inject, injectable } from 'inversify'
 import { Result } from '../value/Result.js'
 import { allIoThreadId, Message, MessageFile } from '../value/Message.js'
-import { Channel } from './Channel.js'
+import { ChannelOutput } from './Channel.js'
 import { Logger } from '../component/Logger.js'
 import { FileStore } from '../component/FileStore.js'
 import { Configer } from '../component/Configer.js'
-import { EmailChannel } from './EmailChannel.js'
-import { FeishuChannel } from './FeishuChannel.js'
-import { FeishuWebhookChannel } from './FeishuWebhookChannel.js'
-import { WebChannel } from './WebChannel.js'
+import { EmailChannelOutput } from './EmailChannel.js'
+import { FeishuChannelOutput } from './FeishuChannel.js'
+import { FeishuWebhookChannelOutput } from './FeishuWebhookChannel.js'
+import { WebChannelOutput } from './WebChannel.js'
 
 const markdownImagePattern = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g
 const localImagePathPattern = /(?:[A-Za-z]:[\\/][^\r\n"'<>|?*]+?\.(?:png|jpe?g|webp|gif)|\/[^\r\n"'<>]+?\.(?:png|jpe?g|webp|gif))/gi
 
 @injectable()
-export class ChannelManager {
-  private readonly availableChannels: Channel[]
-  private readonly channels = new Map<string, Channel>()
+export class ChannelOutputManager {
+  private readonly availableOutputs: ChannelOutput[]
+  private readonly outputs = new Map<string, ChannelOutput>()
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
     @inject(FileStore) private readonly fileStore: FileStore,
-    @inject(WebChannel) private readonly web: WebChannel,
-    @inject(FeishuChannel) private readonly feishu: FeishuChannel,
-    @inject(FeishuWebhookChannel) private readonly feishuWebhook: FeishuWebhookChannel,
-    @inject(EmailChannel) private readonly email: EmailChannel
+    @inject(WebChannelOutput) web: WebChannelOutput,
+    @inject(FeishuChannelOutput) feishu: FeishuChannelOutput,
+    @inject(FeishuWebhookChannelOutput) feishuWebhook: FeishuWebhookChannelOutput,
+    @inject(EmailChannelOutput) email: EmailChannelOutput
   ) {
-    this.availableChannels = [
-      this.web,
-      this.feishu,
-      this.feishuWebhook,
-      this.email
+    this.availableOutputs = [
+      web,
+      feishu,
+      feishuWebhook,
+      email
     ]
   }
 
@@ -38,22 +38,13 @@ export class ChannelManager {
     this.configer.subscribe('channels', async () => {
       const applied = await this.applyConfig()
       if (applied.isFailed) {
-        await this.sendSystem(`通道配置应用失败：${applied.message}`)
+        await this.sendSystem(`通道输出配置应用失败：${applied.message}`)
       }
     })
-    const channels = await this.configer.get('channels')
-    for (const channel of this.availableChannels) {
-      const channelConfig = channels[channel.type]
-      if (channelConfig?.enabled) {
-        this.channels.set(channel.type, channel)
-      }
-    }
-    for (const channel of this.channels.values()) {
-      await channel.start()
-    }
+    await this.applyConfig()
   }
 
-  async displayUser(message: Message): Promise<Result<null>> {
+  async sendUser(message: Message): Promise<Result<null>> {
     if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
       return Result.fail('text or file is required')
     }
@@ -63,28 +54,24 @@ export class ChannelManager {
       text: message.text,
       files: message.files?.length ?? 0
     })
-    return this.display({
+    return this.send({
       ...message,
       role: 'user'
     })
   }
 
-  async send(message: Message): Promise<Result<null>> {
-    if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
-      return Result.fail('text or file is required')
-    }
-    return this.display(message)
-  }
-
-  async status(_text: string): Promise<Result<null>> {
-    return Result.success(null)
+  async sendAgent(message: Message): Promise<Result<null>> {
+    return this.send({
+      ...message,
+      role: 'agent'
+    })
   }
 
   async sendSystem(text: string, source = 'unknown', ioThreadId?: string): Promise<Result<null>> {
     if (text.trim().length === 0) {
       return Result.fail('text is required')
     }
-    return this.display({
+    return this.send({
       ioThreadId: ioThreadId ?? allIoThreadId,
       role: 'system',
       text,
@@ -105,8 +92,8 @@ export class ChannelManager {
 
   async stop(): Promise<Result<null>> {
     const failures: string[] = []
-    for (const channel of this.channels.values()) {
-      const result = await channel.stop()
+    for (const output of this.outputs.values()) {
+      const result = await output.stop()
       if (result.isFailed) {
         failures.push(result.message)
       }
@@ -118,40 +105,34 @@ export class ChannelManager {
   }
 
   async applyConfig(): Promise<Result<null>> {
-    const channels = await this.configer.get('channels')
     const failures: string[] = []
-    for (const channel of [...this.channels.values()].filter((channel) => channel.type !== 'web')) {
-      if (this.channels.has(channel.type)) {
-        const result = await channel.stop()
-        if (result.isFailed) {
-          failures.push(`${channel.type}: ${result.message}`)
-        }
-        this.channels.delete(channel.type)
+    for (const output of this.outputs.values()) {
+      const result = await output.stop()
+      if (result.isFailed) {
+        failures.push(`${output.type}: ${result.message}`)
       }
     }
-    for (const channel of this.availableChannels.filter((channel) => channel.type !== 'web')) {
-      const channelConfig = channels[channel.type]
-      if (!channelConfig?.enabled) {
-        continue
-      }
-      this.channels.set(channel.type, channel)
+    this.outputs.clear()
+    for (const output of this.availableOutputs) {
       try {
-        await channel.start()
+        if (await output.start()) {
+          this.outputs.set(output.type, output)
+        }
       } catch (error) {
         const failed = Result.fromError(error)
-        failures.push(`${channel.type}: ${failed.message}`)
+        failures.push(`${output.type}: ${failed.message}`)
       }
     }
     if (failures.length > 0) {
       return Result.fail(failures.join('\n'))
     }
-    Logger.info('channel config applied')
+    Logger.info('channel output config applied')
     return Result.success(null)
   }
 
-  private async display(message: Message): Promise<Result<null>> {
-    if (this.channels.size === 0) {
-      return Result.fail('channel not found')
+  private async send(message: Message): Promise<Result<null>> {
+    if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
+      return Result.fail('text or file is required')
     }
     const files = new Map<string, MessageFile>()
     for (const file of message.files ?? []) {
@@ -230,27 +211,29 @@ export class ChannelManager {
   }
 
   private async broadcast(message: Message): Promise<Result<null>> {
+    if (this.outputs.size === 0) {
+      return Result.fail('channel output not found')
+    }
     const failures: string[] = []
-    for (const channel of this.channels.values()) {
+    for (const output of this.outputs.values()) {
       try {
-        const result = await channel.send(message)
+        const result = await output.send(message)
         if (result.isFailed) {
-          failures.push(`${channel.type}: ${result.message}`)
+          failures.push(`${output.type}: ${result.message}`)
         }
       } catch (error) {
         const failed = Result.fromError(error)
-        failures.push(`${channel.type}: ${failed.message}`)
+        failures.push(`${output.type}: ${failed.message}`)
       }
     }
-    if (failures.length === this.channels.size) {
+    if (failures.length === this.outputs.size) {
       return Result.fail(failures.join('\n'))
     }
     if (failures.length > 0) {
-      Logger.warn('channel send partially failed', {
+      Logger.warn('channel output partially failed', {
         failures
       })
     }
     return Result.success(null)
   }
-
 }

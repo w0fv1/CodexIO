@@ -4,18 +4,16 @@ import nodemailer, { Transporter } from 'nodemailer'
 import { inject, injectable } from 'inversify'
 import { CodexioConfig } from '../value/ConfigDefinition.js'
 import { Message } from '../value/Message.js'
-import { Channel, ChannelReceiveResult } from './Channel.js'
 import { Result } from '../value/Result.js'
 import { Logger } from '../component/Logger.js'
 import { ThreadBinder } from '../value/ThreadBinder.js'
-import { ChannelReceiveId } from '../ComponentIdentifier.js'
 import { Configer } from '../component/Configer.js'
+import { ChannelInput, ChannelInputReceive, ChannelOutput } from './Channel.js'
 
 type EmailChannelConfig = CodexioConfig['channels']['email']
 
 @injectable()
-export class EmailChannel implements Channel {
-  readonly type = 'email'
+export class EmailChannelHub {
   private config?: EmailChannelConfig
   private imap?: ImapFlow
   private smtp?: Transporter
@@ -23,43 +21,60 @@ export class EmailChannel implements Channel {
   private stopped = false
   private readonly threads = new ThreadBinder()
 
-  constructor(
-    @inject(Configer) private readonly configer: Configer,
-    @inject(ChannelReceiveId) private readonly receive: (message: Message) => Promise<Result<ChannelReceiveResult>>
-  ) {}
+  constructor(@inject(Configer) private readonly configer: Configer) {}
 
-  async start(): Promise<void> {
+  async startOutput(): Promise<boolean> {
     this.config = await this.configer.get('channels.email')
+    if (!this.config?.enabled) {
+      return false
+    }
+    if (!this.config?.user) {
+      throw new Error('email user is required')
+    }
+    if (!this.config.agent.smtp?.host || !this.config.agent.smtp.user || !this.config.agent.smtp.password) {
+      throw new Error('email smtp config is required')
+    }
+    Logger.info('email output starting', {
+      user: this.config.user,
+      smtpHost: this.config.agent.smtp.host
+    })
+    this.smtp = nodemailer.createTransport({
+      host: this.config.agent.smtp.host,
+      port: this.config.agent.smtp.port,
+      secure: this.config.agent.smtp.secure,
+      auth: {
+        user: this.config.agent.smtp.user,
+        pass: this.config.agent.smtp.password
+      }
+    })
+    return true
+  }
+
+  async startInput(receive: ChannelInputReceive): Promise<boolean> {
+    this.config = await this.configer.get('channels.email')
+    if (!this.config?.enabled) {
+      return false
+    }
     if (!this.config?.user) {
       throw new Error('email user is required')
     }
     if (!this.config.agent?.imap?.host || !this.config.agent.imap.user || !this.config.agent.imap.password) {
       throw new Error('email imap config is required')
     }
-    if (!this.config.agent.smtp?.host || !this.config.agent.smtp.user || !this.config.agent.smtp.password) {
-      throw new Error('email smtp config is required')
-    }
-    Logger.info('email channel starting', {
-      user: this.config?.user,
-      imapHost: this.config?.agent?.imap?.host,
-      smtpHost: this.config?.agent?.smtp?.host
+    await this.startOutput()
+    this.stopped = false
+    Logger.info('email input starting', {
+      user: this.config.user,
+      imapHost: this.config.agent.imap.host
     })
-    this.smtp = nodemailer.createTransport({
-      host: this.config?.agent?.smtp?.host,
-      port: this.config?.agent?.smtp?.port,
-      secure: this.config?.agent?.smtp?.secure,
-      auth: {
-        user: this.config?.agent?.smtp?.user,
-        pass: this.config?.agent?.smtp?.password
-      }
+    void this.run(receive).catch((error) => {
+      Logger.error('email input failed', error)
     })
-    void this.run().catch((error) => {
-      Logger.error('email channel failed', error)
-    })
+    return true
   }
 
   async send(message: Message): Promise<Result<null>> {
-    if (message.role === 'user' && message.source === this.type) {
+    if (message.role === 'user' && message.source === 'email') {
       return Result.success(null)
     }
     if (!this.smtp) {
@@ -139,10 +154,10 @@ export class EmailChannel implements Channel {
     return Result.success(null)
   }
 
-  private async run(): Promise<void> {
+  private async run(receive: ChannelInputReceive): Promise<void> {
     while (!this.stopped) {
       try {
-        await this.poll()
+        await this.poll(receive)
         if (this.stopped) {
           return
         }
@@ -164,7 +179,7 @@ export class EmailChannel implements Channel {
     }
   }
 
-  private async poll(): Promise<void> {
+  private async poll(receive: ChannelInputReceive): Promise<void> {
     if (this.polling || this.stopped) {
       return
     }
@@ -216,12 +231,12 @@ export class EmailChannel implements Channel {
             uid: message.uid,
             length: text.length
           })
-          const result = await this.receive({
+          const result = await receive({
             ioThreadId,
             role: 'user',
             text,
             createdAt: Date.now(),
-            source: this.type
+            source: 'email'
           })
           if (result.isFailed) {
             Logger.warn('email message receive failed', {
@@ -233,7 +248,7 @@ export class EmailChannel implements Channel {
               role: 'system',
               text: result.message,
               createdAt: Date.now(),
-              source: this.type
+              source: 'email'
             })
           }
         }
@@ -272,5 +287,39 @@ export class EmailChannel implements Channel {
       mailbox: this.config?.agent?.imap?.mailbox ?? 'INBOX'
     })
     return this.imap
+  }
+}
+
+@injectable()
+export class EmailChannelInput implements ChannelInput {
+  readonly type = 'email'
+
+  constructor(@inject(EmailChannelHub) private readonly hub: EmailChannelHub) {}
+
+  async start(receive: ChannelInputReceive): Promise<boolean> {
+    return this.hub.startInput(receive)
+  }
+
+  async stop(): Promise<Result<null>> {
+    return this.hub.stop()
+  }
+}
+
+@injectable()
+export class EmailChannelOutput implements ChannelOutput {
+  readonly type = 'email'
+
+  constructor(@inject(EmailChannelHub) private readonly hub: EmailChannelHub) {}
+
+  async start(): Promise<boolean> {
+    return this.hub.startOutput()
+  }
+
+  async send(message: Message): Promise<Result<null>> {
+    return this.hub.send(message)
+  }
+
+  async stop(): Promise<Result<null>> {
+    return this.hub.stop()
   }
 }

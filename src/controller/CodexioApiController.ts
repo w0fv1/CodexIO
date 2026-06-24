@@ -6,7 +6,7 @@ import multer from 'multer'
 import { z } from 'zod'
 import { inject, injectable } from 'inversify'
 import { AgentManager } from '../agent/AgentManager.js'
-import { ChannelManager } from '../channel/ChannelManager.js'
+import { ChannelOutputManager } from '../channel/ChannelOutputManager.js'
 import { Logger } from '../component/Logger.js'
 import { FileStore } from '../component/FileStore.js'
 import { configFieldDescriptors } from '../value/ConfigDefinition.js'
@@ -14,9 +14,8 @@ import { Configer } from '../component/Configer.js'
 import { configPageHtml } from './ConfigPage.js'
 import { MessageFile } from '../value/Message.js'
 import { Result } from '../value/Result.js'
-import { SupervisorClient } from '../component/ServerLifecycle.js'
 import { webPageHtml } from '../channel/WebPage.js'
-import { WebChannel } from '../channel/WebChannel.js'
+import { WebChannelHub } from '../channel/WebChannel.js'
 import { resolveAvailableServerPort } from '../util/Network.js'
 import { EventBus } from '../component/EventBus.js'
 import { AppEvent } from '../value/Event.js'
@@ -61,16 +60,12 @@ export class CodexioApiController {
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
-    @inject(ChannelManager) private readonly channelManager: ChannelManager,
+    @inject(ChannelOutputManager) private readonly outputManager: ChannelOutputManager,
     @inject(AgentManager) private readonly agentManager: AgentManager,
     @inject(FileStore) private readonly fileStore: FileStore,
-    @inject(SupervisorClient) private readonly supervisorClient: SupervisorClient,
-    @inject(WebChannel) private readonly webChannel: WebChannel,
+    @inject(WebChannelHub) private readonly webChannel: WebChannelHub,
     @inject(EventBus) private readonly eventBus: EventBus
   ) {
-    this.eventBus.on(AppEvent.StopRequested, () => {
-      this.stop()
-    })
   }
 
   async start(): Promise<HttpServer> {
@@ -112,32 +107,34 @@ export class CodexioApiController {
       if (this.listener === listener) {
         this.listener = undefined
       }
-      this.eventBus.emit(AppEvent.HttpClosed)
     })
     return listener
   }
 
-  stop(callback?: (error?: Error) => void): void {
+  async stop(): Promise<Result<null>> {
     if (this.closing) {
-      return
+      return Result.success(null)
     }
     this.closing = true
     if (!this.listener) {
-      this.eventBus.emit(AppEvent.HttpClosed)
-      callback?.()
-      return
+      return Result.success(null)
     }
     const listener = this.listener
-    void this.webChannel.stop().finally(() => {
-      listener.close((error) => {
-        if (error) {
-          this.eventBus.emit(AppEvent.HttpClosed, error)
-          callback?.(error)
-          return
-        }
-        callback?.()
+    try {
+      this.webChannel.stop()
+      await new Promise<void>((resolveStop, reject) => {
+        listener.close((error) => {
+          if (error) {
+            reject(error)
+            return
+          }
+          resolveStop()
+        })
       })
-    })
+      return Result.success(null)
+    } catch (error) {
+      return Result.fromError(error)
+    }
   }
 
   bind(): void {
@@ -214,7 +211,7 @@ export class CodexioApiController {
           length: body.data.text.length,
           files: files.length
         })
-        const sent = await this.channelManager.send({
+        const sent = await this.outputManager.sendAgent({
           ioThreadId: body.data.ioThreadId,
           role: 'agent',
           text: body.data.text,
@@ -235,22 +232,6 @@ export class CodexioApiController {
       }
     })
 
-    this.web.post('/api/server/restart', async (request, response) => {
-      try {
-        if (!await this.authorize(request)) {
-          Logger.warn('api server restart unauthorized')
-          response.status(401).json(Result.fail('unauthorized', '401'))
-          return
-        }
-        Logger.info('api server restart requested')
-        const supervisor = await this.supervisorClient.restart()
-        response.json(Result.success(`Codexio restart requested through supervisor ${supervisor.host}:${supervisor.port}`))
-      } catch (error) {
-        Logger.error('api server restart failed', error)
-        response.json(Result.fromError(error))
-      }
-    })
-
     this.web.post('/api/server/stop', async (request, response) => {
       try {
         if (!await this.authorize(request)) {
@@ -265,7 +246,6 @@ export class CodexioApiController {
           stopping: true,
           pid
         }))
-        await this.channelManager.sendSystem('Codexio server stopping.')
         setImmediate(() => {
           this.eventBus.emit(AppEvent.StopRequested)
         })
@@ -320,11 +300,10 @@ export class CodexioApiController {
         const change = await this.configer.importText(body.data.text)
         const message = formatConfigSavedMessage(change.paths)
         response.json(Result.success({
-          config: change.current,
           changedPaths: change.paths,
           message
         }))
-        await this.channelManager.sendSystem(message)
+        await this.outputManager.sendSystem(message)
       } catch (error) {
         Logger.error('api config import failed', error)
         response.json(Result.fromError(error))
@@ -341,11 +320,10 @@ export class CodexioApiController {
         const change = await this.configer.patch(body.data.patch)
         const message = formatConfigSavedMessage(change.paths)
         response.json(Result.success({
-          config: change.current,
           changedPaths: change.paths,
           message
         }))
-        await this.channelManager.sendSystem(message)
+        await this.outputManager.sendSystem(message)
       } catch (error) {
         Logger.error('api config patch failed', error)
         response.json(Result.fromError(error))

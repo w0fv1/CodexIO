@@ -11,8 +11,7 @@ import { Configer } from '../component/Configer.js'
 import { Logger } from '../component/Logger.js'
 import { isImageFile } from '../component/FileStore.js'
 import { allIoThreadId, Message } from '../value/Message.js'
-import { AgentManagerCallbacksId } from '../ComponentIdentifier.js'
-import type { AgentManagerCallbacks } from './AgentManager.js'
+import { AgentMessageClient } from './AgentMessageClient.js'
 
 const codexEntryPath = createRequire(import.meta.url).resolve('@openai/codex/bin/codex.js')
 
@@ -56,58 +55,6 @@ export class AgentLoginInProgressError extends Error {
 }
 
 @injectable()
-export class CodexAppServerFactory {
-  constructor(
-    @inject(Configer) private readonly configer: Configer,
-    @inject(CodexioMetadata) private readonly metadata: CodexioMetadata
-  ) {}
-
-  async create(onNotification: (method: string, params: unknown) => void): Promise<CodexAppServerHandle> {
-    const bundled = await this.configer.get('agents.codex.bundled')
-    const serverHost = await this.configer.get('server.host')
-    const serverPort = await this.configer.get('server.port')
-    const serverToken = await this.configer.get('server.token')
-    const workspacePath = await this.configer.get('workspace.path')
-    const proxyEnabled = await this.configer.get('proxy.enabled')
-    const proxyHost = await this.configer.get('proxy.host')
-    const proxyPort = await this.configer.get('proxy.port')
-    const command = createCodexCommand(bundled, [
-      'app-server',
-      '--stdio'
-    ])
-    const env = createProcessEnv(
-      bundled ?? true ? this.metadata.codexHomePath : undefined,
-      bundled ?? true ? join(this.metadata.codexHomePath, 'config.toml') : undefined,
-      proxyEnabled ? `http://${proxyHost}:${proxyPort}` : undefined,
-      proxyEnabled ? [
-        'localhost',
-        '127.0.0.1',
-        '::1',
-        serverHost
-      ] : [],
-      {
-        CODEXIO_API_URL: `http://${serverHost}:${serverPort}`,
-        CODEXIO_TOKEN: serverToken
-      }
-    )
-    return new CodexAppServer({
-      command: command.command,
-      args: command.args,
-      cwd: workspacePath,
-      env,
-      metadata: this.metadata,
-      onNotification,
-      onStderr: (data) => {
-        Logger.warn('codex app-server stderr', {
-          text: data.toString('utf8')
-        })
-        process.stderr.write(data)
-      }
-    })
-  }
-}
-
-@injectable()
 export class CodexAgent implements Agent {
   readonly type = 'codex'
   private started = false
@@ -119,13 +66,18 @@ export class CodexAgent implements Agent {
   constructor(
     @inject(Configer) private readonly configer: Configer,
     @inject(CodexioMetadata) private readonly metadata: CodexioMetadata,
-    @inject(AgentManagerCallbacksId) private readonly callbacks: AgentManagerCallbacks,
-    @inject(CodexAppServerFactory) private readonly appServerFactory: CodexAppServerFactory
+    @inject(AgentMessageClient) private readonly messageClient: AgentMessageClient
   ) {}
 
   async login(): Promise<void> {
     const workspacePath = await this.configer.get('workspace.path')
     const bundled = await this.configer.get('agents.codex.bundled')
+    const bundledEnabled = bundled ?? true
+    const proxyEnabled = await this.configer.get('proxy.enabled')
+    const proxyHost = await this.configer.get('proxy.host')
+    const proxyPort = await this.configer.get('proxy.port')
+    const serverHost = await this.configer.get('server.host')
+    const codexHomePath = bundledEnabled ? this.metadata.codexHomePath : undefined
     Logger.info('codex login started', {
       cwd: workspacePath
     })
@@ -136,10 +88,15 @@ export class CodexAgent implements Agent {
     await execa(command.command, command.args, {
       cwd: workspacePath,
       env: createProcessEnv(
-        await this.codexHomePath(),
-        await this.shellEnvironmentPath(),
-        await this.proxyUrl(),
-        await this.noProxyHosts()
+        codexHomePath,
+        codexHomePath ? join(codexHomePath, 'config.toml') : undefined,
+        proxyEnabled ? `http://${proxyHost}:${proxyPort}` : undefined,
+        proxyEnabled ? [
+          'localhost',
+          '127.0.0.1',
+          '::1',
+          serverHost
+        ] : []
       ),
       stdio: 'inherit'
     })
@@ -154,8 +111,8 @@ export class CodexAgent implements Agent {
       cwd: await this.configer.get('workspace.path')
     })
     if (!this.appServer) {
-      this.appServer = await this.appServerFactory.create((method, params) => {
-          void this.handleNotification(method, params)
+      this.appServer = await this.createAppServer((method, params) => {
+        void this.handleNotification(method, params)
       })
       await this.appServer.start()
     }
@@ -540,7 +497,7 @@ export class CodexAgent implements Agent {
       }
       thread.messages.clear()
       if (messages.length > 0) {
-        await this.send({
+        await this.messageClient.send({
           ioThreadId: thread.ioThreadId,
           role: 'agent',
           text: messages.join('\n\n'),
@@ -583,39 +540,52 @@ export class CodexAgent implements Agent {
     return this.threads.keys().next().value
   }
 
-  private async send(message: Message): Promise<void> {
-    const result = await this.callbacks.send(message)
-    if (result.isFailed) {
-      throw new Error(result.message)
-    }
-  }
-
   private async sendSystem(message: Message): Promise<void> {
-    await this.callbacks.send(message).catch(() => {})
+    await this.messageClient.send(message).catch(() => {})
   }
 
-  private async codexHomePath(): Promise<string | undefined> {
-    return await this.configer.get('agents.codex.bundled') ?? true ? this.metadata.codexHomePath : undefined
-  }
-
-  private async shellEnvironmentPath(): Promise<string | undefined> {
-    const codexHomePath = await this.codexHomePath()
-    return codexHomePath ? join(codexHomePath, 'config.toml') : undefined
-  }
-
-  private async proxyUrl(): Promise<string | undefined> {
-    return await this.configer.get('proxy.enabled') ? `http://${await this.configer.get('proxy.host')}:${await this.configer.get('proxy.port')}` : undefined
-  }
-
-  private async noProxyHosts(): Promise<string[]> {
-    if (!await this.configer.get('proxy.enabled')) {
-      return []
-    }
-    return [
-      'localhost',
-      '127.0.0.1',
-      '::1',
-      await this.configer.get('server.host')
-    ]
+  protected async createAppServer(onNotification: (method: string, params: unknown) => void): Promise<CodexAppServerHandle> {
+    const bundled = await this.configer.get('agents.codex.bundled')
+    const bundledEnabled = bundled ?? true
+    const serverHost = await this.configer.get('server.host')
+    const serverPort = await this.configer.get('server.port')
+    const serverToken = await this.configer.get('server.token')
+    const workspacePath = await this.configer.get('workspace.path')
+    const proxyEnabled = await this.configer.get('proxy.enabled')
+    const proxyHost = await this.configer.get('proxy.host')
+    const proxyPort = await this.configer.get('proxy.port')
+    const command = createCodexCommand(bundled, [
+      'app-server',
+      '--stdio'
+    ])
+    const codexHomePath = bundledEnabled ? this.metadata.codexHomePath : undefined
+    return new CodexAppServer({
+      command: command.command,
+      args: command.args,
+      cwd: workspacePath,
+      env: createProcessEnv(
+        codexHomePath,
+        codexHomePath ? join(codexHomePath, 'config.toml') : undefined,
+        proxyEnabled ? `http://${proxyHost}:${proxyPort}` : undefined,
+        proxyEnabled ? [
+          'localhost',
+          '127.0.0.1',
+          '::1',
+          serverHost
+        ] : [],
+        {
+          CODEXIO_API_URL: `http://${serverHost}:${serverPort}`,
+          CODEXIO_TOKEN: serverToken
+        }
+      ),
+      metadata: this.metadata,
+      onNotification,
+      onStderr: (data) => {
+        Logger.warn('codex app-server stderr', {
+          text: data.toString('utf8')
+        })
+        process.stderr.write(data)
+      }
+    })
   }
 }
