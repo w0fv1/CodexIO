@@ -6,14 +6,18 @@ import { CodexioReleaseMetadata } from '../value/CodexioReleaseMetadata.js'
 
 export type CodexioMetadataOptions = {
   rootPath?: string
+  dataPath?: string
   configPath?: string
 }
 
 @injectable()
 export class CodexioMetadata {
   readonly rootPath: string
+  readonly dataPath: string
   readonly codexHomePath: string
   readonly configPath: string
+  readonly logPath: string
+  readonly filePath: string
   readonly serverStatePath: string
 
   constructor(options: CodexioMetadataOptions = {}) {
@@ -27,9 +31,12 @@ export class CodexioMetadata {
       }
       return root
     })()
-    this.codexHomePath = join(this.rootPath, '.codexio', 'codex')
     this.configPath = resolve(options.configPath ?? join(this.rootPath, '.codexio', 'config.yaml'))
-    this.serverStatePath = join(dirname(this.configPath), 'state', 'server.json')
+    this.dataPath = resolve(options.dataPath ?? dirname(this.configPath))
+    this.codexHomePath = join(this.dataPath, 'codex')
+    this.logPath = join(this.dataPath, 'log')
+    this.filePath = join(this.dataPath, 'file')
+    this.serverStatePath = join(this.dataPath, 'state', 'server.json')
   }
 
   readVersion(): string {

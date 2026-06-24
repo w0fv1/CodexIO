@@ -16,7 +16,6 @@ import { ChannelOutputManager } from '../src/channel/ChannelOutputManager.js'
 import { ThreadBinder } from '../src/value/ThreadBinder.js'
 import { Logger } from '../src/component/Logger.js'
 import { parseMarkdownFileReferences, renderMarkdownHtml } from '../src/util/Markdown.js'
-import { createUpdaterScript } from '../src/component/Updater.js'
 import { FileStore } from '../src/component/FileStore.js'
 import { Configer, diffConfigPaths } from '../src/component/Configer.js'
 import { ConfigSchema, createDefaultConfig, normalizeWorkspacePath, validateCodexioConfig } from '../src/value/ConfigDefinition.js'
@@ -1598,94 +1597,38 @@ describe('core', () => {
     }).serverStatePath).toBe(join('C:\\app', '.codexio', 'state', 'server.json'))
   })
 
-  it('updater waits for restarted server pid', () => {
-    const script = createUpdaterScript()
-    expect(script).toContain('Assert-UpdatePath $manifestData.serviceCommand')
-    expect(script).toContain('Start-Process -FilePath "powershell" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $manifestData.serviceCommand, "-Action", "stop")')
-    expect(script).toContain('Start-Process -FilePath "powershell" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $manifestData.serviceCommand, "-Action", "start")')
-    expect(script).toContain('$serverState = Get-Content -Raw -LiteralPath $manifestData.serverStatePath | ConvertFrom-Json')
-    expect(script).toContain('$serverResponse.data.pid -eq $serverState.pid')
-    expect(script).not.toContain('supervisorStatePath')
-    expect(script).not.toContain('supervisorResponse')
+  it('separates packaged resources from writable runtime data', () => {
+    const metadata = new CodexioMetadata({
+      rootPath: 'C:\\app\\resources\\app.asar',
+      configPath: join('C:\\Users\\test\\AppData\\Roaming\\codexio', 'config.yaml')
+    })
+
+    expect(metadata.rootPath).toBe('C:\\app\\resources\\app.asar')
+    expect(metadata.dataPath).toBe(join('C:\\Users\\test\\AppData\\Roaming\\codexio'))
+    expect(metadata.codexHomePath).toBe(join('C:\\Users\\test\\AppData\\Roaming\\codexio', 'codex'))
+    expect(metadata.logPath).toBe(join('C:\\Users\\test\\AppData\\Roaming\\codexio', 'log'))
+    expect(metadata.filePath).toBe(join('C:\\Users\\test\\AppData\\Roaming\\codexio', 'file'))
+    expect(metadata.serverStatePath).toBe(join('C:\\Users\\test\\AppData\\Roaming\\codexio', 'state', 'server.json'))
   })
 
-  it('updater preserves runtime data in place while updating release metadata', () => {
-    const script = createUpdaterScript()
-    expect(script).toContain('function Replace-Current')
-    expect(script).toContain('if ($item.Name -eq ".codexio")')
-    expect(script).toContain('function Copy-CodexioPackageItems')
-    expect(script).toContain('foreach ($item in @("codexio-service.exe", "codexio-service.xml", "node", "pnpm", "release.json"))')
-    expect(script).toContain('Copy-CodexioPackageItems -SourceRoot $manifestData.stageRoot -TargetRoot $manifestData.installRoot')
-    expect(script).not.toContain('preserved-codexio-data')
-  })
+  it('packages Codexio as an Electron tray application', () => {
+    const packageJson = JSON.parse(readFileSync(join(testMetadata.rootPath, 'package.json'), 'utf8')) as {
+      main?: unknown
+      scripts?: Record<string, unknown>
+      build?: {
+        win?: unknown
+        nsis?: unknown
+      }
+      devDependencies?: Record<string, unknown>
+    }
 
-  it('updater works inside .codexio update root and never replaces .codexio wholesale', () => {
-    const script = createUpdaterScript()
-    expect(script).toContain('Set-Location -LiteralPath $manifestData.updateRoot')
-    expect(script).toContain('if ($item.Name -eq ".codexio")')
-    expect(script).not.toContain('Remove-Item -Recurse -Force -LiteralPath (Join-Path $manifestData.installRoot ".codexio")')
-  })
-
-  it('updater terminates install-root processes and retries directory removal', () => {
-    const script = createUpdaterScript()
-    expect(script).toContain('Set-Location -LiteralPath $manifestData.updateRoot')
-    expect(script).toContain('function Stop-InstallRootProcess')
-    expect(script).toContain('function Remove-UpdateItem')
-    expect(script).toContain('$_.ExecutablePath.StartsWith($installRoot')
-    expect(script).toContain('$_.CommandLine.Contains($installRoot)')
-    expect(script).toContain('for ($attempt = 1; $attempt -le 10; $attempt++)')
-    expect(script).toContain('Stop-InstallRootProcess')
-  })
-
-  it('updater installs the Windows service package layout', () => {
-    const script = createUpdaterScript()
-    expect(script).toContain('".codexio\\codexio-service.exe", ".codexio\\codexio-service.xml", "install.cmd", "uninstall.cmd", "start.cmd", "stop.cmd", "restart.cmd", "service.ps1", "nodew.ps1", "dist\\Server.js", "dist\\value\\PackageLayout.json", ".codexio\\config.yaml", ".codexio\\release.json"')
-    expect(script).toContain('function Backup-Current')
-    expect(script).toContain('function Restore-Backup')
-    expect(script).not.toContain('Join-Path $manifestData.installRoot "supervisor.json"')
-  })
-
-  it('release start command installs the Windows service before starting when missing', async () => {
-    const script = await readFile(join(testMetadata.rootPath, 'scripts', 'release.ps1'), 'utf8')
-    expect(script).toContain('WinSW-x64.exe')
-    expect(script).toContain('function New-ServiceScriptFile')
-    expect(script).toContain('function New-ServiceCommandFile')
-    expect(script).toContain('Copy-TemplateFile -TemplateName "service.ps1"')
-    expect(script).toContain('Copy-TemplateFile -TemplateName "nodew.ps1"')
-    expect(script).toContain('Read-PackageLayout')
-    expect(script).toContain('Get-ArchiveEntries')
-    expect(script).toContain('New-ServiceCommandFiles -DestinationRoot $PnpmRoot -EnsureDependencies')
-    expect(script).not.toContain('$text = @\'')
-    expect(script).not.toContain('$script = @"')
-    const serviceTemplate = await readFile(join(testMetadata.rootPath, 'scripts', 'templates', 'service.ps1'), 'utf8')
-    expect(serviceTemplate).toContain('function Assert-ProductionDependencies')
-    expect(serviceTemplate).toContain('Read-PackagePlatform')
-    expect(serviceTemplate).toContain('windows-x64-standalone')
-    expect(serviceTemplate).toContain('windows-x64-pnpm')
-    expect(serviceTemplate).toContain('function Invoke-ServiceAction')
-    expect(serviceTemplate).toContain('function Start-ServiceProcess')
-    expect(serviceTemplate).toContain('function Uninstall-ServiceProcess')
-    expect(serviceTemplate).toContain('function Test-ServiceMatchesPackage')
-    expect(serviceTemplate).toContain('function Remove-ServiceRegistration')
-    expect(serviceTemplate).toContain('Get-Service -Name "codexio"')
-    expect(serviceTemplate).toContain('Get-CimInstance Win32_Service -Filter "Name=\'codexio\'"')
-    const serviceMain = serviceTemplate.slice(serviceTemplate.indexOf('try {'))
-    expect(serviceMain.indexOf('Assert-ProductionDependencies')).toBeLessThan(serviceMain.indexOf('if (-not (Test-Administrator))'))
-    expect(serviceTemplate).toContain('Install-Service')
-    expect(serviceTemplate).toContain('service path changed, reinstalling service')
-    expect(serviceTemplate).toContain('Invoke-LocalCommand -FilePath "sc.exe" -Arguments @("delete", "codexio")')
-    expect(serviceTemplate).toContain('service is already running')
-    expect(serviceTemplate).toContain('Stop-ServiceProcess')
-    expect(serviceTemplate).toContain('uninstalling service')
-    expect(serviceTemplate).toContain('$ServiceCommand = Join-Path $CodexioRoot "codexio-service.exe"')
-    expect(serviceTemplate).toContain('Invoke-LocalCommand -FilePath $ServiceCommand -Arguments @("install")')
-    expect(serviceTemplate).toContain('Invoke-LocalCommand -FilePath $ServiceCommand -Arguments @("stop")')
-    expect(serviceTemplate).toContain('Invoke-LocalCommand -FilePath $ServiceCommand -Arguments @("uninstall")')
-    expect(script).not.toContain('& (Join-Path $Root "codexio-service.exe") status')
-    expect(script).not.toContain('nodew.cmd')
-    expect(script).not.toContain('function Ensure-ServiceInstalled')
-    expect(script).not.toContain('function New-PnpmStartCommandFile')
-    expect(script).not.toContain('function New-PnpmCommandFile')
+    expect(packageJson.main).toBe('dist/electron/Main.js')
+    expect(packageJson.scripts?.['package:windows']).toBe('pnpm build && electron-builder --win nsis --x64')
+    expect(packageJson.devDependencies?.electron).toBeTruthy()
+    expect(packageJson.devDependencies?.['electron-builder']).toBeTruthy()
+    expect(packageJson.dependencies?.['electron-updater']).toBeTruthy()
+    expect(packageJson.build?.win).toBeTruthy()
+    expect(packageJson.build?.nsis).toBeTruthy()
   })
 
   it('loads channel credentials from config', () => {

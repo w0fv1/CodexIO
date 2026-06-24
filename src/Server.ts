@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import 'reflect-metadata'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname } from 'node:path'
 import { pid } from 'node:process'
 import { Container, inject, injectable } from 'inversify'
 import { ChannelInputManager } from './channel/ChannelInputManager.js'
@@ -39,7 +39,7 @@ export class CodexioApplication {
     await this.configer.init(false)
     await this.configer.validate()
     Logger.configure({
-      logDir: join(this.codexioMetadata.rootPath, '.codexio', 'log')
+      logDir: this.codexioMetadata.logPath
     })
     const cleanedLogs = await Logger.cleanup(30)
     if (cleanedLogs.deleted > 0) {
@@ -106,9 +106,20 @@ const container = new Container({
   autobind: true,
   defaultScope: 'Singleton'
 })
+container.bind(CodexioMetadata).toConstantValue(new CodexioMetadata({
+  configPath: readConfigPath(process.argv)
+}))
 const application = container.get(CodexioApplication)
 
 void application.start().catch((error) => {
   Logger.error('codexio server failed', error)
   process.exitCode = 1
 })
+
+function readConfigPath(args: string[]): string | undefined {
+  const index = args.indexOf('--config')
+  if (index < 0) {
+    return undefined
+  }
+  return args[index + 1]
+}

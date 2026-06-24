@@ -46,7 +46,7 @@ export class FileStore {
   private readonly files = new Map<string, MessageFile>()
 
   constructor(@inject(CodexioMetadata) metadata: CodexioMetadata) {
-    this.rootPath = resolve(join(metadata.rootPath, '.codexio', 'file'))
+    this.rootPath = metadata.filePath
     this.maxFileSizeBytes = 20 * 1024 * 1024
   }
 

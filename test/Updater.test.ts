@@ -1,5 +1,3 @@
-import { rm, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ChannelOutputManager } from '../src/channel/ChannelOutputManager.js'
 import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
@@ -8,32 +6,25 @@ import { Configer } from '../src/component/Configer.js'
 import { Result } from '../src/value/Result.js'
 
 const testMetadata = new CodexioMetadata()
-const releasePath = join(testMetadata.rootPath, '.codexio', 'release.json')
 
 describe('updater', () => {
   afterEach(async () => {
     vi.unstubAllGlobals()
-    await rm(releasePath, {
-      force: true
-    })
   })
 
-  it('prompts newer packaged release without download url', async () => {
+  it('prompts newer Electron release without download url', async () => {
     const currentVersionParts = testMetadata.readVersion().split('.').map((value) => Number.parseInt(value, 10))
     const nextVersion = [
       currentVersionParts[0],
       currentVersionParts[1],
       currentVersionParts[2] + 1
     ].join('.')
-    await writeFile(releasePath, JSON.stringify({
-      platform: 'windows-x64-pnpm'
-    }), 'utf8')
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       isf: false,
       data: {
         version: nextVersion,
-        platform: 'windows-x64-pnpm',
-        fileName: `codexio-${nextVersion}-windows-x64-pnpm.zip`,
+        platform: 'windows-x64-electron',
+        fileName: `codexio-${nextVersion}-windows-x64-electron.exe`,
         fileSizeBytes: 111580,
         sha256: 'hash',
         managePath: '/manage/nfirco/release'
@@ -44,23 +35,34 @@ describe('updater', () => {
     const { updater } = createUpdater(true, 'https://next.firco.cn')
     const message = await updater.check()
 
-    expect(fetchMock).toHaveBeenCalledWith(new URL('https://next.firco.cn/api/download/release/codexio/latest?platform=windows-x64-pnpm'))
+    expect(fetchMock).toHaveBeenCalledWith(new URL('https://next.firco.cn/api/download/release/codexio/latest?platform=windows-x64-electron'))
     expect(message).toContain(nextVersion)
     expect(message).toContain('https://next.firco.cn/manage/nfirco/release')
-    expect(message).toContain('$update')
-    expect(message).toContain('￥update')
+    expect(message).toContain('系统托盘')
     expect(message).not.toContain('fileUrl')
   })
 
-  it('skips source tree without packaged release metadata', async () => {
+  it('skips disabled update checks', async () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
+
+    const { updater } = createUpdater(false, 'https://next.firco.cn')
+    const message = await updater.check()
+
+    expect(message).toBeUndefined()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('treats missing Electron release metadata as no update', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      isf: true,
+      data: null
+    }))))
 
     const { updater } = createUpdater(true, 'https://next.firco.cn')
     const message = await updater.check()
 
     expect(message).toBeUndefined()
-    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('sends newer release message from start', async () => {
@@ -70,15 +72,12 @@ describe('updater', () => {
       currentVersionParts[1],
       currentVersionParts[2] + 1
     ].join('.')
-    await writeFile(releasePath, JSON.stringify({
-      platform: 'windows-x64-pnpm'
-    }), 'utf8')
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
       isf: false,
       data: {
         version: nextVersion,
-        platform: 'windows-x64-pnpm',
-        fileName: `codexio-${nextVersion}-windows-x64-pnpm.zip`,
+        platform: 'windows-x64-electron',
+        fileName: `codexio-${nextVersion}-windows-x64-electron.exe`,
         fileSizeBytes: 111580,
         sha256: 'hash',
         managePath: '/manage/nfirco/release'
@@ -91,6 +90,15 @@ describe('updater', () => {
     await vi.waitFor(() => {
       expect(sendSystem).toHaveBeenCalledWith(expect.stringContaining(nextVersion))
     })
+  })
+
+  it('delegates install update to the Electron tray', async () => {
+    const { updater } = createUpdater(true, 'https://next.firco.cn')
+
+    const result = await updater.update()
+
+    expect(result.isFailed).toBe(false)
+    expect(result.data).toContain('系统托盘')
   })
 })
 
