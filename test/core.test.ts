@@ -7,6 +7,7 @@ import { createProcessEnv } from '../src/util/ProcessEnvironment.js'
 import { AgentManager } from '../src/agent/AgentManager.js'
 import { CodexAppServer, CodexAppServerRequestError } from '../src/agent/CodexAppServer.js'
 import { AgentLoginInProgressError, CodexAgent, createCodexCommand } from '../src/agent/CodexAgent.js'
+import { CodexcClient } from '../src/agent/CodexcClient.js'
 import { CodexMessageStreamer } from '../src/agent/CodexMessageStreamer.js'
 import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
 import { CommandExecutor, parseCommandInput } from '../src/controller/CommandExecutor.js'
@@ -17,6 +18,7 @@ import { ThreadBinder } from '../src/value/ThreadBinder.js'
 import { Logger } from '../src/component/Logger.js'
 import { parseMarkdownFileReferences, renderMarkdownHtml } from '../src/util/Markdown.js'
 import { FileStore } from '../src/component/FileStore.js'
+import { ThreadManager } from '../src/component/ThreadManager.js'
 import { Configer, diffConfigPaths } from '../src/component/Configer.js'
 import { ConfigSchema, createDefaultConfig, normalizeWorkspacePath, validateCodexioConfig } from '../src/value/ConfigDefinition.js'
 import { Result } from '../src/value/Result.js'
@@ -444,6 +446,175 @@ describe('core', () => {
     }
   })
 
+  it('codexc client refreshes persisted threads and items idempotently', async () => {
+    const threads: unknown[] = []
+    const items: unknown[] = []
+    const requests: Array<{
+      method: string
+      params: unknown
+    }> = []
+    const client = new CodexcClient({
+      appServer: {
+        async start(): Promise<void> {},
+        async request(method: string, params: unknown): Promise<unknown> {
+          requests.push({
+            method,
+            params
+          })
+          if (method === 'thread/list') {
+            return {
+              data: [
+                {
+                  id: 'vscode-thread',
+                  name: 'VSCode thread',
+                  preview: 'hello',
+                  status: {
+                    type: 'active'
+                  }
+                }
+              ],
+              nextCursor: null
+            }
+          }
+          if (method === 'thread/read') {
+            return {
+              thread: {
+                id: 'vscode-thread',
+                name: 'VSCode thread',
+                preview: 'hello',
+                status: {
+                  type: 'active'
+                }
+              }
+            }
+          }
+          if (method === 'thread/turns/list') {
+            return {
+              data: [
+                {
+                  id: 'turn-1',
+                  items: [
+                    {
+                      type: 'agentMessage',
+                      id: 'item-1',
+                      text: '已完成。'
+                    }
+                  ]
+                }
+              ],
+              nextCursor: null
+            }
+          }
+          return {}
+        },
+        async waitForNotification(): Promise<void> {},
+        async stop(): Promise<void> {}
+      }
+    })
+    client.on('thread', (thread) => {
+      threads.push(thread)
+    })
+    client.on('item', (item) => {
+      items.push(item)
+    })
+
+    await client.start()
+    await client.refresh()
+    await client.refresh()
+
+    expect(requests.map((request) => request.method)).toEqual([
+      'thread/list',
+      'thread/read',
+      'thread/turns/list',
+      'thread/list',
+      'thread/read',
+      'thread/turns/list'
+    ])
+    expect(requests.find((request) => request.method === 'thread/turns/list')?.params).toMatchObject({
+      limit: 1,
+      sortDirection: 'desc'
+    })
+    expect(threads).toEqual([
+      {
+        id: 'vscode-thread',
+        title: 'VSCode thread',
+        isWorking: true
+      }
+    ])
+    expect(items).toEqual([
+      {
+        threadId: 'vscode-thread',
+        itemId: 'item-1',
+        role: 'assistant',
+        text: '已完成。'
+      }
+    ])
+  })
+
+  it('codexc client does not replay idle thread items during refresh', async () => {
+    const threads: unknown[] = []
+    const items: unknown[] = []
+    const requests: Array<{
+      method: string
+      params: unknown
+    }> = []
+    const client = new CodexcClient({
+      appServer: {
+        async start(): Promise<void> {},
+        async request(method: string, params: unknown): Promise<unknown> {
+          requests.push({
+            method,
+            params
+          })
+          if (method === 'thread/list') {
+            return {
+              data: [
+                {
+                  id: 'idle-thread',
+                  name: 'Idle thread',
+                  status: {
+                    type: 'idle'
+                  }
+                }
+              ],
+              nextCursor: null
+            }
+          }
+          if (method === 'thread/read') {
+            return {
+              thread: {
+                id: 'idle-thread',
+                name: 'Idle thread',
+                status: {
+                  type: 'idle'
+                }
+              }
+            }
+          }
+          return {}
+        },
+        async waitForNotification(): Promise<void> {},
+        async stop(): Promise<void> {}
+      }
+    })
+    client.on('item', (item) => {
+      items.push(item)
+    })
+    client.on('thread', (thread) => {
+      threads.push(thread)
+    })
+
+    await client.start()
+    await client.refresh()
+
+    expect(requests.map((request) => request.method)).toEqual([
+      'thread/list',
+      'thread/read'
+    ])
+    expect(threads).toEqual([])
+    expect(items).toEqual([])
+  })
+
   it('parses chat commands with dollar and yuan prefixes', () => {
     expect(parseCommandInput('$ clear')).toEqual({
       type: 'command',
@@ -648,8 +819,82 @@ describe('core', () => {
     await agent.start()
 
     expect(requests.map((request) => request.method)).toEqual([
-      'account/read'
+      'account/read',
+      'thread/list'
     ])
+  })
+
+  it('codex agent refreshes persisted codex threads during startup', async () => {
+    const requests: Array<{
+      method: string
+      params: unknown
+    }> = []
+    const threadManager = new ThreadManager()
+    const agent = createCodexAgent({
+      threadManager,
+      appServer: {
+        async start(): Promise<void> {},
+        async request(method: string, params: unknown): Promise<unknown> {
+          requests.push({
+            method,
+            params
+          })
+          if (method === 'account/read') {
+            return {
+              account: {}
+            }
+          }
+          if (method === 'thread/list') {
+            return {
+              data: [
+                {
+                  id: 'vscode-thread',
+                  name: '问候',
+                  preview: '',
+                  status: {
+                    type: 'active'
+                  }
+                }
+              ],
+              nextCursor: null
+            }
+          }
+          if (method === 'thread/read') {
+            return {
+              thread: {
+                id: 'vscode-thread',
+                name: '问候',
+                preview: '',
+                status: {
+                  type: 'active'
+                }
+              }
+            }
+          }
+          if (method === 'thread/turns/list') {
+            return {
+              data: [],
+              nextCursor: null
+            }
+          }
+          return {}
+        },
+        async waitForNotification(): Promise<void> {},
+        async stop(): Promise<void> {}
+      }
+    })
+
+    await agent.start()
+
+    expect(requests.map((request) => request.method)).toEqual([
+      'account/read',
+      'thread/list',
+      'thread/read',
+      'thread/turns/list'
+    ])
+    expect(threadManager.get('vscode-thread')).toMatchObject({
+      title: '问候'
+    })
   })
 
   it('codex agent creates a thread for the received codexio thread id', async () => {
@@ -669,15 +914,16 @@ describe('core', () => {
 
     expect(requests.map((request) => request.method)).toEqual([
       'account/read',
+      'thread/list',
       'thread/start',
       'turn/start'
     ])
-    expect(requests[1].params).toMatchObject({
+    expect(requests.find((request) => request.method === 'thread/start')?.params).toMatchObject({
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
       ephemeral: false
     })
-    expect(requests[2].params).toMatchObject({
+    expect(requests.find((request) => request.method === 'turn/start')?.params).toMatchObject({
       threadId: 'thread-1'
     })
   })
@@ -703,15 +949,17 @@ describe('core', () => {
 
     expect(requests.map((request) => request.method)).toEqual([
       'account/read',
+      'thread/list',
       'thread/start',
       'turn/start',
       'thread/start',
       'turn/start'
     ])
-    expect(requests[2].params).toMatchObject({
+    const turnStarts = requests.filter((request) => request.method === 'turn/start')
+    expect(turnStarts[0]?.params).toMatchObject({
       threadId: 'thread-1'
     })
-    expect(requests[4].params).toMatchObject({
+    expect(turnStarts[1]?.params).toMatchObject({
       threadId: 'thread-2'
     })
   })
@@ -734,6 +982,7 @@ describe('core', () => {
 
     expect(requests.map((request) => request.method)).toEqual([
       'account/read',
+      'thread/list',
       'thread/start',
       'turn/start',
       'turn/interrupt',
@@ -799,20 +1048,172 @@ describe('core', () => {
     await agent.clear('io-thread')
     expect(requests.map((request) => request.method)).toEqual([
       'account/read',
+      'thread/list',
       'thread/start',
       'turn/start',
       'turn/steer',
       'turn/interrupt',
       'thread/start'
     ])
-    expect(requests[1].params).toMatchObject({
+    expect(requests.find((request) => request.method === 'thread/start')?.params).toMatchObject({
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
       ephemeral: false
     })
-    expect(requests[3].params).toMatchObject({
+    expect(requests.find((request) => request.method === 'turn/steer')?.params).toMatchObject({
       threadId: 'thread-1',
       expectedTurnId: 'turn-1'
+    })
+  })
+
+  it('codex agent mirrors current thread notification state idempotently', async () => {
+    const requests: Array<{
+      method: string
+      params: unknown
+    }> = []
+    const threadManager = new ThreadManager()
+    const agent = createCodexAgent({
+      appServer: createCodexAppServerMock(requests),
+      threadManager
+    })
+    await agent.start()
+    await agent.receive({
+      ioThreadId: 'io-thread',
+      text: 'first'
+    })
+    const handleNotification = (agent as unknown as {
+      handleNotification: (method: string, params: unknown) => Promise<void>
+    }).handleNotification.bind(agent)
+
+    expect(threadManager.get('io-thread')).toMatchObject({
+      id: 'io-thread',
+      agentThreadId: 'thread-1',
+      isWorking: true
+    })
+
+    await handleNotification('thread/name/updated', {
+      threadId: 'thread-1',
+      threadName: '实现功能'
+    })
+    await handleNotification('thread/status/changed', {
+      threadId: 'thread-1',
+      status: {
+        type: 'active',
+        activeFlags: []
+      }
+    })
+    await handleNotification('thread/status/changed', {
+      threadId: 'thread-1',
+      status: {
+        type: 'active',
+        activeFlags: []
+      }
+    })
+
+    expect(threadManager.get('io-thread')).toMatchObject({
+      title: '实现功能',
+      isWorking: true
+    })
+
+    await handleNotification('turn/completed', {
+      threadId: 'thread-1',
+      turn: {
+        id: 'turn-1',
+        items: []
+      }
+    })
+
+    expect(threadManager.get('io-thread')).toMatchObject({
+      title: '实现功能',
+      isWorking: false
+    })
+  })
+
+  it('codex agent syncs persisted vscode codex thread refreshes', async () => {
+    const sent: Message[] = []
+    const threadManager = new ThreadManager()
+    const agent = createCodexAgent({
+      threadManager,
+      send: async (message) => {
+        sent.push(message)
+      },
+      appServer: {
+        async start(): Promise<void> {},
+        async request(method: string): Promise<unknown> {
+          if (method === 'account/read') {
+            return {
+              account: {}
+            }
+          }
+          if (method === 'thread/list') {
+            return {
+              data: [
+                {
+                  id: 'vscode-thread',
+                  name: 'VSCode 正在工作',
+                  preview: '',
+                  status: {
+                    type: 'active'
+                  }
+                }
+              ],
+              nextCursor: null
+            }
+          }
+          if (method === 'thread/read') {
+            return {
+              thread: {
+                id: 'vscode-thread',
+                name: 'VSCode 正在工作',
+                preview: '',
+                status: {
+                  type: 'active'
+                }
+              }
+            }
+          }
+          if (method === 'thread/turns/list') {
+            return {
+              data: [
+                {
+                  id: 'turn-1',
+                  items: [
+                    {
+                      type: 'agentMessage',
+                      id: 'item-1',
+                      text: 'VSCode Codex 输出。'
+                    }
+                  ]
+                }
+              ],
+              nextCursor: null
+            }
+          }
+          return {}
+        },
+        async waitForNotification(): Promise<void> {},
+        async stop(): Promise<void> {}
+      }
+    })
+
+    await agent.start()
+    const client = (agent as unknown as {
+      client: CodexcClient
+    }).client
+    await client.refresh()
+
+    expect(threadManager.get('vscode-thread')).toMatchObject({
+      id: 'vscode-thread',
+      agentThreadId: 'vscode-thread',
+      title: 'VSCode 正在工作',
+      isWorking: true
+    })
+    expect(sent.map((message) => message.text)).toEqual([
+      'VSCode Codex 输出。'
+    ])
+    expect(sent[0]).toMatchObject({
+      ioThreadId: 'vscode-thread',
+      role: 'agent'
     })
   })
 
@@ -1110,6 +1511,7 @@ describe('core', () => {
 
     expect(requests.map((request) => request.method)).toEqual([
       'account/read',
+      'thread/list',
       'account/login/start'
     ])
     expect(outbound).toHaveLength(1)
@@ -1194,8 +1596,10 @@ describe('core', () => {
     expect(stops).toBe(1)
     expect(requests.map((request) => request.method)).toEqual([
       'account/read',
+      'thread/list',
       'account/login/start',
-      'account/read'
+      'account/read',
+      'thread/list'
     ])
     expect(outbound).toContain('Codex 登录已完成。')
   })
@@ -2589,6 +2993,7 @@ function createCodexAgent(input: {
   appServer: CodexAppServerTestHandle
   config?: CodexioConfig
   send?: (message: Message) => Promise<void>
+  threadManager?: ThreadManager
 }): CodexAgent {
   const config = input.config ?? ConfigSchema.parse({})
   const configer = {
@@ -2612,7 +3017,7 @@ function createCodexAgent(input: {
       return Result.success(null)
     }
   })
-  return new TestCodexAgent(configer, testMetadata, outputManager, new CodexMessageStreamer(outputManager))
+  return new TestCodexAgent(configer, testMetadata, outputManager, new CodexMessageStreamer(outputManager), input.threadManager ?? new ThreadManager())
 }
 
 async function createAgentManager(

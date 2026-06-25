@@ -81,6 +81,7 @@ export const webPageHtml = `<!doctype html>
           >
             <svg xmlns="http://www.w3.org/2000/svg" class="size-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>
             <span class="min-w-0 flex-1 truncate" x-text="thread.title || '新对话'"></span>
+            <span x-show="thread.isWorking" class="size-2 shrink-0 rounded-full bg-emerald-500" aria-hidden="true"></span>
             <span
               x-show="thread.unread > 0"
               class="grid min-w-5 shrink-0 place-items-center rounded-full bg-blue-600 px-1.5 text-[10px] leading-5 text-white"
@@ -338,6 +339,7 @@ export const webPageHtml = `<!doctype html>
             title: '',
             messages: [],
             unread: 0,
+            isWorking: false,
             updatedAt: Date.now()
           }
           this.threads.unshift(thread)
@@ -394,6 +396,7 @@ export const webPageHtml = `<!doctype html>
             title: '',
             messages: [],
             unread: 0,
+            isWorking: false,
             updatedAt: Date.now()
           }
           this.threads.unshift(thread)
@@ -410,6 +413,29 @@ export const webPageHtml = `<!doctype html>
           const text = (message.text || '').replace(/\s+/g, ' ').trim()
           if (text.length > 0) {
             thread.title = text.slice(0, 32)
+          }
+        },
+        upsertThread(input) {
+          if (!input || !input.id) {
+            return
+          }
+          const thread = this.ensureThread(input.id)
+          thread.title = typeof input.title === 'string' && input.title.length > 0 ? input.title : thread.title
+          thread.isWorking = Boolean(input.isWorking)
+          if (thread.id === this.activeIoThreadId) {
+            this.messages = thread.messages
+          }
+        },
+        removeThread(id) {
+          const index = this.threads.findIndex((item) => item.id === id)
+          if (index < 0) {
+            return
+          }
+          this.threads.splice(index, 1)
+          if (this.activeIoThreadId === id) {
+            const next = this.threads[0]
+            this.activeIoThreadId = next ? next.id : ''
+            this.messages = next ? next.messages : []
           }
         },
         getInitialTheme() {
@@ -511,6 +537,24 @@ export const webPageHtml = `<!doctype html>
           if (message.event === 'ready') {
             return
           }
+          if (message.event === 'threads') {
+            for (const thread of message.threads || []) {
+              this.upsertThread(thread)
+            }
+            return
+          }
+          if (message.event === 'messages') {
+            this.replaceMessages(message.messages || [])
+            return
+          }
+          if (message.event === 'thread') {
+            this.upsertThread(message.thread)
+            return
+          }
+          if (message.event === 'threadDeleted') {
+            this.removeThread(message.id)
+            return
+          }
           if (message.event === 'error') {
             this.append(message.ioThreadId, 'error', message.message || 'Request failed')
             return
@@ -528,6 +572,36 @@ export const webPageHtml = `<!doctype html>
           }
           if (message.role === 'agent') {
             this.append(message.ioThreadId, 'agent', message.text || '', message.html, message.files || [])
+          }
+        },
+        replaceMessages(messages) {
+          for (const thread of this.threads) {
+            thread.messages = []
+            thread.unread = 0
+          }
+          const activeId = this.activeIoThreadId
+          for (const message of messages) {
+            const type = message.role === 'agent' ? 'agent' : message.role
+            const thread = this.ensureThread(message.ioThreadId)
+            thread.messages.push({
+              id: this.nextId++,
+              type,
+              text: message.text || '',
+              html: message.html,
+              files: message.files || []
+            })
+            thread.updatedAt = message.createdAt || Date.now()
+            this.updateThreadTitle(thread, thread.messages[thread.messages.length - 1])
+            if (activeId && thread.id !== activeId) {
+              thread.unread = 0
+            }
+          }
+          const active = this.activeThread()
+          this.messages = active ? active.messages : []
+          if (this.autoScroll) {
+            this.$nextTick(() => {
+              this.scrollToBottom(false)
+            })
           }
         },
         send() {

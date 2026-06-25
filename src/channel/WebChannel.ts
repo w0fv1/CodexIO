@@ -8,8 +8,11 @@ import { FileStore } from '../component/FileStore.js'
 import { Logger } from '../component/Logger.js'
 import { renderMarkdownHtml, shouldRenderMarkdown } from '../util/Markdown.js'
 import { allIoThreadId, Message, MessageFile } from '../value/Message.js'
+import { Thread } from '../value/Thread.js'
 import { Result } from '../value/Result.js'
 import { Configer } from '../component/Configer.js'
+import { ThreadManager } from '../component/ThreadManager.js'
+import { ThreadMessageStore } from '../component/ThreadMessageStore.js'
 import { ChannelInput, ChannelInputReceive, ChannelOutput } from './Channel.js'
 
 const WebSocketInputSchema = z.object({
@@ -29,6 +32,26 @@ type WebSocketMessageOutput = {
   files?: MessageFile[]
 }
 
+type WebSocketThreadListOutput = {
+  event: 'threads'
+  threads: Thread[]
+}
+
+type WebSocketThreadOutput = {
+  event: 'thread'
+  thread: Thread
+}
+
+type WebSocketThreadDeletedOutput = {
+  event: 'threadDeleted'
+  id: string
+}
+
+type WebSocketMessagesOutput = {
+  event: 'messages'
+  messages: WebSocketMessageOutput[]
+}
+
 @injectable()
 export class WebChannelHub {
   private readonly sockets = new Set<WebSocket>()
@@ -39,8 +62,24 @@ export class WebChannelHub {
   private receive?: ChannelInputReceive
   private stopped = false
 
-  constructor(@inject(FileStore) private readonly fileStore: FileStore) {
+  constructor(
+    @inject(FileStore) private readonly fileStore: FileStore,
+    @inject(ThreadManager) private readonly threadManager: ThreadManager,
+    @inject(ThreadMessageStore) private readonly messageStore: ThreadMessageStore
+  ) {
     this.server.on('connection', (socket) => this.connect(socket))
+    this.threadManager.subscribe((thread) => {
+      this.broadcast({
+        event: 'thread',
+        thread
+      })
+    })
+    this.threadManager.subscribeDelete((id) => {
+      this.broadcast({
+        event: 'threadDeleted',
+        id
+      })
+    })
   }
 
   startInput(receive: ChannelInputReceive): void {
@@ -83,6 +122,11 @@ export class WebChannelHub {
 
   send(message: Message): Result<null> {
     if (message.role === 'system' && message.text === 'clear') {
+      if (message.ioThreadId === allIoThreadId) {
+        this.messageStore.clear()
+      } else {
+        this.messageStore.clear(message.ioThreadId)
+      }
       for (const socket of this.sockets) {
         if (socket.readyState === WebSocket.OPEN) {
           socket.send(JSON.stringify({
@@ -94,23 +138,10 @@ export class WebChannelHub {
       }
       return Result.success(null)
     }
+    this.messageStore.append(message)
     for (const socket of this.sockets) {
       if (socket.readyState === WebSocket.OPEN) {
-        const data: WebSocketMessageOutput = {
-          event: 'message',
-          role: message.role,
-          ioThreadId: message.ioThreadId,
-          allIoThreadId,
-          text: message.text,
-          createdAt: message.createdAt
-        }
-        if (message.files && message.files.length > 0) {
-          data.files = message.files
-        }
-        if (message.role !== 'user' && shouldRenderMarkdown(message.text)) {
-          data.html = renderMarkdownHtml(message.text)
-        }
-        socket.send(JSON.stringify(data))
+        socket.send(JSON.stringify(this.toWebSocketMessage(message)))
       }
     }
     return Result.success(null)
@@ -143,6 +174,14 @@ export class WebChannelHub {
     socket.send(JSON.stringify({
       event: 'ready'
     }))
+    socket.send(JSON.stringify({
+      event: 'threads',
+      threads: this.threadManager.list()
+    } satisfies WebSocketThreadListOutput))
+    socket.send(JSON.stringify({
+      event: 'messages',
+      messages: this.messageStore.list().map((message) => this.toWebSocketMessage(message))
+    } satisfies WebSocketMessagesOutput))
     socket.on('message', async (data) => {
       const receive = this.receive
       if (!receive) {
@@ -169,6 +208,7 @@ export class WebChannelHub {
       }
       const text = parsed.data.text
       const ioThreadId = parsed.data.ioThreadId ?? randomUUID()
+      this.threadManager.ensure(ioThreadId)
       let files: MessageFile[] = []
       try {
         files = this.fileStore.resolveMany(parsed.data.files)
@@ -214,6 +254,32 @@ export class WebChannelHub {
         count: this.sockets.size
       })
     })
+  }
+
+  private broadcast(data: WebSocketThreadOutput | WebSocketThreadDeletedOutput): void {
+    for (const socket of this.sockets) {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify(data))
+      }
+    }
+  }
+
+  private toWebSocketMessage(message: Message): WebSocketMessageOutput {
+    const data: WebSocketMessageOutput = {
+      event: 'message',
+      role: message.role,
+      ioThreadId: message.ioThreadId,
+      allIoThreadId,
+      text: message.text,
+      createdAt: message.createdAt
+    }
+    if (message.files && message.files.length > 0) {
+      data.files = message.files
+    }
+    if (message.role !== 'user' && shouldRenderMarkdown(message.text)) {
+      data.html = renderMarkdownHtml(message.text)
+    }
+    return data
   }
 }
 

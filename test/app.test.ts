@@ -18,6 +18,8 @@ import { AgentManager } from '../src/agent/AgentManager.js'
 import { CodexioApiController } from '../src/controller/CodexioApiController.js'
 import { Agent } from '../src/agent/Agent.js'
 import { FileStore } from '../src/component/FileStore.js'
+import { ThreadManager } from '../src/component/ThreadManager.js'
+import { ThreadMessageStore } from '../src/component/ThreadMessageStore.js'
 import { CommandExecutor } from '../src/controller/CommandExecutor.js'
 import { Updater } from '../src/component/Updater.js'
 import { WebChannelHub, WebChannelInput, WebChannelOutput } from '../src/channel/WebChannel.js'
@@ -97,6 +99,23 @@ describe('server', () => {
     }
   })
 
+  it('starts the selected agent when the application starts', async () => {
+    const started: string[] = []
+    class StartupAgent extends TestAgent {
+      override async start(): Promise<void> {
+        started.push('started')
+      }
+    }
+    const { listener } = await startTestServer(new StartupAgent())
+    try {
+      expect(started).toEqual([
+        'started'
+      ])
+    } finally {
+      await closeTestServer(listener)
+    }
+  })
+
   it('receives web text', async () => {
     const { baseUrl, listener } = await startTestServer()
     const socket = await openWebSocket(baseUrl)
@@ -164,6 +183,34 @@ describe('server', () => {
       ioThreadId: 'io-thread-b',
       text: 'test: second'
     })
+    await closeWebSocket(socket)
+    await closeTestServer(listener)
+  })
+
+  it('streams thread metadata separately from messages', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    const { socket, messages } = await openRecordedWebSocket(baseUrl)
+
+    await waitFor(() => messages.some((message) => message.event === 'threads'))
+    socket.send(JSON.stringify({
+      ioThreadId: 'thread-metadata-test',
+      text: 'hello'
+    }))
+    await waitFor(() => messages.some((message) => message.event === 'thread' && (message.thread as { id?: string })?.id === 'thread-metadata-test'))
+
+    expect(messages.find((message) => message.event === 'threads')).toMatchObject({
+      event: 'threads',
+      threads: expect.any(Array)
+    })
+    expect(messages.find((message) => message.event === 'thread' && (message.thread as { id?: string })?.id === 'thread-metadata-test')).toMatchObject({
+      event: 'thread',
+      thread: {
+        id: 'thread-metadata-test',
+        title: '',
+        isWorking: false
+      }
+    })
+
     await closeWebSocket(socket)
     await closeTestServer(listener)
   })
@@ -545,7 +592,10 @@ describe('server', () => {
     }
     expect(result.isFailed).toBe(false)
     await closed
-    expect(messages).toEqual([])
+    expect(messages.filter((message) => ![
+      'threads',
+      'messages'
+    ].includes(String(message.event)))).toEqual([])
   })
 
   it('broadcasts user input to every web connection', async () => {
@@ -599,7 +649,7 @@ describe('server', () => {
     await closeTestServer(listener)
   })
 
-  it('does not restore channel manager messages in new web connections', async () => {
+  it('restores channel manager messages in new web connections', async () => {
     const { baseUrl, listener } = await startTestServer()
     const socket = await openWebSocket(baseUrl)
     const messages = recordWebSocket(socket)
@@ -610,13 +660,16 @@ describe('server', () => {
       }))
       await waitForWebSocketMessages(messages, index * 3)
     }
-    const restoredSocket = await openWebSocket(baseUrl)
-    const restored = recordWebSocket(restoredSocket)
-    await new Promise((resolve) => {
-      setTimeout(resolve, 50)
+    const restored = await openRecordedWebSocket(baseUrl)
+    await waitFor(() => restored.messages.some((message) => message.event === 'messages'))
+    const snapshot = restored.messages.find((message) => message.event === 'messages') as {
+      messages?: Array<Record<string, unknown>>
+    }
+    expect(snapshot.messages).toHaveLength(36)
+    expect(snapshot.messages?.find((message) => message.event === 'message' && message.role === 'agent' && message.ioThreadId === 'io-thread-history')).toMatchObject({
+      text: 'test: message 1'
     })
-    expect(restored).toHaveLength(0)
-    await closeWebSocket(restoredSocket)
+    await closeWebSocket(restored.socket)
     await closeWebSocket(socket)
     await closeTestServer(listener)
   })
@@ -661,7 +714,7 @@ describe('server', () => {
 
 })
 
-async function startTestServer(): Promise<{
+async function startTestServer(agent = new TestAgent()): Promise<{
   baseUrl: string
   configPath: string
   listener: HttpServer
@@ -683,7 +736,7 @@ async function startTestServer(): Promise<{
     'workspace:',
     `  path: ${workspace}`
   ].join('\n'), 'utf8')
-  const server = await createTestCodexioApp(createTestConfiger(configPath), new TestAgent())
+  const server = await createTestCodexioApp(createTestConfiger(configPath), agent)
   const listener = server.listen(0)
   await new Promise<void>((resolve) => listener.once('listening', resolve))
   const address = listener.address()
@@ -716,7 +769,8 @@ async function createTestCodexioApp(configer: Configer, claudeAgent: Agent): Pro
   })
   const eventBus = new EventBus()
   const fileStore = new FileStore(metadata)
-  const webHub = new WebChannelHub(fileStore)
+  const threadManager = new ThreadManager()
+  const webHub = new WebChannelHub(fileStore, threadManager, new ThreadMessageStore())
   const webInput = new WebChannelInput(configer, webHub)
   const webOutput = new WebChannelOutput(configer, webHub)
   const feishuHub = new FeishuChannelHub(configer)
@@ -748,6 +802,7 @@ async function createTestCodexioApp(configer: Configer, claudeAgent: Agent): Pro
   const apiController = new CodexioApiController(configer, outputManager, agentManager, fileStore, webHub, eventBus)
   await outputManager.start()
   await inputManager.start()
+  await agentManager.start()
   const stop = async () => {
     await ignoreStopFailure(apiController.stop())
     await ignoreStopFailure(inputManager.stop())
@@ -813,7 +868,13 @@ function recordWebSocket(socket: WebSocket): Array<Record<string, unknown>> {
   const messages: Array<Record<string, unknown>> = []
   socket.on('message', (data) => {
     const message = JSON.parse(data.toString()) as Record<string, unknown>
-    if (message.event !== 'ready') {
+    if (![
+      'ready',
+      'threads',
+      'messages',
+      'thread',
+      'threadDeleted'
+    ].includes(String(message.event))) {
       messages.push(message)
     }
   })

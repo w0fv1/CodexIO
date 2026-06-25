@@ -15,6 +15,7 @@ import { CodexioMetadata } from './component/CodexioMetadata.js'
 import { CodexioApiController } from './controller/CodexioApiController.js'
 import { EventBus } from './component/EventBus.js'
 import { AppEvent } from './value/Event.js'
+import { allIoThreadId } from './value/Message.js'
 
 @injectable()
 export class CodexioApplication {
@@ -49,6 +50,10 @@ export class CodexioApplication {
       await this.apiController.start()
       await this.outputManager.start()
       await this.inputManager.start()
+      const agentStarted = await this.agentManager.start()
+      if (agentStarted.isFailed) {
+        await this.outputManager.sendSystem(agentStarted.message, 'agent', allIoThreadId)
+      }
       this.updater.start()
       await mkdir(dirname(this.codexioMetadata.serverStatePath), {
         recursive: true

@@ -6,14 +6,17 @@ import { inject, injectable } from 'inversify'
 import { Agent } from './Agent.js'
 import { createProcessEnv } from '../util/ProcessEnvironment.js'
 import { CodexAppServer, CodexAppServerRequestError } from './CodexAppServer.js'
+import { CodexcClient, CodexcThread, CodexcThreadItem } from './CodexcClient.js'
 import { CodexioMetadata } from '../component/CodexioMetadata.js'
 import { Configer } from '../component/Configer.js'
 import { Logger } from '../component/Logger.js'
+import { ThreadManager } from '../component/ThreadManager.js'
 import { isImageFile } from '../component/FileStore.js'
 import { allIoThreadId, Message } from '../value/Message.js'
 import { ChannelOutputManager } from '../channel/ChannelOutputManager.js'
 import { CodexMessageStreamer } from './CodexMessageStreamer.js'
 import { Result } from '../value/Result.js'
+import { Thread } from '../value/Thread.js'
 
 const codexEntryPath = createRequire(import.meta.url).resolve('@openai/codex/bin/codex.js')
 
@@ -39,11 +42,10 @@ export function createCodexCommand(bundled: boolean | undefined, args: string[])
 }
 
 type CodexAppServerHandle = Pick<CodexAppServer, 'start' | 'request' | 'waitForNotification' | 'stop'>
+type CodexcClientHandle = Pick<CodexcClient, 'start' | 'request' | 'waitForNotification' | 'refresh' | 'stop' | 'on'>
 
-type CodexThread = {
-  ioThreadId: string
+type ActiveCodexThread = Thread & {
   agentThreadId: string
-  turnId?: string
 }
 
 const codexLoginInProgressMessage = '请先完成 Codex 登录。'
@@ -59,16 +61,17 @@ export class AgentLoginInProgressError extends Error {
 export class CodexAgent implements Agent {
   readonly type = 'codex'
   private started = false
-  private appServer?: CodexAppServerHandle
+  private client?: CodexcClientHandle
   private loginTask?: Promise<void>
-  private readonly threads = new Map<string, CodexThread>()
-  private readonly ioThreadIdByAgentThreadId = new Map<string, string>()
+  private readonly turnIdByIoThreadId = new Map<string, string>()
+  private readonly disposeClientListeners: Array<() => void> = []
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
     @inject(CodexioMetadata) private readonly metadata: CodexioMetadata,
     @inject(ChannelOutputManager) private readonly outputManager: ChannelOutputManager,
-    @inject(CodexMessageStreamer) private readonly messageStreamer: CodexMessageStreamer
+    @inject(CodexMessageStreamer) private readonly messageStreamer: CodexMessageStreamer,
+    @inject(ThreadManager) private readonly threadManager: ThreadManager
   ) {}
 
   async login(): Promise<void> {
@@ -112,14 +115,13 @@ export class CodexAgent implements Agent {
     Logger.info('codex agent starting', {
       cwd: await this.configer.get('workspace.path')
     })
-    if (!this.appServer) {
-      this.appServer = await this.createAppServer((method, params) => {
-        void this.handleNotification(method, params)
-      })
-      await this.appServer.start()
+    if (!this.client) {
+      this.client = await this.createCodexcClient()
+      await this.client.start()
     }
     await this.ensureLoggedIn(ioThreadId)
     this.started = true
+    await this.client.refresh()
     Logger.info('codex agent ready')
   }
 
@@ -128,7 +130,7 @@ export class CodexAgent implements Agent {
       throw new Error('agent not started')
     }
     const thread = await this.ensureThread(input.ioThreadId)
-    if (!this.appServer) {
+    if (!this.client) {
       throw new Error('codex app-server not started')
     }
     const genericFiles = (input.files ?? []).filter((file) => !isImageFile(file))
@@ -151,22 +153,23 @@ export class CodexAgent implements Agent {
         })
       }
     }
-    if (thread.turnId) {
+    const turnId = this.turnIdByIoThreadId.get(thread.id)
+    if (turnId) {
       Logger.info('codex turn steered', {
-        ioThreadId: thread.ioThreadId,
+        ioThreadId: thread.id,
         agentThreadId: thread.agentThreadId,
-        turnId: thread.turnId,
+        turnId,
         length: input.text.length,
         files: input.files?.length ?? 0
       })
-      await this.appServer.request('turn/steer', {
+      await this.client.request('turn/steer', {
         threadId: thread.agentThreadId,
-        expectedTurnId: thread.turnId,
+        expectedTurnId: turnId,
         input: turnInput
       })
       return
     }
-    const response = await this.appServer.request('turn/start', {
+    const response = await this.client.request('turn/start', {
       threadId: thread.agentThreadId,
       input: turnInput
     })
@@ -177,56 +180,63 @@ export class CodexAgent implements Agent {
     if (!turn || typeof turn !== 'object' || typeof (turn as Record<string, unknown>).id !== 'string') {
       throw new Error('codex turn id not found')
     }
-    thread.turnId = (turn as Record<string, string>).id
+    this.turnIdByIoThreadId.set(thread.id, (turn as Record<string, string>).id)
+    this.threadManager.setWorking(thread.id, true)
     Logger.info('codex turn started', {
-      ioThreadId: thread.ioThreadId,
+      ioThreadId: thread.id,
       agentThreadId: thread.agentThreadId,
-      turnId: thread.turnId,
+      turnId: this.turnIdByIoThreadId.get(thread.id),
       length: input.text.length,
       files: input.files?.length ?? 0
     })
   }
 
   async clear(ioThreadId: string): Promise<void> {
-    const thread = this.threads.get(ioThreadId)
+    const thread = this.threadManager.get(ioThreadId)
     Logger.info('codex agent clearing', {
       ioThreadId,
       agentThreadId: thread?.agentThreadId,
-      turnId: thread?.turnId
+      turnId: this.turnIdByIoThreadId.get(ioThreadId)
     })
-    if (thread) {
+    if (thread?.agentThreadId) {
       await this.interruptActiveTurn(thread)
       this.messageStreamer.clearThread(ioThreadId)
-      this.ioThreadIdByAgentThreadId.delete(thread.agentThreadId)
-      this.threads.delete(ioThreadId)
+      this.turnIdByIoThreadId.delete(ioThreadId)
+      this.threadManager.remove(ioThreadId)
     }
     this.started = true
-    if (this.appServer) {
+    if (this.client) {
       await this.startThread(ioThreadId)
     }
   }
 
   async stop(): Promise<void> {
     Logger.info('codex agent stopping', {
-      threads: this.threads.size
+      threads: this.threadManager.list().length
     })
-    for (const thread of this.threads.values()) {
-      await this.interruptActiveTurn(thread)
+    for (const thread of this.threadManager.list()) {
+      if (thread.agentThreadId) {
+        await this.interruptActiveTurn(thread)
+      }
     }
-    await this.appServer?.stop()
-    this.appServer = undefined
+    await this.client?.stop()
+    this.client = undefined
+    this.disposeClientListeners.splice(0).forEach((dispose) => {
+      dispose()
+    })
     this.loginTask = undefined
     this.messageStreamer.clear()
-    this.threads.clear()
-    this.ioThreadIdByAgentThreadId.clear()
+    this.turnIdByIoThreadId.clear()
+    this.threadManager.clear()
     this.started = false
   }
 
-  private async startThread(ioThreadId: string): Promise<CodexThread> {
-    if (!this.appServer) {
+  private async startThread(ioThreadId: string): Promise<ActiveCodexThread> {
+    if (!this.client) {
       throw new Error('codex app-server not started')
     }
-    const response = await this.appServer.request('thread/start', {
+    this.threadManager.ensure(ioThreadId)
+    const response = await this.client.request('thread/start', {
       cwd: await this.configer.get('workspace.path'),
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
@@ -234,12 +244,7 @@ export class CodexAgent implements Agent {
       developerInstructions: await this.readDeveloperInstructions()
     })
     const agentThreadId = this.readThreadId(response)
-    const thread: CodexThread = {
-      ioThreadId,
-      agentThreadId
-    }
-    this.threads.set(ioThreadId, thread)
-    this.ioThreadIdByAgentThreadId.set(agentThreadId, ioThreadId)
+    const thread = this.threadManager.bind(ioThreadId, agentThreadId) as ActiveCodexThread
     Logger.info('codex thread started', {
       ioThreadId,
       agentThreadId
@@ -262,34 +267,36 @@ export class CodexAgent implements Agent {
     return (thread as Record<string, string>).id
   }
 
-  private async ensureThread(ioThreadId: string): Promise<CodexThread> {
-    const existing = this.threads.get(ioThreadId)
-    if (existing) {
-      return existing
+  private async ensureThread(ioThreadId: string): Promise<ActiveCodexThread> {
+    const existing = this.threadManager.get(ioThreadId)
+    if (existing?.agentThreadId) {
+      return existing as ActiveCodexThread
     }
     return this.startThread(ioThreadId)
   }
 
-  private async interruptActiveTurn(thread: CodexThread): Promise<void> {
-    if (thread.turnId && this.appServer) {
+  private async interruptActiveTurn(thread: Thread): Promise<void> {
+    const turnId = this.turnIdByIoThreadId.get(thread.id)
+    if (thread.agentThreadId && turnId && this.client) {
       Logger.info('codex turn interrupt requested', {
-        ioThreadId: thread.ioThreadId,
+        ioThreadId: thread.id,
         agentThreadId: thread.agentThreadId,
-        turnId: thread.turnId
+        turnId
       })
-      await this.appServer.request('turn/interrupt', {
+      await this.client.request('turn/interrupt', {
         threadId: thread.agentThreadId,
-        turnId: thread.turnId
+        turnId
       }).catch((error) => {
         Logger.warn('codex turn interrupt failed', {
           error: error instanceof Error ? error.message : String(error)
         })
       })
+      this.threadManager.setWorking(thread.id, false)
     }
   }
 
   private async ensureLoggedIn(ioThreadId?: string): Promise<void> {
-    if (!this.appServer) {
+    if (!this.client) {
       throw new Error('codex app-server not started')
     }
     if (this.loginTask) {
@@ -297,7 +304,7 @@ export class CodexAgent implements Agent {
     }
     let status: unknown
     try {
-      status = await this.appServer.request('account/read', {
+      status = await this.client.request('account/read', {
         refreshToken: true
       })
     } catch (error) {
@@ -320,7 +327,7 @@ export class CodexAgent implements Agent {
   }
 
   private async startDeviceLogin(ioThreadId?: string): Promise<void> {
-    if (!this.appServer) {
+    if (!this.client) {
       throw new Error('codex app-server not started')
     }
     if (this.loginTask) {
@@ -328,7 +335,7 @@ export class CodexAgent implements Agent {
     }
     let login: unknown
     try {
-      login = await this.appServer.request('account/login/start', {
+      login = await this.client.request('account/login/start', {
         type: 'chatgptDeviceCode'
       })
     } catch (error) {
@@ -359,9 +366,9 @@ export class CodexAgent implements Agent {
       createdAt: Date.now()
     }
     await this.sendAgent(loginMessage)
-    const appServer = this.appServer
+    const client = this.client
     const task = (async () => {
-      await appServer.waitForNotification('account/login/completed')
+      await client.waitForNotification('account/login/completed')
       const completedMessage = 'Codex 登录已完成。'
       process.stdout.write(`${completedMessage}\n`)
       const completionMessage: Message = {
@@ -447,16 +454,40 @@ export class CodexAgent implements Agent {
     }
     const data = params as Record<string, unknown>
     const thread = this.resolveThread(data.threadId)
+    if (method === 'thread/started') {
+      const startedThread = data.thread
+      const agentThreadId = readObjectString(startedThread, 'id')
+      const existing = agentThreadId ? this.resolveThread(agentThreadId) : undefined
+      const title = readObjectString(startedThread, 'name') ?? readObjectString(startedThread, 'preview')
+      if (existing && title) {
+        this.threadManager.setTitle(existing.id, title)
+      }
+      return
+    }
+    if (method === 'thread/name/updated') {
+      if (thread && typeof data.threadName === 'string') {
+        this.threadManager.setTitle(thread.id, data.threadName)
+      }
+      return
+    }
+    if (method === 'thread/status/changed') {
+      const status = data.status
+      if (thread && status && typeof status === 'object') {
+        this.threadManager.setWorking(thread.id, (status as Record<string, unknown>).type === 'active')
+      }
+      return
+    }
     if (method === 'turn/started') {
       const turn = data.turn
       if (thread && turn && typeof turn === 'object' && typeof (turn as Record<string, unknown>).id === 'string') {
-        thread.turnId = (turn as Record<string, string>).id
+        this.turnIdByIoThreadId.set(thread.id, (turn as Record<string, string>).id)
+        this.threadManager.setWorking(thread.id, true)
       }
       return
     }
     if (method === 'item/agentMessage/delta') {
       if (thread && typeof data.itemId === 'string' && typeof data.delta === 'string') {
-        await this.messageStreamer.append(thread, data.itemId, data.delta)
+        await this.messageStreamer.append(streamThread(thread), data.itemId, data.delta)
       } else {
         Logger.warn('codex stream delta ignored', {
           hasThread: Boolean(thread),
@@ -486,7 +517,7 @@ export class CodexAgent implements Agent {
         process.stdout.write((item as Record<string, string>).aggregatedOutput)
       } else {
         if (thread && item && typeof item === 'object' && (item as Record<string, unknown>).type === 'agentMessage' && typeof (item as Record<string, unknown>).id === 'string') {
-          await this.messageStreamer.completeItem(thread, (item as Record<string, string>).id)
+          await this.messageStreamer.completeItem(streamThread(thread), (item as Record<string, string>).id)
         }
         Logger.info('codex item completed', {
           type: readObjectString(item, 'type'),
@@ -502,9 +533,10 @@ export class CodexAgent implements Agent {
         return
       }
       const turnId = (turn as Record<string, unknown>).id
-      if (typeof turnId === 'string' && turnId === thread.turnId) {
-        thread.turnId = undefined
+      if (typeof turnId === 'string' && turnId === this.turnIdByIoThreadId.get(thread.id)) {
+        this.turnIdByIoThreadId.delete(thread.id)
       }
+      this.threadManager.setWorking(thread.id, false)
       const items = (turn as Record<string, unknown>).items
       const messages: Array<{ itemId: string, text: string }> = []
       if (Array.isArray(items)) {
@@ -524,12 +556,12 @@ export class CodexAgent implements Agent {
         }
       }
       Logger.info('codex turn completed', {
-        ioThreadId: thread.ioThreadId,
+        ioThreadId: thread.id,
         agentThreadId: thread.agentThreadId,
         turnId,
         agentMessages: messages.length
       })
-      await this.messageStreamer.complete(thread, messages)
+      await this.messageStreamer.complete(streamThread(thread), messages)
       return
     }
     if (method === 'error') {
@@ -537,12 +569,15 @@ export class CodexAgent implements Agent {
       if (error && typeof error === 'object' && typeof (error as Record<string, unknown>).message === 'string') {
         const message = (error as Record<string, string>).message
         Logger.error('codex notification error', new Error(message))
+        if (thread) {
+          this.threadManager.setWorking(thread.id, false)
+        }
         if (this.isAuthenticationInvalidated(error)) {
-          await this.startDeviceLogin(thread?.ioThreadId ?? this.firstIoThreadId())
+          await this.startDeviceLogin(thread?.id ?? this.firstIoThreadId())
           return
         }
         await this.sendAgent({
-          ioThreadId: thread?.ioThreadId ?? this.firstIoThreadId() ?? allIoThreadId,
+          ioThreadId: thread?.id ?? this.firstIoThreadId() ?? allIoThreadId,
           role: 'agent',
           text: message,
           createdAt: Date.now()
@@ -560,23 +595,98 @@ export class CodexAgent implements Agent {
     })
   }
 
-  private resolveThread(agentThreadId: unknown): CodexThread | undefined {
+  private resolveThread(agentThreadId: unknown): ActiveCodexThread | undefined {
     if (typeof agentThreadId !== 'string') {
       return undefined
     }
-    const ioThreadId = this.ioThreadIdByAgentThreadId.get(agentThreadId)
-    if (!ioThreadId) {
-      return undefined
-    }
-    return this.threads.get(ioThreadId)
+    const thread = this.threadManager.getByAgentThreadId(agentThreadId)
+    return thread?.agentThreadId ? thread as ActiveCodexThread : undefined
   }
 
   private firstIoThreadId(): string | undefined {
-    return this.threads.keys().next().value
+    return this.threadManager.list().at(0)?.id
   }
 
   private async sendAgent(message: Message): Promise<void> {
     await this.outputManager.sendAgent(message).catch(() => {})
+  }
+
+  protected async createCodexcClient(): Promise<CodexcClientHandle> {
+    let client: CodexcClient
+    const appServer = await this.createAppServer((method, params) => {
+      client.handleNotification(method, params)
+    })
+    client = new CodexcClient({
+      appServer,
+      refreshIntervalMs: 5000
+    })
+    this.disposeClientListeners.push(client.on('notification', ({ method, params }) => {
+      void this.handleNotification(method, params)
+    }))
+    this.disposeClientListeners.push(client.on('thread', (thread) => {
+      this.syncCodexcThread(thread)
+    }))
+    this.disposeClientListeners.push(client.on('threadDeleted', (threadId) => {
+      this.syncCodexcThreadDeleted(threadId)
+    }))
+    this.disposeClientListeners.push(client.on('item', (item) => {
+      void this.syncCodexcItem(item)
+    }))
+    this.disposeClientListeners.push(client.on('error', (error) => {
+      Logger.warn('codex client refresh failed', {
+        error: error.message
+      })
+    }))
+    return client
+  }
+
+  private syncCodexcThread(thread: CodexcThread): void {
+    const existing = this.threadManager.getByAgentThreadId(thread.id)
+    if (existing) {
+      if (thread.title) {
+        this.threadManager.setTitle(existing.id, thread.title)
+      }
+      this.threadManager.setWorking(existing.id, thread.isWorking)
+      return
+    }
+    this.threadManager.bind(thread.id, thread.id)
+    if (thread.title) {
+      this.threadManager.setTitle(thread.id, thread.title)
+    }
+    this.threadManager.setWorking(thread.id, thread.isWorking)
+  }
+
+  private syncCodexcThreadDeleted(threadId: string): void {
+    const existing = this.threadManager.getByAgentThreadId(threadId) ?? this.threadManager.get(threadId)
+    if (existing) {
+      this.threadManager.remove(existing.id)
+    }
+  }
+
+  private async syncCodexcItem(item: CodexcThreadItem): Promise<void> {
+    const thread = this.threadManager.getByAgentThreadId(item.threadId) ?? this.threadManager.get(item.threadId)
+    if (!thread?.agentThreadId) {
+      return
+    }
+    if (item.role === 'assistant') {
+      await this.outputManager.sendAgent({
+        ioThreadId: thread.id,
+        role: 'agent',
+        text: item.text,
+        createdAt: Date.now(),
+        source: 'codex'
+      }).catch(() => {})
+      return
+    }
+    if (item.role === 'user') {
+      await this.outputManager.sendUser({
+        ioThreadId: thread.id,
+        role: 'user',
+        text: item.text,
+        createdAt: Date.now(),
+        source: 'codex'
+      }).catch(() => {})
+    }
   }
 
   protected async createAppServer(onNotification: (method: string, params: unknown) => void): Promise<CodexAppServerHandle> {
@@ -625,4 +735,14 @@ function readObjectString(value: unknown, key: string): string | null {
   }
   const item = (value as Record<string, unknown>)[key]
   return typeof item === 'string' ? item : null
+}
+
+function streamThread(thread: ActiveCodexThread): {
+  ioThreadId: string
+  agentThreadId: string
+} {
+  return {
+    ioThreadId: thread.id,
+    agentThreadId: thread.agentThreadId
+  }
 }
