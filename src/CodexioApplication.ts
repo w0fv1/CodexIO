@@ -107,7 +107,7 @@ const container = new Container({
   defaultScope: 'Singleton'
 })
 container.bind(CodexioMetadata).toConstantValue(new CodexioMetadata({
-  configPath: readConfigPath(process.argv)
+  configPath: process.argv.find((_, index, args) => args[index - 1] === '--config')
 }))
 const application = container.get(CodexioApplication)
 
@@ -115,11 +115,3 @@ void application.start().catch((error) => {
   Logger.error('codexio server failed', error)
   process.exitCode = 1
 })
-
-function readConfigPath(args: string[]): string | undefined {
-  const index = args.indexOf('--config')
-  if (index < 0) {
-    return undefined
-  }
-  return args[index + 1]
-}

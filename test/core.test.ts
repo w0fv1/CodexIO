@@ -1622,7 +1622,7 @@ describe('core', () => {
       devDependencies?: Record<string, unknown>
     }
 
-    expect(packageJson.main).toBe('dist/electron/Main.js')
+    expect(packageJson.main).toBe('dist/CodexioDesktop.js')
     expect(packageJson.scripts?.['package:windows']).toBe('pnpm build && electron-builder --win nsis --x64')
     expect(packageJson.devDependencies?.electron).toBeTruthy()
     expect(packageJson.devDependencies?.['electron-builder']).toBeTruthy()

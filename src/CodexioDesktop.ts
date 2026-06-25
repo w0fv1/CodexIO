@@ -35,7 +35,7 @@ class CodexioDesktop {
     this.configPath = join(this.dataRoot, 'config.yaml')
     this.logPath = join(this.dataRoot, 'log', 'desktop.log')
     this.statePath = join(this.dataRoot, 'state', 'server.json')
-    this.serverPath = join(this.appRoot, 'dist', 'Server.js')
+    this.serverPath = join(this.appRoot, 'dist', 'CodexioApplication.js')
     await mkdir(dirname(this.logPath), {
       recursive: true
     })
