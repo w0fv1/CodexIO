@@ -188,8 +188,7 @@ export class CodexMessageStreamer {
     const sent = await this.outputManager.sendAgent({
       ioThreadId: item.ioThreadId,
       role: 'agent',
-      text: segment.trim(),
-      createdAt: Date.now()
+      text: segment.trim()
     })
     if (sent.isFailed) {
       Logger.warn('codex streaming message send failed', {

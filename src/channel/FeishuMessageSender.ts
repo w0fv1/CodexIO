@@ -37,7 +37,7 @@ export class FeishuMessageSender {
     }
   }
 
-  async send(message: Message): Promise<Result<null>> {
+  async send(message: Message): Promise<Result<void>> {
     if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
       return Result.fail('text or file is required')
     }
@@ -47,7 +47,6 @@ export class FeishuMessageSender {
     try {
       Logger.info('feishu send started', {
         role: message.role,
-        source: message.source ?? null,
         length: message.text.length,
         files: message.files?.length ?? 0
       })
@@ -107,10 +106,7 @@ export class FeishuMessageSender {
           })
         }
       }
-      let text = message.text
-      if (message.role === 'system' && text === 'clear') {
-        text = '已开始新对话'
-      }
+      const text = message.text
       const content: Array<Array<Record<string, string>>> = []
       if (text.trim().length > 0) {
         content.push([
@@ -223,6 +219,6 @@ export class FeishuMessageSender {
       Logger.error('feishu send failed', normalizedError)
       return Result.fromError(error)
     }
-    return Result.success(null)
+    return Result.successVoid()
   }
 }

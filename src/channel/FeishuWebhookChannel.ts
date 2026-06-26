@@ -1,7 +1,7 @@
 import { inject, injectable } from 'inversify'
 import { CodexioConfig } from '../value/ConfigDefinition.js'
 import { Message } from '../value/Message.js'
-import { ChannelOutput } from './Channel.js'
+import { ChannelOutput, ChannelOutputContext } from './Channel.js'
 import { Result } from '../value/Result.js'
 import { Logger } from '../component/Logger.js'
 import { Configer } from '../component/Configer.js'
@@ -27,7 +27,7 @@ export class FeishuWebhookChannelOutput implements ChannelOutput {
     return true
   }
 
-  async send(message: Message): Promise<Result<null>> {
+  async send(message: Message, context?: ChannelOutputContext): Promise<Result<void>> {
     if (!this.config?.url || this.config.url.trim().length === 0) {
       return Result.fail('feishu webhook url is required')
     }
@@ -38,13 +38,10 @@ export class FeishuWebhookChannelOutput implements ChannelOutput {
     if (text.trim().length === 0 && message.files && message.files.length > 0) {
       text = `已收到文件：${message.files.map((file) => file.name).join('、')}`
     }
-    if (message.role === 'system' && text === 'clear') {
-      text = '已开始新对话'
-    }
     try {
       Logger.info('feishu webhook send started', {
         role: message.role,
-        source: message.source ?? null,
+        inputType: context?.inputType ?? null,
         length: text.length
       })
       const response = await fetch(this.config.url, {
@@ -68,15 +65,15 @@ export class FeishuWebhookChannelOutput implements ChannelOutput {
       Logger.info('feishu webhook send completed', {
         role: message.role
       })
-      return Result.success(null)
+      return Result.successVoid()
     } catch (error) {
       Logger.error('feishu webhook send crashed', error)
       return Result.fromError(error)
     }
   }
 
-  async stop(): Promise<Result<null>> {
+  async stop(): Promise<Result<void>> {
     Logger.info('feishu webhook channel stopped')
-    return Result.success(null)
+    return Result.successVoid()
   }
 }

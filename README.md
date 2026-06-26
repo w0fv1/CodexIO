@@ -21,7 +21,7 @@ pnpm package:windows
 默认 workspace 是配置文件所在目录下的 `workspace`。`workspace.path` 支持绝对路径、相对配置文件所在目录的路径，也支持 `~` 和 `~/Desktop` 这类用户目录路径。
 `pnpm dev` 会直接启动 Codexio server。日志会输出在当前终端，按 `Ctrl+C` 会停止 server。
 运行日志按天写入 `.codexio/log/YYYY-MM-DD.log`，本机日志目录不会进入发布包。
-Codexio 使用原生多 thread 模型。Web 通道会为每个对话生成并传递 threadId，Agent 在首次收到该 thread 的消息时创建对应 Codex thread。`$ clear` 或 `￥ clear` 会清空当前 thread 并为该 thread 创建新的 Codex 对话。
+Codexio 使用原生多 thread 模型。Web 通道会为每个对话生成并传递 threadId，Agent 在首次收到该 thread 的消息时创建对应 Codex thread。
 Codex 子进程的 stdout/stderr 会同步输出到启动 codexio 的终端。
 内置 agent 默认按完全访问模式运行：Codex 使用 `danger-full-access` 和 `never` approval，Claude 使用 `bypassPermissions`。
 
@@ -90,13 +90,4 @@ Host 会先启动内部 API 和 channel，再异步启动 agent。Codex 未登�
 
 ```text
 GET /api/status
-```
-
-网页输入框支持清空命令，命令不会发送给 Codex：
-
-```text
-$ clear
-$clear
-￥ clear
-￥clear
 ```

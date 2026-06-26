@@ -52,7 +52,7 @@ export class CodexioApplication {
       await this.inputManager.start()
       const agentStarted = await this.agentManager.start()
       if (agentStarted.isFailed) {
-        await this.outputManager.sendSystem(agentStarted.message, 'agent', allIoThreadId)
+        await this.outputManager.sendSystem(agentStarted.message, allIoThreadId)
       }
       this.updater.start()
       await mkdir(dirname(this.codexioMetadata.serverStatePath), {
@@ -72,9 +72,9 @@ export class CodexioApplication {
     }
   }
 
-  async stop(): Promise<Result<null>> {
+  async stop(): Promise<Result<void>> {
     if (this.stopping) {
-      return Result.success(null)
+      return Result.successVoid()
     }
     this.stopping = true
     Logger.info('codexio server stopping', {
@@ -99,7 +99,7 @@ export class CodexioApplication {
     await rm(this.codexioMetadata.serverStatePath, {
       force: true
     })
-    return Result.success(null)
+    return Result.successVoid()
   }
 
   private requestStop(): void {

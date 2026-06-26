@@ -16,7 +16,5 @@ export type Message = {
   role: MessageRole
   ioThreadId: string
   text: string
-  createdAt: number
-  source?: string
   files?: MessageFile[]
 }

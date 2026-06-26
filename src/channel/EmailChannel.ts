@@ -8,7 +8,7 @@ import { Result } from '../value/Result.js'
 import { Logger } from '../component/Logger.js'
 import { ThreadBinder } from '../value/ThreadBinder.js'
 import { Configer } from '../component/Configer.js'
-import { ChannelInput, ChannelInputReceive, ChannelOutput } from './Channel.js'
+import { ChannelInput, ChannelInputReceive, ChannelOutput, ChannelOutputContext } from './Channel.js'
 
 type EmailChannelConfig = CodexioConfig['channels']['email']
 
@@ -73,9 +73,9 @@ export class EmailChannelHub {
     return true
   }
 
-  async send(message: Message): Promise<Result<null>> {
-    if (message.role === 'user' && message.source === 'email') {
-      return Result.success(null)
+  async send(message: Message, context?: ChannelOutputContext): Promise<Result<void>> {
+    if (message.role === 'user' && context?.inputType === 'email') {
+      return Result.successVoid()
     }
     if (!this.smtp) {
       return Result.fail('email smtp not ready')
@@ -88,9 +88,6 @@ export class EmailChannelHub {
       return Result.fail('email user is required')
     }
     let text = message.text
-    if (message.role === 'system' && text === 'clear') {
-      text = '已开始新对话'
-    }
     const fileText = (message.files ?? [])
       .map((file) => file.url ?? file.path)
       .filter((value) => value.trim().length > 0)
@@ -114,7 +111,7 @@ export class EmailChannelHub {
     try {
       Logger.info('email send started', {
         role: message.role,
-        source: message.source ?? null,
+        inputType: context?.inputType ?? null,
         subject,
         length: text.length
       })
@@ -133,14 +130,14 @@ export class EmailChannelHub {
         role: message.role,
         subject
       })
-      return Result.success(null)
+      return Result.successVoid()
     } catch (error) {
       Logger.error('email send failed', error)
       return Result.fromError(error)
     }
   }
 
-  async stop(): Promise<Result<null>> {
+  async stop(): Promise<Result<void>> {
     this.stopped = true
     Logger.info('email channel stopping')
     try {
@@ -151,7 +148,7 @@ export class EmailChannelHub {
     } finally {
       this.imap = undefined
     }
-    return Result.success(null)
+    return Result.successVoid()
   }
 
   private async run(receive: ChannelInputReceive): Promise<void> {
@@ -234,9 +231,7 @@ export class EmailChannelHub {
           const result = await receive({
             ioThreadId,
             role: 'user',
-            text,
-            createdAt: Date.now(),
-            source: 'email'
+            text
           })
           if (result.isFailed) {
             Logger.warn('email message receive failed', {
@@ -246,9 +241,7 @@ export class EmailChannelHub {
             await this.send({
               ioThreadId,
               role: 'system',
-              text: result.message,
-              createdAt: Date.now(),
-              source: 'email'
+              text: result.message
             })
           }
         }
@@ -300,7 +293,7 @@ export class EmailChannelInput implements ChannelInput {
     return this.hub.startInput(receive)
   }
 
-  async stop(): Promise<Result<null>> {
+  async stop(): Promise<Result<void>> {
     return this.hub.stop()
   }
 }
@@ -315,11 +308,11 @@ export class EmailChannelOutput implements ChannelOutput {
     return this.hub.startOutput()
   }
 
-  async send(message: Message): Promise<Result<null>> {
-    return this.hub.send(message)
+  async send(message: Message, context?: ChannelOutputContext): Promise<Result<void>> {
+    return this.hub.send(message, context)
   }
 
-  async stop(): Promise<Result<null>> {
+  async stop(): Promise<Result<void>> {
     return this.hub.stop()
   }
 }

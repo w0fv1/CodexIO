@@ -1,7 +1,7 @@
 import { inject, injectable } from 'inversify'
 import { Result } from '../value/Result.js'
 import { allIoThreadId, Message, MessageFile } from '../value/Message.js'
-import { ChannelOutput } from './Channel.js'
+import { ChannelOutput, ChannelOutputContext, ChannelType } from './Channel.js'
 import { Logger } from '../component/Logger.js'
 import { Configer } from '../component/Configer.js'
 import { FileStore } from '../component/FileStore.js'
@@ -43,12 +43,12 @@ export class ChannelOutputManager {
     await this.applyConfig()
   }
 
-  async sendUser(message: Message): Promise<Result<null>> {
+  async sendUser(message: Message, inputType?: ChannelType): Promise<Result<void>> {
     if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
       return Result.fail('text or file is required')
     }
     Logger.info('user message received', {
-      source: message.source ?? null,
+      inputType: inputType ?? null,
       ioThreadId: message.ioThreadId,
       text: message.text,
       files: message.files?.length ?? 0
@@ -56,40 +56,30 @@ export class ChannelOutputManager {
     return this.send({
       ...message,
       role: 'user'
+    }, {
+      inputType
     })
   }
 
-  async sendAgent(message: Message): Promise<Result<null>> {
+  async sendAgent(message: Message): Promise<Result<void>> {
     return this.send(await this.prepareAgentMessage({
       ...message,
       role: 'agent'
     }))
   }
 
-  async sendSystem(text: string, source = 'unknown', ioThreadId?: string): Promise<Result<null>> {
+  async sendSystem(text: string, ioThreadId?: string): Promise<Result<void>> {
     if (text.trim().length === 0) {
       return Result.fail('text is required')
     }
     return this.send({
       ioThreadId: ioThreadId ?? allIoThreadId,
       role: 'system',
-      text,
-      createdAt: Date.now(),
-      source
+      text
     })
   }
 
-  async clear(ioThreadId: string, source = 'unknown'): Promise<Result<null>> {
-    return this.broadcast({
-      ioThreadId,
-      role: 'system',
-      text: 'clear',
-      createdAt: Date.now(),
-      source
-    })
-  }
-
-  async stop(): Promise<Result<null>> {
+  async stop(): Promise<Result<void>> {
     const failures: string[] = []
     await this.flushOutputs()
     for (const output of this.outputs.values()) {
@@ -101,10 +91,10 @@ export class ChannelOutputManager {
     if (failures.length > 0) {
       return Result.fail(failures.join('\n'))
     }
-    return Result.success(null)
+    return Result.successVoid()
   }
 
-  async applyConfig(): Promise<Result<null>> {
+  async applyConfig(): Promise<Result<void>> {
     const failures: string[] = []
     await this.flushOutputs()
     for (const output of this.outputs.values()) {
@@ -128,14 +118,14 @@ export class ChannelOutputManager {
       return Result.fail(failures.join('\n'))
     }
     Logger.info('channel output config applied')
-    return Result.success(null)
+    return Result.successVoid()
   }
 
-  private async send(message: Message): Promise<Result<null>> {
+  private async send(message: Message, context?: ChannelOutputContext): Promise<Result<void>> {
     if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
       return Result.fail('text or file is required')
     }
-    return this.broadcast(message)
+    return this.broadcast(message, context)
   }
 
   private async prepareAgentMessage(message: Message): Promise<Message> {
@@ -175,21 +165,21 @@ export class ChannelOutputManager {
     }
   }
 
-  private async broadcast(message: Message): Promise<Result<null>> {
+  private async broadcast(message: Message, context?: ChannelOutputContext): Promise<Result<void>> {
     if (this.outputs.size === 0) {
       return Result.fail('channel output not found')
     }
     for (const output of this.outputs.values()) {
-      this.enqueueOutput(output, message)
+      this.enqueueOutput(output, message, context)
     }
-    return Result.success(null)
+    return Result.successVoid()
   }
 
-  private enqueueOutput(output: ChannelOutput, message: Message): void {
+  private enqueueOutput(output: ChannelOutput, message: Message, context?: ChannelOutputContext): void {
     const previous = this.outputQueues.get(output.type) ?? Promise.resolve()
     const task = previous.catch(() => {}).then(async () => {
       try {
-        const result = await output.send(message)
+        const result = await output.send(message, context)
         if (result.isFailed) {
           Logger.warn('channel output failed', {
             type: output.type,

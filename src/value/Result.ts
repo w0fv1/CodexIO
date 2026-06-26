@@ -14,15 +14,23 @@ export const Result = {
       isFailed: false
     }
   },
-  successMessage(message: string): Result<null> {
+  successVoid(message = 'no error'): Result<void> {
     return {
       code: '1',
       message,
-      data: null,
+      data: undefined,
       isFailed: false
     }
   },
-  fail<T = null>(message: string, code = '-1', data: T | null = null): Result<T> {
+  successMessage(message: string): Result<void> {
+    return {
+      code: '1',
+      message,
+      data: undefined,
+      isFailed: false
+    }
+  },
+  fail<T = void>(message: string, code = '-1', data: T | null = null): Result<T> {
     return {
       code,
       message,
@@ -30,7 +38,7 @@ export const Result = {
       isFailed: true
     }
   },
-  fromError(error: unknown): Result<null> {
+  fromError(error: unknown): Result<void> {
     let message = String(error)
     if (error instanceof Error) {
       message = error.message
@@ -38,7 +46,7 @@ export const Result = {
     return {
       code: '-1',
       message,
-      data: null,
+      data: undefined,
       isFailed: true
     }
   }

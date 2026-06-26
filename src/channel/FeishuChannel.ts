@@ -7,7 +7,7 @@ import { Logger } from '../component/Logger.js'
 import { FeishuMessageSender } from './FeishuMessageSender.js'
 import { ThreadBinder } from '../value/ThreadBinder.js'
 import { Configer } from '../component/Configer.js'
-import { ChannelInput, ChannelInputReceive, ChannelOutput } from './Channel.js'
+import { ChannelInput, ChannelInputReceive, ChannelOutput, ChannelOutputContext } from './Channel.js'
 import { parseFeishuMessageText } from './FeishuMessageContent.js'
 
 type FeishuChannelConfig = CodexioConfig['channels']['feishu']
@@ -112,9 +112,9 @@ export class FeishuChannelHub {
     return true
   }
 
-  async send(message: Message): Promise<Result<null>> {
-    if (message.role === 'user' && message.source === 'feishu') {
-      return Result.success(null)
+  async send(message: Message, context?: ChannelOutputContext): Promise<Result<void>> {
+    if (message.role === 'user' && context?.inputType === 'feishu') {
+      return Result.successVoid()
     }
     if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
       return Result.fail('text or file is required')
@@ -128,12 +128,12 @@ export class FeishuChannelHub {
     return this.sender.send(message)
   }
 
-  async stop(): Promise<Result<null>> {
+  async stop(): Promise<Result<void>> {
     Logger.info('feishu channel stopping')
     this.wsClient?.close()
     this.wsClient = undefined
     this.sender = undefined
-    return Result.success(null)
+    return Result.successVoid()
   }
 
   private async receive(data: FeishuMessageEvent, receive: ChannelInputReceive): Promise<void> {
@@ -184,9 +184,7 @@ export class FeishuChannelHub {
         await this.send({
           ioThreadId,
           role: 'system',
-          text: '当前只支持文本消息',
-          createdAt: Date.now(),
-          source: 'feishu'
+          text: '当前只支持文本消息'
         })
         return
       }
@@ -195,9 +193,7 @@ export class FeishuChannelHub {
         await this.send({
           ioThreadId,
           role: 'system',
-          text: '消息文本为空',
-          createdAt: Date.now(),
-          source: 'feishu'
+          text: '消息文本为空'
         })
         return
       }
@@ -208,9 +204,7 @@ export class FeishuChannelHub {
       void receive({
         ioThreadId,
         role: 'user',
-        text: parsedText.text,
-        createdAt: Date.now(),
-        source: 'feishu'
+        text: parsedText.text
       }).then(async (result) => {
         if (result.isFailed) {
           Logger.warn('feishu message receive failed', {
@@ -219,9 +213,7 @@ export class FeishuChannelHub {
           await this.send({
             ioThreadId,
             role: 'system',
-            text: result.message,
-            createdAt: Date.now(),
-            source: 'feishu'
+            text: result.message
           })
         }
       }).catch(async (error) => {
@@ -230,9 +222,7 @@ export class FeishuChannelHub {
         await this.send({
           ioThreadId,
           role: 'system',
-          text: result.message,
-          createdAt: Date.now(),
-          source: 'feishu'
+          text: result.message
         })
       })
     } catch (error) {
@@ -241,9 +231,7 @@ export class FeishuChannelHub {
       await this.send({
         ioThreadId,
         role: 'system',
-        text: result.message,
-        createdAt: Date.now(),
-        source: 'feishu'
+        text: result.message
       })
     }
   }
@@ -259,7 +247,7 @@ export class FeishuChannelInput implements ChannelInput {
     return this.hub.startInput(receive)
   }
 
-  async stop(): Promise<Result<null>> {
+  async stop(): Promise<Result<void>> {
     return this.hub.stop()
   }
 }
@@ -274,11 +262,11 @@ export class FeishuChannelOutput implements ChannelOutput {
     return this.hub.startOutput()
   }
 
-  async send(message: Message): Promise<Result<null>> {
-    return this.hub.send(message)
+  async send(message: Message, context?: ChannelOutputContext): Promise<Result<void>> {
+    return this.hub.send(message, context)
   }
 
-  async stop(): Promise<Result<null>> {
+  async stop(): Promise<Result<void>> {
     return this.hub.stop()
   }
 }

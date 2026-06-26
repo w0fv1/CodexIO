@@ -32,7 +32,7 @@ import { AppEvent } from '../src/value/Event.js'
 const testToken = 'test-message-token'
 const testMetadata = new CodexioMetadata()
 const codexioRootPath = testMetadata.rootPath
-const testServerStops = new WeakMap<HttpServer, () => Promise<Result<null>>>()
+const testServerStops = new WeakMap<HttpServer, () => Promise<Result<void>>>()
 
 describe('server', () => {
   it('serves a compact Codexio web chat page', () => {
@@ -340,7 +340,7 @@ describe('server', () => {
     await closeTestServer(listener)
   })
 
-  it('clears the active agent conversation', async () => {
+  it('treats clear as an unknown command', async () => {
     const { baseUrl, listener } = await startTestServer()
     const socket = await openWebSocket(baseUrl)
     const messages = recordWebSocket(socket)
@@ -354,26 +354,16 @@ describe('server', () => {
       text: '$ clear'
     }))
     await waitForWebSocketMessages(messages, 5)
-    const clear = messages[4]
-    socket.send(JSON.stringify({
-      ioThreadId: 'io-thread-clear',
-      text: 'second'
-    }))
-    await waitForWebSocketMessages(messages, 8)
-    const second = messages[7]
-    expect(clear).toMatchObject({
-      event: 'clear'
-    })
-    expect(second).toMatchObject({
+    expect(messages[4]).toMatchObject({
       event: 'message',
-      role: 'agent',
-      text: 'test: second'
+      role: 'system',
+      text: 'unknown command: clear'
     })
     await closeWebSocket(socket)
     await closeTestServer(listener)
   })
 
-  it('clears with yuan-prefixed command without a space', async () => {
+  it('treats yuan-prefixed clear as an unknown command', async () => {
     const { baseUrl, listener } = await startTestServer()
     const socket = await openWebSocket(baseUrl)
     const messages = recordWebSocket(socket)
@@ -388,7 +378,9 @@ describe('server', () => {
     }))
     await waitForWebSocketMessages(messages, 5)
     expect(messages[4]).toMatchObject({
-      event: 'clear'
+      event: 'message',
+      role: 'system',
+      text: 'unknown command: clear'
     })
     await closeWebSocket(socket)
     await closeTestServer(listener)
@@ -760,7 +752,7 @@ function createTestConfiger(configPath: string): Configer {
 
 async function createTestCodexioApp(configer: Configer, claudeAgent: Agent): Promise<{
   listen: (port?: number, host?: string) => HttpServer
-  stop: () => Promise<Result<null>>
+  stop: () => Promise<Result<void>>
 }> {
   await configer.validate()
   const metadata = new CodexioMetadata({
@@ -808,7 +800,7 @@ async function createTestCodexioApp(configer: Configer, claudeAgent: Agent): Pro
     await ignoreStopFailure(inputManager.stop())
     await ignoreStopFailure(agentManager.stop())
     await ignoreStopFailure(outputManager.stop())
-    return Result.success(null)
+    return Result.successVoid()
   }
   eventBus.on(AppEvent.StopRequested, () => {
     void stop()
@@ -823,7 +815,7 @@ async function createTestCodexioApp(configer: Configer, claudeAgent: Agent): Pro
   }
 }
 
-async function ignoreStopFailure(action: Promise<Result<null>>): Promise<void> {
+async function ignoreStopFailure(action: Promise<Result<void>>): Promise<void> {
   await action.catch(() => Result.fail('stop failed'))
 }
 

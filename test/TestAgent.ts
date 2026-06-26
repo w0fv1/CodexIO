@@ -10,20 +10,15 @@ export class TestAgent implements Agent {
     this.send = send
   }
 
-  async login(): Promise<void> {}
-
   async start(): Promise<void> {}
 
   async receive(input: Message): Promise<void> {
     await this.send({
       ioThreadId: input.ioThreadId,
       role: 'agent',
-      text: `test: ${input.text}`,
-      createdAt: Date.now()
+      text: `test: ${input.text}`
     })
   }
-
-  async clear(_ioThreadId: string): Promise<void> {}
 
   async stop(): Promise<void> {}
 }

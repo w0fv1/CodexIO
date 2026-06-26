@@ -4,7 +4,7 @@ import { Configer } from '../component/Configer.js'
 import { Logger } from '../component/Logger.js'
 import { Message } from '../value/Message.js'
 import { Result } from '../value/Result.js'
-import { ChannelInput, ChannelReceiveResult } from './Channel.js'
+import { ChannelInput, ChannelReceiveResult, ChannelType } from './Channel.js'
 import { ChannelOutputManager } from './ChannelOutputManager.js'
 import { EmailChannelInput } from './EmailChannel.js'
 import { FeishuChannelInput } from './FeishuChannel.js'
@@ -40,15 +40,15 @@ export class ChannelInputManager {
     await this.applyConfig()
   }
 
-  async receive(message: Message): Promise<Result<ChannelReceiveResult>> {
-    const displayed = await this.outputManager.sendUser(message)
+  async receive(inputType: ChannelType, message: Message): Promise<Result<ChannelReceiveResult>> {
+    const displayed = await this.outputManager.sendUser(message, inputType)
     if (displayed.isFailed) {
       return Result.fail<ChannelReceiveResult>(displayed.message)
     }
     return this.commandExecutor.receive(message)
   }
 
-  async stop(): Promise<Result<null>> {
+  async stop(): Promise<Result<void>> {
     const failures: string[] = []
     for (const input of this.inputs.values()) {
       const result = await input.stop()
@@ -59,10 +59,10 @@ export class ChannelInputManager {
     if (failures.length > 0) {
       return Result.fail(failures.join('\n'))
     }
-    return Result.success(null)
+    return Result.successVoid()
   }
 
-  async applyConfig(): Promise<Result<null>> {
+  async applyConfig(): Promise<Result<void>> {
     const failures: string[] = []
     for (const input of this.inputs.values()) {
       const result = await input.stop()
@@ -73,7 +73,7 @@ export class ChannelInputManager {
     this.inputs.clear()
     for (const input of this.availableInputs) {
       try {
-        if (await input.start((message) => this.receive(message))) {
+        if (await input.start((message) => this.receive(input.type, message))) {
           this.inputs.set(input.type, input)
         }
       } catch (error) {
@@ -85,6 +85,6 @@ export class ChannelInputManager {
       return Result.fail(failures.join('\n'))
     }
     Logger.info('channel input config applied')
-    return Result.success(null)
+    return Result.successVoid()
   }
 }

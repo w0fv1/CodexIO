@@ -102,13 +102,13 @@ export class CodexioApiController {
     return listener
   }
 
-  async stop(): Promise<Result<null>> {
+  async stop(): Promise<Result<void>> {
     if (this.closing) {
-      return Result.success(null)
+      return Result.successVoid()
     }
     this.closing = true
     if (!this.listener) {
-      return Result.success(null)
+      return Result.successVoid()
     }
     const listener = this.listener
     try {
@@ -122,7 +122,7 @@ export class CodexioApiController {
           resolveStop()
         })
       })
-      return Result.success(null)
+      return Result.successVoid()
     } catch (error) {
       return Result.fromError(error)
     }

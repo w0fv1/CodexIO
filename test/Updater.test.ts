@@ -117,7 +117,7 @@ function createUpdater(enabled: boolean, baseUrl: string): {
       throw new Error(`unexpected config path: ${path}`)
     }
   } as unknown as Configer
-  const sendSystem = vi.fn(async () => Result.success(null))
+  const sendSystem = vi.fn(async () => Result.successVoid())
   const outputManager = {
     sendSystem
   } as unknown as ChannelOutputManager

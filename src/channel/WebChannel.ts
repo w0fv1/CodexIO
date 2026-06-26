@@ -12,7 +12,7 @@ import { Thread } from '../value/Thread.js'
 import { Result } from '../value/Result.js'
 import { Configer } from '../component/Configer.js'
 import { ThreadManager } from '../component/ThreadManager.js'
-import { ThreadMessageStore } from '../component/ThreadMessageStore.js'
+import { ThreadMessage, ThreadMessageStore } from '../component/ThreadMessageStore.js'
 import { ChannelInput, ChannelInputReceive, ChannelOutput } from './Channel.js'
 
 const WebSocketInputSchema = z.object({
@@ -98,18 +98,18 @@ export class WebChannelHub {
     })
   }
 
-  stopInput(): Result<null> {
+  stopInput(): Result<void> {
     this.receive = undefined
     for (const socket of this.sockets) {
       socket.close()
     }
     this.sockets.clear()
-    return Result.success(null)
+    return Result.successVoid()
   }
 
-  stop(): Result<null> {
+  stop(): Result<void> {
     if (this.stopped) {
-      return Result.success(null)
+      return Result.successVoid()
     }
     this.stopped = true
     Logger.info('web channel stopping', {
@@ -117,34 +117,17 @@ export class WebChannelHub {
     })
     this.stopInput()
     this.server.close()
-    return Result.success(null)
+    return Result.successVoid()
   }
 
-  send(message: Message): Result<null> {
-    if (message.role === 'system' && message.text === 'clear') {
-      if (message.ioThreadId === allIoThreadId) {
-        this.messageStore.clear()
-      } else {
-        this.messageStore.clear(message.ioThreadId)
-      }
-      for (const socket of this.sockets) {
-        if (socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({
-            event: 'clear',
-            ioThreadId: message.ioThreadId,
-            allIoThreadId
-          }))
-        }
-      }
-      return Result.success(null)
-    }
-    this.messageStore.append(message)
+  send(message: Message): Result<void> {
+    const stored = this.messageStore.append(message)
     for (const socket of this.sockets) {
       if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify(this.toWebSocketMessage(message)))
+        socket.send(JSON.stringify(this.toWebSocketMessage(stored)))
       }
     }
-    return Result.success(null)
+    return Result.successVoid()
   }
 
   private upgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
@@ -232,8 +215,6 @@ export class WebChannelHub {
         role: 'user',
         ioThreadId,
         text,
-        createdAt: Date.now(),
-        source: 'web',
         files
       })
       if (result.isFailed) {
@@ -264,7 +245,7 @@ export class WebChannelHub {
     }
   }
 
-  private toWebSocketMessage(message: Message): WebSocketMessageOutput {
+  private toWebSocketMessage(message: ThreadMessage): WebSocketMessageOutput {
     const data: WebSocketMessageOutput = {
       event: 'message',
       role: message.role,
@@ -301,7 +282,7 @@ export class WebChannelInput implements ChannelInput {
     return true
   }
 
-  async stop(): Promise<Result<null>> {
+  async stop(): Promise<Result<void>> {
     return this.hub.stopInput()
   }
 }
@@ -330,14 +311,14 @@ export class WebChannelOutput implements ChannelOutput {
     return true
   }
 
-  async send(message: Message): Promise<Result<null>> {
+  async send(message: Message): Promise<Result<void>> {
     if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
       return Result.fail('text or file is required')
     }
     return this.hub.send(message)
   }
 
-  async stop(): Promise<Result<null>> {
-    return Result.success(null)
+  async stop(): Promise<Result<void>> {
+    return Result.successVoid()
   }
 }

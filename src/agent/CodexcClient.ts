@@ -20,6 +20,29 @@ export type CodexcThreadItem = {
   text: string
 }
 
+export type CodexcTurnInput = Array<Record<string, unknown>>
+
+export type CodexcStartThreadInput = {
+  cwd: string
+  approvalPolicy: 'never' | 'on-request' | 'on-failure' | 'untrusted'
+  sandbox: 'read-only' | 'workspace-write' | 'danger-full-access'
+  ephemeral: boolean
+  developerInstructions: string
+}
+
+export type CodexcAccountStatus = {
+  account: unknown
+}
+
+export type CodexcDeviceLogin = {
+  verificationUrl: string
+  userCode: string
+}
+
+export type CodexcTurn = {
+  id: string
+}
+
 export type CodexcClientEventMap = {
   thread: (thread: CodexcThread) => void
   threadDeleted: (threadId: string) => void
@@ -94,7 +117,68 @@ export class CodexcClient {
     this.started = false
   }
 
-  async request<T = unknown>(method: string, params?: unknown): Promise<T> {
+  async readAccount(): Promise<CodexcAccountStatus | null> {
+    const response = await this.request<unknown>('account/read', {
+      refreshToken: true
+    })
+    if (!response || typeof response !== 'object' || !(response as Record<string, unknown>).account) {
+      return null
+    }
+    return {
+      account: (response as Record<string, unknown>).account
+    }
+  }
+
+  async startDeviceLogin(): Promise<CodexcDeviceLogin> {
+    const response = await this.request<unknown>('account/login/start', {
+      type: 'chatgptDeviceCode'
+    })
+    if (!response || typeof response !== 'object') {
+      throw new Error('codex login response not found')
+    }
+    const data = response as Record<string, unknown>
+    if (typeof data.verificationUrl !== 'string' || typeof data.userCode !== 'string') {
+      throw new Error('codex login URL not found')
+    }
+    return {
+      verificationUrl: data.verificationUrl,
+      userCode: data.userCode
+    }
+  }
+
+  async waitForDeviceLoginCompleted(): Promise<void> {
+    await this.waitForNotification('account/login/completed')
+  }
+
+  async startThread(input: CodexcStartThreadInput): Promise<CodexcThread> {
+    const response = await this.request<unknown>('thread/start', input)
+    return this.readRequiredThread(response)
+  }
+
+  async startTurn(threadId: string, input: CodexcTurnInput): Promise<CodexcTurn> {
+    const response = await this.request<unknown>('turn/start', {
+      threadId,
+      input
+    })
+    return this.readRequiredTurn(response)
+  }
+
+  async steerTurn(threadId: string, expectedTurnId: string, input: CodexcTurnInput): Promise<void> {
+    await this.request('turn/steer', {
+      threadId,
+      expectedTurnId,
+      input
+    })
+  }
+
+  async interruptTurn(threadId: string, turnId: string): Promise<void> {
+    await this.request('turn/interrupt', {
+      threadId,
+      turnId
+    })
+  }
+
+  private async request<T = unknown>(method: string, params?: unknown): Promise<T> {
     if (!this.appServer) {
       throw new Error('codex client not started')
     }
@@ -328,6 +412,30 @@ export class CodexcClient {
       id,
       title: readString(value, 'name') ?? readString(value, 'preview') ?? '',
       isWorking: this.isActiveStatus((value as Record<string, unknown>).status)
+    }
+  }
+
+  private readRequiredThread(response: unknown): CodexcThread {
+    if (!response || typeof response !== 'object') {
+      throw new Error('codex thread response not found')
+    }
+    const thread = this.readThread((response as Record<string, unknown>).thread)
+    if (!thread) {
+      throw new Error('codex thread id not found')
+    }
+    return thread
+  }
+
+  private readRequiredTurn(response: unknown): CodexcTurn {
+    if (!response || typeof response !== 'object') {
+      throw new Error('codex turn response not found')
+    }
+    const turn = (response as Record<string, unknown>).turn
+    if (!turn || typeof turn !== 'object' || typeof (turn as Record<string, unknown>).id !== 'string') {
+      throw new Error('codex turn id not found')
+    }
+    return {
+      id: (turn as Record<string, string>).id
     }
   }
 

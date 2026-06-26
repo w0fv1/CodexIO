@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createProcessEnv } from '../src/util/ProcessEnvironment.js'
 import { AgentManager } from '../src/agent/AgentManager.js'
 import { CodexAppServer, CodexAppServerRequestError } from '../src/agent/CodexAppServer.js'
-import { AgentLoginInProgressError, CodexAgent, createCodexCommand } from '../src/agent/CodexAgent.js'
+import { CodexAgent, createCodexCommand } from '../src/agent/CodexAgent.js'
 import { CodexcClient } from '../src/agent/CodexcClient.js'
 import { CodexMessageStreamer } from '../src/agent/CodexMessageStreamer.js'
 import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
@@ -174,7 +174,7 @@ describe('core', () => {
     expect(() => binder.resolveOrCreate([])).toThrow('thread binding key is required')
   })
 
-  it('selected agent exposes login lifecycle', async () => {
+  it('selected agent starts from idle state', async () => {
     const manager = await createAgentManager(ConfigSchema.parse({
       agents: {
         codex: {
@@ -186,7 +186,6 @@ describe('core', () => {
       }
     }), createOutputManager(), new TestAgent(async () => {}))
     expect(manager.status().status).toBe('idle')
-    await expect(manager.login()).resolves.toBeUndefined()
   })
 
   it('agent manager acknowledges user message before agent work', async () => {
@@ -203,7 +202,7 @@ describe('core', () => {
     }), createOutputManager({
       sendSystem: async (text) => {
         outbound.push(text)
-        return Result.success(null)
+        return Result.successVoid()
       }
     }), new TestAgent(async (message) => {
       outbound.push(message.text)
@@ -219,49 +218,7 @@ describe('core', () => {
     ])
   })
 
-  it('agent manager serializes concurrent user messages', async () => {
-    const outbound: string[] = []
-    const manager = await createAgentManager(ConfigSchema.parse({
-      agents: {
-        codex: {
-          enabled: false
-        },
-        claude: {
-          enabled: true
-        }
-      }
-    }), createOutputManager({
-      sendSystem: async (text) => {
-        outbound.push(text)
-        await new Promise((resolve) => {
-          setTimeout(resolve, 10)
-        })
-        return Result.success(null)
-      }
-    }), new TestAgent(async (message) => {
-      outbound.push(message.text)
-    }))
-    const [first, second] = await Promise.all([
-      manager.receiveMessage({
-        ioThreadId: 'test-thread',
-        text: 'first'
-      }),
-      manager.receiveMessage({
-        ioThreadId: 'test-thread',
-        text: 'second'
-      })
-    ])
-    expect(first.isFailed).toBe(false)
-    expect(second.isFailed).toBe(false)
-    expect(outbound).toEqual([
-      expect.any(String),
-      'test: first',
-      expect.any(String),
-      'test: second'
-    ])
-  })
-
-  it('agent manager does not queue user messages behind an active login flow', async () => {
+  it('agent manager treats login-shaped startup failures as generic startup failures', async () => {
     const systemMessages: string[] = []
     const manager = await createAgentManager(ConfigSchema.parse({
       agents: {
@@ -275,16 +232,14 @@ describe('core', () => {
     }), createOutputManager({
       sendSystem: async (text) => {
         systemMessages.push(text)
-        return Result.success(null)
+        return Result.successVoid()
       }
     }), {
       type: 'codex',
-      async login(): Promise<void> {},
       async start(): Promise<void> {
-        throw new AgentLoginInProgressError('请先完成 Codex 登录。')
+        throw new Error('请先完成 Codex 登录。')
       },
       async receive(): Promise<void> {},
-      async clear(): Promise<void> {},
       async stop(): Promise<void> {}
     })
 
@@ -302,8 +257,7 @@ describe('core', () => {
     expect(second.isFailed).toBe(true)
     expect(second.message).toBe('请先完成 Codex 登录。')
     expect(manager.status()).toMatchObject({
-      status: 'loginRequired',
-      message: '请先完成 Codex 登录。'
+      status: 'idle'
     })
     expect(systemMessages).toEqual([
       '请先完成 Codex 登录。',
@@ -326,21 +280,19 @@ describe('core', () => {
         }
       }
     }), createOutputManager({
-      sendSystem: async (text, _source, ioThreadId) => {
+      sendSystem: async (text, ioThreadId) => {
         systemMessages.push({
           text,
           ioThreadId
         })
-        return Result.success(null)
+        return Result.successVoid()
       }
     }), {
       type: 'codex',
-      async login(): Promise<void> {},
       async start(): Promise<void> {
         throw new Error('Codex 登录请求失败，可能是网络或代理配置无法访问 OpenAI 登录服务。')
       },
       async receive(): Promise<void> {},
-      async clear(): Promise<void> {},
       async stop(): Promise<void> {}
     })
 
@@ -616,16 +568,6 @@ describe('core', () => {
   })
 
   it('parses chat commands with dollar and yuan prefixes', () => {
-    expect(parseCommandInput('$ clear')).toEqual({
-      type: 'command',
-      name: 'clear',
-      args: []
-    })
-    expect(parseCommandInput('￥clear')).toEqual({
-      type: 'command',
-      name: 'clear',
-      args: []
-    })
     expect(parseCommandInput('$ update')).toEqual({
       type: 'command',
       name: 'update',
@@ -653,21 +595,15 @@ describe('core', () => {
       receiveMessage: async (input: { ioThreadId: string, text: string }) => {
         received.push(input)
         return Result.success({})
-      },
-      clear: async () => Result.success({
-        action: 'clear'
-      })
+      }
     } as unknown as AgentManager, {
       update: async () => Result.success('updated')
     })
 
-    const createdAt = Date.now()
     const result = await executor.receive({
       role: 'user',
       ioThreadId: 'io-thread',
-      text: 'hello',
-      createdAt,
-      source: 'web'
+      text: 'hello'
     })
 
     expect(result.isFailed).toBe(false)
@@ -675,9 +611,7 @@ describe('core', () => {
     expect(received[0]).toMatchObject({
       role: 'user',
       ioThreadId: 'io-thread',
-      text: 'hello',
-      createdAt,
-      source: 'web'
+      text: 'hello'
     })
   })
 
@@ -686,13 +620,10 @@ describe('core', () => {
     const executor = new CommandExecutor(createOutputManager({
       sendSystem: async (text: string) => {
         systemMessages.push(text)
-        return Result.success(null)
+        return Result.successVoid()
       }
     }), {
-      receiveMessage: async () => Result.success({}),
-      clear: async () => Result.success({
-        action: 'clear'
-      })
+      receiveMessage: async () => Result.success({})
     } as unknown as AgentManager, {
       update: async () => Result.success('Codexio 0.4.2 更新包已准备完成，正在安装并重启。')
     })
@@ -700,9 +631,7 @@ describe('core', () => {
     const result = await executor.receive({
       role: 'user',
       ioThreadId: 'io-thread',
-      text: '$update',
-      createdAt: Date.now(),
-      source: 'web'
+      text: '$update'
     })
 
     expect(result.isFailed).toBe(false)
@@ -720,13 +649,10 @@ describe('core', () => {
     const executor = new CommandExecutor(createOutputManager({
       sendSystem: async (text: string) => {
         systemMessages.push(text)
-        return Result.success(null)
+        return Result.successVoid()
       }
     }), {
-      receiveMessage: async () => Result.success({}),
-      clear: async () => Result.success({
-        action: 'clear'
-      })
+      receiveMessage: async () => Result.success({})
     } as unknown as AgentManager, {
       update: async () => Result.success('Codexio 已是最新版本 0.4.2。')
     })
@@ -734,9 +660,7 @@ describe('core', () => {
     const result = await executor.receive({
       role: 'user',
       ioThreadId: 'io-thread',
-      text: '$update',
-      createdAt: Date.now(),
-      source: 'web'
+      text: '$update'
     })
 
     expect(result.isFailed).toBe(false)
@@ -807,7 +731,7 @@ describe('core', () => {
     expect(developerInstructions).not.toContain('Invoke-RestMethod')
   })
 
-  it('codex agent does not create a thread during startup', async () => {
+  it('codex agent does not access account or create a thread during startup', async () => {
     const requests: Array<{
       method: string
       params: unknown
@@ -818,13 +742,10 @@ describe('core', () => {
 
     await agent.start()
 
-    expect(requests.map((request) => request.method)).toEqual([
-      'account/read',
-      'thread/list'
-    ])
+    expect(requests).toEqual([])
   })
 
-  it('codex agent refreshes persisted codex threads during startup', async () => {
+  it('codex agent does not refresh persisted codex threads during startup', async () => {
     const requests: Array<{
       method: string
       params: unknown
@@ -886,15 +807,8 @@ describe('core', () => {
 
     await agent.start()
 
-    expect(requests.map((request) => request.method)).toEqual([
-      'account/read',
-      'thread/list',
-      'thread/read',
-      'thread/turns/list'
-    ])
-    expect(threadManager.get('vscode-thread')).toMatchObject({
-      title: '问候'
-    })
+    expect(requests).toEqual([])
+    expect(threadManager.get('vscode-thread')).toBeUndefined()
   })
 
   it('codex agent creates a thread for the received codexio thread id', async () => {
@@ -914,7 +828,6 @@ describe('core', () => {
 
     expect(requests.map((request) => request.method)).toEqual([
       'account/read',
-      'thread/list',
       'thread/start',
       'turn/start'
     ])
@@ -949,9 +862,9 @@ describe('core', () => {
 
     expect(requests.map((request) => request.method)).toEqual([
       'account/read',
-      'thread/list',
       'thread/start',
       'turn/start',
+      'account/read',
       'thread/start',
       'turn/start'
     ])
@@ -962,32 +875,6 @@ describe('core', () => {
     expect(turnStarts[1]?.params).toMatchObject({
       threadId: 'thread-2'
     })
-  })
-
-  it('codex agent clear recreates the selected codexio thread', async () => {
-    const requests: Array<{
-      method: string
-      params: unknown
-    }> = []
-    const agent = createCodexAgent({
-      appServer: createCodexAppServerMock(requests)
-    })
-
-    await agent.start()
-    await agent.receive({
-      ioThreadId: 'io-thread',
-      text: 'first'
-    })
-    await agent.clear('io-thread')
-
-    expect(requests.map((request) => request.method)).toEqual([
-      'account/read',
-      'thread/list',
-      'thread/start',
-      'turn/start',
-      'turn/interrupt',
-      'thread/start'
-    ])
   })
 
   it('codex agent steers the active app-server turn', async () => {
@@ -1045,15 +932,12 @@ describe('core', () => {
       ioThreadId: 'io-thread',
       text: 'second'
     })
-    await agent.clear('io-thread')
     expect(requests.map((request) => request.method)).toEqual([
       'account/read',
-      'thread/list',
       'thread/start',
       'turn/start',
-      'turn/steer',
-      'turn/interrupt',
-      'thread/start'
+      'account/read',
+      'turn/steer'
     ])
     expect(requests.find((request) => request.method === 'thread/start')?.params).toMatchObject({
       approvalPolicy: 'never',
@@ -1343,7 +1227,12 @@ describe('core', () => {
     })
     const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     try {
-      await expect(agent.start('login-thread')).rejects.toThrow(AgentLoginInProgressError)
+      await agent.start()
+      await agent.receive({
+        ioThreadId: 'login-thread',
+        role: 'user',
+        text: 'hello'
+      })
     } finally {
       stdout.mockRestore()
     }
@@ -1399,7 +1288,12 @@ describe('core', () => {
     })
     const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     try {
-      await expect(agent.start('login-thread')).rejects.toThrow(AgentLoginInProgressError)
+      await agent.start()
+      await agent.receive({
+        ioThreadId: 'login-thread',
+        role: 'user',
+        text: 'hello'
+      })
     } finally {
       stdout.mockRestore()
     }
@@ -1435,7 +1329,12 @@ describe('core', () => {
       appServer
     })
 
-    await expect(agent.start('login-thread')).rejects.toThrow([
+    await agent.start()
+    await expect(agent.receive({
+      ioThreadId: 'login-thread',
+      role: 'user',
+      text: 'hello'
+    })).rejects.toThrow([
       'Codex 登录请求失败，可能是网络或代理配置无法访问 OpenAI 登录服务。',
       '请在 config.yaml 开启或修正 proxy 配置后重试。',
       '原始错误：failed to request device code: device code request failed with status 403 Forbidden'
@@ -1510,8 +1409,6 @@ describe('core', () => {
     }
 
     expect(requests.map((request) => request.method)).toEqual([
-      'account/read',
-      'thread/list',
       'account/login/start'
     ])
     expect(outbound).toHaveLength(1)
@@ -1587,7 +1484,7 @@ describe('core', () => {
         }
       })
       completeLogin?.()
-      await waitFor(() => requests.filter((request) => request.method === 'account/read').length === 2)
+      await waitFor(() => starts === 2)
     } finally {
       stdout.mockRestore()
     }
@@ -1595,11 +1492,7 @@ describe('core', () => {
     expect(starts).toBe(2)
     expect(stops).toBe(1)
     expect(requests.map((request) => request.method)).toEqual([
-      'account/read',
-      'thread/list',
-      'account/login/start',
-      'account/read',
-      'thread/list'
+      'account/login/start'
     ])
     expect(outbound).toContain('Codex 登录已完成。')
   })
@@ -1732,6 +1625,39 @@ describe('core', () => {
 
     expect(started.isFailed).toBe(false)
     expect(existsSync(workspace)).toBe(true)
+    await manager.stop()
+  })
+
+  it('agent manager fails duplicate start while connecting', async () => {
+    let releaseStart: () => void = () => {}
+    const startReleased = new Promise<void>((resolve) => {
+      releaseStart = resolve
+    })
+    class SlowStartAgent extends TestAgent {
+      override async start(): Promise<void> {
+        await startReleased
+      }
+    }
+    const manager = await createAgentManager(ConfigSchema.parse({
+      agents: {
+        codex: {
+          enabled: false
+        },
+        claude: {
+          enabled: true
+        }
+      }
+    }), createOutputManager(), new SlowStartAgent())
+
+    const first = manager.start()
+    await waitUntil(() => manager.status().status === 'connecting')
+    const second = await manager.start()
+    releaseStart()
+    const firstResult = await first
+
+    expect(second.isFailed).toBe(true)
+    expect(second.message).toBe('agent connecting')
+    expect(firstResult.isFailed).toBe(false)
     await manager.stop()
   })
 
@@ -2193,9 +2119,7 @@ describe('core', () => {
     const result = await sender.send({
       role: 'agent',
       ioThreadId: 'io-thread',
-      source: 'agent',
-      text: '继续在同一个话题回复',
-      createdAt: Date.now()
+      text: '继续在同一个话题回复'
     })
 
     expect(result.isFailed).toBe(false)
@@ -2274,16 +2198,12 @@ describe('core', () => {
     const first = await sender.send({
       role: 'user',
       ioThreadId: 'io-thread',
-      source: 'web',
-      text: '你好啊',
-      createdAt: Date.now()
+      text: '你好啊'
     })
     const second = await sender.send({
       role: 'agent',
       ioThreadId: 'io-thread',
-      source: 'agent',
-      text: '收到，我在这里。',
-      createdAt: Date.now()
+      text: '收到，我在这里。'
     })
 
     expect(first.isFailed).toBe(false)
@@ -2376,9 +2296,7 @@ describe('core', () => {
     const result = await sender.send({
       role: 'user',
       ioThreadId: 'io-thread',
-      source: 'web',
       text: '这图里是什么内容',
-      createdAt: Date.now(),
       files: [
         {
           id: 'file-1',
@@ -2481,9 +2399,7 @@ describe('core', () => {
     const result = await sender.send({
       role: 'user',
       ioThreadId: 'io-thread',
-      source: 'web',
       text: '你能看到文件吗？',
-      createdAt: Date.now(),
       files: [
         {
           id: 'file-1',
@@ -2560,9 +2476,7 @@ describe('core', () => {
     const result = await sender.send({
       role: 'user',
       ioThreadId: 'io-thread',
-      source: 'web',
       text: '',
-      createdAt: Date.now(),
       files: [
         {
           id: 'file-1',
@@ -2649,8 +2563,7 @@ describe('core', () => {
     const result = await outputManager.sendAgent({
       ioThreadId: 'io-thread',
       role: 'agent',
-      text: `日志已生成：[日志](${path})`,
-      createdAt: Date.now()
+      text: `日志已生成：[日志](${path})`
     })
 
     expect(result.isFailed).toBe(false)
@@ -2668,8 +2581,7 @@ describe('core', () => {
     const result = await outputManager.sendAgent({
       ioThreadId: 'io-thread',
       role: 'agent',
-      text: '[缺失](C:\\missing\\result.txt)',
-      createdAt: Date.now()
+      text: '[缺失](C:\\missing\\result.txt)'
     })
 
     expect(result.isFailed).toBe(false)
@@ -2690,26 +2602,24 @@ describe('core', () => {
     const outputManager = await createRecordingChannelOutputManager([], {
       web: async (message) => {
         fast.push(message.text)
-        return Result.success(null)
+        return Result.successVoid()
       },
       email: async (message) => {
         slowStarted.push(message.text)
         await slowReleased
-        return Result.success(null)
+        return Result.successVoid()
       }
     })
 
     await outputManager.sendAgent({
       ioThreadId: 'io-thread',
       role: 'agent',
-      text: '第一段',
-      createdAt: Date.now()
+      text: '第一段'
     })
     await outputManager.sendAgent({
       ioThreadId: 'io-thread',
       role: 'agent',
-      text: '第二段',
-      createdAt: Date.now()
+      text: '第二段'
     })
 
     await waitUntil(() => fast.length === 2)
@@ -2729,7 +2639,7 @@ describe('core', () => {
     const outputManager = createOutputManager({
       sendAgent: async (message) => {
         sent.push(message)
-        return Result.success(null)
+        return Result.successVoid()
       }
     })
     const streamer = new CodexMessageStreamer(outputManager)
@@ -2762,7 +2672,7 @@ describe('core', () => {
         if (sent.length === 1) {
           await firstSendReleased
         }
-        return Result.success(null)
+        return Result.successVoid()
       }
     })
     const streamer = new CodexMessageStreamer(outputManager)
@@ -2790,7 +2700,7 @@ describe('core', () => {
     const outputManager = createOutputManager({
       sendAgent: async (message) => {
         sent.push(message)
-        return Result.success(null)
+        return Result.successVoid()
       }
     })
     const streamer = new CodexMessageStreamer(outputManager)
@@ -2821,7 +2731,7 @@ describe('core', () => {
     const outputManager = createOutputManager({
       sendAgent: async (message) => {
         sent.push(message)
-        return Result.success(null)
+        return Result.successVoid()
       }
     })
     const streamer = new CodexMessageStreamer(outputManager)
@@ -2845,7 +2755,7 @@ describe('core', () => {
     const outputManager = createOutputManager({
       sendAgent: async (message) => {
         sent.push(message)
-        return Result.success(null)
+        return Result.successVoid()
       }
     })
     const streamer = new CodexMessageStreamer(outputManager)
@@ -2872,7 +2782,7 @@ describe('core', () => {
     const outputManager = createOutputManager({
       sendAgent: async (message) => {
         sent.push(message)
-        return Result.success(null)
+        return Result.successVoid()
       }
     })
     const streamer = new CodexMessageStreamer(outputManager)
@@ -2899,7 +2809,7 @@ describe('core', () => {
     const outputManager = createOutputManager({
       sendAgent: async (message) => {
         sent.push(message)
-        return Result.success(null)
+        return Result.successVoid()
       }
     })
     const streamer = new CodexMessageStreamer(outputManager)
@@ -3014,7 +2924,7 @@ function createCodexAgent(input: {
   const outputManager = createOutputManager({
     sendAgent: async (message: Message) => {
       await input.send?.(message)
-      return Result.success(null)
+      return Result.successVoid()
     }
   })
   return new TestCodexAgent(configer, testMetadata, outputManager, new CodexMessageStreamer(outputManager), input.threadManager ?? new ThreadManager())
@@ -3033,20 +2943,18 @@ async function createAgentManager(
 }
 
 function createOutputManager(input: {
-  sendSystem?: (text: string, source?: string, ioThreadId?: string) => Promise<Result<null>>
-  sendUser?: (message: Message) => Promise<Result<null>>
-  sendAgent?: (message: Message) => Promise<Result<null>>
-  clear?: (ioThreadId: string, source?: string) => Promise<Result<null>>
+  sendSystem?: (text: string, ioThreadId?: string) => Promise<Result<void>>
+  sendUser?: (message: Message) => Promise<Result<void>>
+  sendAgent?: (message: Message) => Promise<Result<void>>
 } = {}): ChannelOutputManager {
   return {
-    sendSystem: input.sendSystem ?? (async () => Result.success(null)),
-    sendUser: input.sendUser ?? (async () => Result.success(null)),
-    sendAgent: input.sendAgent ?? (async () => Result.success(null)),
-    clear: input.clear ?? (async () => Result.success(null))
+    sendSystem: input.sendSystem ?? (async () => Result.successVoid()),
+    sendUser: input.sendUser ?? (async () => Result.successVoid()),
+    sendAgent: input.sendAgent ?? (async () => Result.successVoid())
   } as ChannelOutputManager
 }
 
-async function createRecordingChannelOutputManager(sent: Message[], sends: Partial<Record<'web' | 'feishu' | 'feishuWebhook' | 'email', (message: Message) => Promise<Result<null>>>> = {}): Promise<ChannelOutputManager> {
+async function createRecordingChannelOutputManager(sent: Message[], sends: Partial<Record<'web' | 'feishu' | 'feishuWebhook' | 'email', (message: Message) => Promise<Result<void>>>> = {}): Promise<ChannelOutputManager> {
   const configer = {
     subscribe: () => {}
   } as unknown as Configer
@@ -3055,9 +2963,9 @@ async function createRecordingChannelOutputManager(sent: Message[], sends: Parti
     start: async () => enabled || Boolean(sends[type as keyof typeof sends]),
     send: sends[type as keyof typeof sends] ?? (async (message: Message) => {
       sent.push(message)
-      return Result.success(null)
+      return Result.successVoid()
     }),
-    stop: async () => Result.success(null)
+    stop: async () => Result.successVoid()
   })
   const manager = new ChannelOutputManager(
     configer,

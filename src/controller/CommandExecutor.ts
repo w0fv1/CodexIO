@@ -28,7 +28,6 @@ const commandPrefixes = [
 const commandHelpText = [
   '可用命令：',
   '$update / ￥update：自动下载并安装最新版本，然后重启 Codexio。',
-  '$clear / ￥clear：清空当前会话显示并重置 agent 会话。',
   '$help / ￥help / $? / ￥?：显示这份命令说明。'
 ].join('\n')
 
@@ -70,7 +69,6 @@ export class CommandExecutor {
     const parsed = parseCommandInput(input.text)
     if (parsed.type === 'message') {
       Logger.info('command executor received message', {
-        source: input.source,
         ioThreadId: input.ioThreadId,
         length: parsed.text.length
       })
@@ -78,60 +76,40 @@ export class CommandExecutor {
         ioThreadId: input.ioThreadId,
         role: 'user',
         text: parsed.text,
-        createdAt: input.createdAt,
-        source: input.source,
         files: input.files
       })
       if (received.isFailed) {
         return Result.fail<ChannelReceiveResult>(received.message)
       }
       return Result.success({
-        ...received.data,
         ioThreadId: input.ioThreadId
       })
     }
     Logger.info('command executor received command', {
-      source: input.source,
       ioThreadId: input.ioThreadId,
       command: parsed.name,
       args: parsed.args
     })
-    if (parsed.name === 'clear') {
-      const cleared = await this.agentManager.clear(input.ioThreadId)
-      if (cleared.isFailed) {
-        return this.sendCommandFailure('$clear', cleared.message, input.source ?? 'unknown', input.ioThreadId)
-      }
-      await this.outputManager.clear(input.ioThreadId, input.source ?? 'unknown')
-      Logger.info('command executor cleared conversation', {
-        source: input.source,
-        ioThreadId: input.ioThreadId
-      })
-      return Result.success({
-        action: 'clear'
-      })
-    }
     if (parsed.name === 'update') {
-      const started = await this.outputManager.sendSystem('正在执行：$update\n正在检查更新；如果发现新版本会自动安装并重启，如果已是最新版本会直接提示。', input.source ?? 'unknown', input.ioThreadId)
+      const started = await this.outputManager.sendSystem('正在执行：$update\n正在检查更新；如果发现新版本会自动安装并重启，如果已是最新版本会直接提示。', input.ioThreadId)
       if (started.isFailed) {
         return Result.fail<ChannelReceiveResult>(started.message)
       }
       const updated = await this.updater.update()
       if (updated.isFailed) {
-        return this.sendCommandFailure('$update', updated.message, input.source ?? 'unknown', input.ioThreadId)
+        return this.sendCommandFailure('$update', updated.message, input.ioThreadId)
       }
-      const sent = await this.outputManager.sendSystem(`已执行：$update\n${updated.data ?? updated.message}`, input.source ?? 'unknown', input.ioThreadId)
+      const sent = await this.outputManager.sendSystem(`已执行：$update\n${updated.data ?? updated.message}`, input.ioThreadId)
       if (sent.isFailed) {
         return Result.fail<ChannelReceiveResult>(sent.message)
       }
-      Logger.info('command executor started update', {
-        source: input.source
-      })
+      Logger.info('command executor started update')
       return Result.success({
         action: 'update'
       })
     }
     if (parsed.name === 'help' || parsed.name === '?') {
-      const sent = await this.outputManager.sendSystem(commandHelpText, input.source ?? 'unknown', input.ioThreadId)
+      const sent = await this.outputManager.sendSystem(commandHelpText, input.ioThreadId)
       if (sent.isFailed) {
         return Result.fail<ChannelReceiveResult>(sent.message)
       }
@@ -139,18 +117,17 @@ export class CommandExecutor {
     }
     const name = parsed.name.length > 0 ? parsed.name : '(empty)'
     Logger.warn('command executor unknown command', {
-      source: input.source ?? 'unknown',
       command: name
     })
-    const sent = await this.outputManager.sendSystem(`unknown command: ${name}`, input.source ?? 'unknown', input.ioThreadId)
+    const sent = await this.outputManager.sendSystem(`unknown command: ${name}`, input.ioThreadId)
     if (sent.isFailed) {
       return Result.fail<ChannelReceiveResult>(sent.message)
     }
     return Result.success({})
   }
 
-  private async sendCommandFailure(command: string, message: string, source: string, ioThreadId: string): Promise<Result<ChannelReceiveResult>> {
-    const sent = await this.outputManager.sendSystem(`执行失败：${command}\n${message}`, source, ioThreadId)
+  private async sendCommandFailure(command: string, message: string, ioThreadId: string): Promise<Result<ChannelReceiveResult>> {
+    const sent = await this.outputManager.sendSystem(`执行失败：${command}\n${message}`, ioThreadId)
     if (sent.isFailed) {
       return Result.fail<ChannelReceiveResult>(sent.message)
     }

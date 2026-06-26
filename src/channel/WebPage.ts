@@ -512,28 +512,6 @@ export const webPageHtml = `<!doctype html>
           if (message.allIoThreadId) {
             this.allIoThreadId = message.allIoThreadId
           }
-          if (message.event === 'clear') {
-            if (!message.ioThreadId) {
-              return
-            }
-            if (message.ioThreadId === this.allIoThreadId) {
-              for (const item of this.threads) {
-                item.messages = []
-                item.unread = 0
-              }
-              const active = this.activeThread()
-              this.messages = active ? active.messages : []
-              this.autoScroll = true
-              return
-            }
-            const thread = this.ensureThread(message.ioThreadId)
-            thread.messages = []
-            if (thread.id === this.activeIoThreadId) {
-              this.messages = thread.messages
-              this.autoScroll = true
-            }
-            return
-          }
           if (message.event === 'ready') {
             return
           }

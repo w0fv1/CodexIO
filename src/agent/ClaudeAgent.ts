@@ -27,10 +27,6 @@ export class ClaudeAgent implements Agent {
     @inject(ChannelOutputManager) private readonly outputManager: ChannelOutputManager
   ) {}
 
-  async login(): Promise<void> {
-    throw new Error('Claude login does not expose a console-only login flow')
-  }
-
   async start(): Promise<void> {
     this.started = true
   }
@@ -78,8 +74,7 @@ export class ClaudeAgent implements Agent {
         void this.send({
           ioThreadId,
           role: 'agent',
-          text,
-          createdAt: Date.now()
+          text
         })
       }
     })
@@ -93,8 +88,7 @@ export class ClaudeAgent implements Agent {
         void this.send({
           ioThreadId,
           role: 'agent',
-          text,
-          createdAt: Date.now()
+          text
         })
       }
     })
@@ -136,17 +130,6 @@ export class ClaudeAgent implements Agent {
     const fileText = (input.files ?? []).map((file) => file.path).join('\n')
     const text = fileText.length > 0 ? `${input.text}\n\nFiles:\n${fileText}` : input.text
     thread.child.stdin?.write(`${text}\n`)
-  }
-
-  async clear(ioThreadId: string): Promise<void> {
-    Logger.info('claude agent clearing', {
-      ioThreadId
-    })
-    const thread = this.threads.get(ioThreadId)
-    if (thread) {
-      thread.child.kill()
-      this.threads.delete(ioThreadId)
-    }
   }
 
   async stop(): Promise<void> {
