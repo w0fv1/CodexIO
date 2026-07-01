@@ -640,6 +640,7 @@ export class CodexClient {
       proxyEnabled,
       proxyHost,
       proxyPort,
+      proxyNoProxy,
       serverHost,
       codexCommand,
       developerInstructions,
@@ -650,6 +651,7 @@ export class CodexClient {
       this.configer.get('proxy.enabled'),
       this.configer.get('proxy.host'),
       this.configer.get('proxy.port'),
+      this.configer.get('proxy.noProxy'),
       this.configer.get('server.host'),
       this.configer.get('agents.codex.command'),
       this.configer.get('agents.codex.developerInstructions'),
@@ -682,7 +684,8 @@ export class CodexClient {
         'localhost',
         '127.0.0.1',
         '::1',
-        serverHost
+        serverHost,
+        ...proxyNoProxy.split(',').map((item) => item.trim()).filter((item) => item.length > 0)
       ],
       developerInstructions,
       requestTimeoutMs: requestTimeoutSeconds * 1000

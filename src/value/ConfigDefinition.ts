@@ -24,6 +24,7 @@ export type CodexioConfig = {
     enabled: boolean
     host: string
     port: number
+    noProxy: string
   }
   channeli: {
     web?: {
@@ -115,6 +116,7 @@ const configFields: ConfigField[] = [
   field('proxy.enabled', 'Proxy', 'Enabled', 'boolean', '重启 Codexio', z.boolean(), false),
   field('proxy.host', 'Proxy', 'Host', 'string', '重启 Codexio', z.string(), '127.0.0.1'),
   field('proxy.port', 'Proxy', 'Port', 'number', '重启 Codexio', positiveInt, 7890),
+  field('proxy.noProxy', 'Proxy', 'NO_PROXY', 'string', '重启 Codexio', z.string(), ''),
   field('channeli.web.enabled', 'Web Input', 'Enabled', 'boolean', '重启 Codexio', z.boolean(), true),
   field('channeli.feishu.enabled', 'Feishu Input', 'Enabled', 'boolean', '重连 Feishu 输入', z.boolean(), false),
   field('channeli.feishu.appId', 'Feishu Input', 'App ID', 'string', '重连 Feishu 输入', z.string(), ''),

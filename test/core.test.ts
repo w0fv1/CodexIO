@@ -9,11 +9,13 @@ import { EventBus } from '../src/component/EventBus.js'
 import { IoThreadIdManager } from '../src/component/IoThreadIdManager.js'
 import { Agent } from '../src/component/agent/Agent.js'
 import { AgentManager } from '../src/component/agent/AgentManager.js'
+import { CodexClient } from '../src/component/agent/CodexClient.js'
 import { CodexMessageStreamer } from '../src/component/agent/CodexMessageStreamer.js'
 import { AppEvent, ChannelMessageReceivedEvent } from '../src/value/Event.js'
 import { ConfigSchema, createDefaultConfig, validateCodexioConfig } from '../src/value/ConfigDefinition.js'
 import { Result } from '../src/value/Result.js'
 import type { Message } from '../src/value/Message.js'
+import { renderMarkdownHtml } from '../src/util/Markdown.js'
 
 const testMetadata = new CodexioMetadata()
 
@@ -24,6 +26,7 @@ describe('core', () => {
     expect(config.agents.codex.bundled).toBe(true)
     expect(config.workspace.path).toBe('')
     expect(config.proxy.host).toBe('127.0.0.1')
+    expect(config.proxy.noProxy).toBe('')
     expect(config.channeli.web?.enabled).toBe(true)
     expect(config.channelo.web?.enabled).toBe(true)
   })
@@ -62,6 +65,7 @@ describe('core', () => {
       '  enabled: true',
       '  host: 127.0.0.1',
       '  port: 7891',
+      '  noProxy: next.firco.cn,*.firco.cn',
       'channeli:',
       '  web:',
       '    enabled: true',
@@ -81,8 +85,40 @@ describe('core', () => {
     expect(await configer.get('agents.codex.command')).toBe('codex-dev')
     expect(await configer.get('workspace.path')).toBe('workspace')
     expect(await configer.get('proxy.port')).toBe(7891)
+    expect(await configer.get('proxy.noProxy')).toBe('next.firco.cn,*.firco.cn')
     expect(await configer.get('channeli.web.enabled')).toBe(true)
     expect(await configer.get('channelo.web.enabled')).toBe(true)
+  })
+
+  it('passes configured no proxy hosts to the codex process', async () => {
+    const values = new Map<string, unknown>([
+      ['agents.codex.bundled', false],
+      ['workspace.path', 'workspace'],
+      ['proxy.enabled', true],
+      ['proxy.host', '127.0.0.1'],
+      ['proxy.port', 7890],
+      ['proxy.noProxy', 'next.firco.cn, *.firco.cn ,'],
+      ['server.host', '127.0.0.1'],
+      ['agents.codex.command', 'codex'],
+      ['agents.codex.developerInstructions', ''],
+      ['agents.codex.requestTimeoutSeconds', 120]
+    ])
+    const client = new CodexClient({
+      get: async (path: string) => values.get(path)
+    } as unknown as Configer, testMetadata)
+    const runtimeConfig = await client['readRuntimeConfig']()
+    expect(runtimeConfig.noProxyHosts).toEqual([
+      'localhost',
+      '127.0.0.1',
+      '::1',
+      '127.0.0.1',
+      'next.firco.cn',
+      '*.firco.cn'
+    ])
+  })
+
+  it('removes the final newline from rendered markdown html', () => {
+    expect(renderMarkdownHtml('你好。')).toBe('<p>你好。</p>')
   })
 
   it('binds platform thread identities to one io thread', () => {

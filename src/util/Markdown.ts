@@ -17,7 +17,7 @@ export function renderMarkdownHtml(markdown: string): string {
     breaks: true,
     gfm: true
   }) as string
-  return sanitizeHtml(raw, {
+  return sanitizeHtml(raw.replace(/\r?\n$/, ''), {
     allowedTags: [
       ...sanitizeHtml.defaults.allowedTags,
       'h1',
