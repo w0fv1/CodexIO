@@ -17,6 +17,7 @@ export class CodexAgent implements Agent {
   private readonly threadIdByIoThreadId = new Map<string, string>()
   private readonly ioThreadIdByThreadId = new Map<string, string>()
   private readonly streamedItems = new Set<string>()
+  private readonly emittedErrors = new Set<string>()
   private readonly disposers: Array<() => void> = []
 
   constructor(
@@ -41,6 +42,7 @@ export class CodexAgent implements Agent {
         Logger.warn('codex agent client error', {
           message: error.message
         })
+        void this.receiveClientError(error)
       })
     )
     const started = await this.client.start()
@@ -97,6 +99,7 @@ export class CodexAgent implements Agent {
     this.threadIdByIoThreadId.clear()
     this.ioThreadIdByThreadId.clear()
     this.streamedItems.clear()
+    this.emittedErrors.clear()
     return this.client.stop()
   }
 
@@ -158,6 +161,40 @@ export class CodexAgent implements Agent {
     }
   }
 
+  private async receiveClientError(error: Error): Promise<void> {
+    const ioThreadId = this.loginIoThreadId ?? this.ioThreadIdManager.getLastActiveIoThreadId()
+    if (!ioThreadId) {
+      return
+    }
+    const text = await this.formatClientError(error)
+    const key = `${ioThreadId}:${text}`
+    if (this.emittedErrors.has(key)) {
+      return
+    }
+    this.emittedErrors.add(key)
+    await this.sendAgent({
+      ioThreadId,
+      role: 'agent',
+      text
+    })
+  }
+
+  private async formatClientError(error: Error): Promise<string> {
+    const proxyEnabled = await this.configer.get('proxy.enabled')
+    if (!proxyEnabled && isNetworkOrRegionError(error.message)) {
+      return [
+        error.message,
+        '',
+        '当前 proxy.enabled=false。请在配置页开启代理，或在 config.yaml 设置：',
+        'proxy:',
+        '  enabled: true',
+        '  host: 127.0.0.1',
+        '  port: 7890'
+      ].join('\n')
+    }
+    return error.message
+  }
+
   private bindThread(ioThreadId: string, threadId: string): void {
     this.threadIdByIoThreadId.set(ioThreadId, threadId)
     this.ioThreadIdByThreadId.set(threadId, ioThreadId)
@@ -181,4 +218,13 @@ export class CodexAgent implements Agent {
       dispose()
     })
   }
+}
+
+function isNetworkOrRegionError(message: string): boolean {
+  const lower = message.toLowerCase()
+  return lower.includes('地区')
+    || lower.includes('区域')
+    || lower.includes('network')
+    || lower.includes('网络')
+    || lower.includes('unsupported_country_region_territory')
 }

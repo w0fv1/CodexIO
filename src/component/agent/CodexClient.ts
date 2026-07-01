@@ -149,9 +149,14 @@ export class CodexClient {
         input: child.stdout
       }).on('line', (line) => this.receiveLine(line))
       child.stderr?.on('data', (data: Buffer) => {
+        const text = data.toString('utf8')
         Logger.warn('codex app-server stderr', {
-          text: data.toString('utf8')
+          text
         })
+        const error = readCodexStderrError(text)
+        if (error) {
+          this.emitError(error)
+        }
       })
       void child.then((result) => {
         Logger.info('codex app-server exited', {
@@ -734,4 +739,32 @@ function formatChildExit(result: CodexChildExit): string {
     ? `: ${result.stderr.trim()}`
     : ''
   return `codex app-server exited with ${reason}${stderr}`
+}
+
+function readCodexStderrError(text: string): Error | null {
+  const normalized = stripAnsi(text)
+  const lower = normalized.toLowerCase()
+  if (lower.includes('unsupported_country_region_territory')) {
+    return new Error([
+      'Codex 登录刷新失败：当前网络所在国家、地区或区域不受支持。',
+      '请开启可访问 ChatGPT/OpenAI 的代理后重试。'
+    ].join('\n'))
+  }
+  if (lower.includes('failed to refresh token')) {
+    return new Error([
+      'Codex 登录刷新失败。',
+      normalized.trim()
+    ].join('\n'))
+  }
+  if (lower.includes('mcp authorization is invalid')) {
+    return new Error('Codex MCP 授权无效，请重新登录 Codex。')
+  }
+  if (lower.includes('https://chatgpt.com/backend-api/ps/mcp') && lower.includes('http/request failed')) {
+    return new Error('Codex MCP 网络请求失败，请检查代理或网络连接。')
+  }
+  return null
+}
+
+function stripAnsi(value: string): string {
+  return value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
 }
