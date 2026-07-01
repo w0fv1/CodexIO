@@ -28,6 +28,7 @@ import { EchoAgent } from '../src/component/agent/EchoAgent.js'
 import { AgentManager } from '../src/component/agent/AgentManager.js'
 import { CodexAgent } from '../src/component/agent/CodexAgent.js'
 import { CodexClient } from '../src/component/agent/CodexClient.js'
+import { CodexMessageStreamer } from '../src/component/agent/CodexMessageStreamer.js'
 
 const testToken = 'test-message-token'
 const testMetadata = new CodexioMetadata()
@@ -235,7 +236,7 @@ async function createTestCodexioApp(configer: Configer): Promise<{
     emailOutput
   )
   const codexClient = new CodexClient(configer, metadata)
-  const codexAgent = new CodexAgent(configer, eventBus, ioThreadIdManager, codexClient)
+  const codexAgent = new CodexAgent(configer, eventBus, ioThreadIdManager, codexClient, new CodexMessageStreamer(eventBus))
   const echoAgent = new EchoAgent(eventBus)
   const agentManager = new AgentManager(configer, eventBus, codexAgent, echoAgent)
   const inputManager = new ChannelInputManager(configer, eventBus, ioThreadIdManager, webInput, feishuInput, emailInput)

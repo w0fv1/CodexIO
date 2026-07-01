@@ -9,6 +9,7 @@ import { EventBus } from '../src/component/EventBus.js'
 import { IoThreadIdManager } from '../src/component/IoThreadIdManager.js'
 import { Agent } from '../src/component/agent/Agent.js'
 import { AgentManager } from '../src/component/agent/AgentManager.js'
+import { CodexMessageStreamer } from '../src/component/agent/CodexMessageStreamer.js'
 import { AppEvent, ChannelMessageReceivedEvent } from '../src/value/Event.js'
 import { ConfigSchema, createDefaultConfig, validateCodexioConfig } from '../src/value/ConfigDefinition.js'
 import { Result } from '../src/value/Result.js'
@@ -260,6 +261,37 @@ describe('core', () => {
       'second'
     ])
     await manager.stop()
+  })
+
+  it('buffers codex deltas until completion', async () => {
+    const sent: Message[] = []
+    const eventBus = new EventBus()
+    eventBus.on(AppEvent.ChannelMessageSendRequested, async (event) => {
+      sent.push(event.message)
+      return Result.successVoid()
+    })
+    const streamer = new CodexMessageStreamer(eventBus)
+    const thread = {
+      ioThreadId: 'io-thread',
+      agentThreadId: 'codex-thread'
+    }
+    await streamer.append(thread, 'item', '你')
+    await streamer.append(thread, 'item', '好')
+    await streamer.append(thread, 'item', '。')
+    expect(sent).toEqual([])
+    await streamer.complete(thread, [
+      {
+        itemId: 'item',
+        text: '你好。'
+      }
+    ])
+    expect(sent).toEqual([
+      {
+        ioThreadId: 'io-thread',
+        role: 'agent',
+        text: '你好。'
+      }
+    ])
   })
 })
 

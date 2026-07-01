@@ -8,6 +8,7 @@ import { IoThreadIdManager } from '../IoThreadIdManager.js'
 import { Logger } from '../Logger.js'
 import { Agent } from './Agent.js'
 import { CodexClient, CodexClientLoginEvent, CodexClientMessage } from './CodexClient.js'
+import { CodexMessageStreamer } from './CodexMessageStreamer.js'
 
 @injectable()
 export class CodexAgent implements Agent {
@@ -16,7 +17,6 @@ export class CodexAgent implements Agent {
   private loginIoThreadId?: string
   private readonly threadIdByIoThreadId = new Map<string, string>()
   private readonly ioThreadIdByThreadId = new Map<string, string>()
-  private readonly streamedItems = new Set<string>()
   private readonly emittedErrors = new Set<string>()
   private readonly disposers: Array<() => void> = []
 
@@ -24,7 +24,8 @@ export class CodexAgent implements Agent {
     @inject(Configer) private readonly configer: Configer,
     @inject(EventBus) private readonly eventBus: EventBus,
     @inject(IoThreadIdManager) private readonly ioThreadIdManager: IoThreadIdManager,
-    @inject(CodexClient) private readonly client: CodexClient
+    @inject(CodexClient) private readonly client: CodexClient,
+    @inject(CodexMessageStreamer) private readonly messageStreamer: CodexMessageStreamer
   ) {}
 
   async start(): Promise<Result<void>> {
@@ -98,7 +99,7 @@ export class CodexAgent implements Agent {
     this.loginIoThreadId = undefined
     this.threadIdByIoThreadId.clear()
     this.ioThreadIdByThreadId.clear()
-    this.streamedItems.clear()
+    this.messageStreamer.clear()
     this.emittedErrors.clear()
     return this.client.stop()
   }
@@ -130,29 +131,29 @@ export class CodexAgent implements Agent {
       return
     }
     if (message.status === 'delta' && message.text.length > 0) {
-      if (message.itemId) {
-        this.streamedItems.add(`${message.threadId}:${message.itemId}`)
+      if (!message.itemId) {
+        return
       }
-      await this.sendAgent({
+      await this.messageStreamer.append({
         ioThreadId,
-        role: 'agent',
-        text: message.text
-      })
+        agentThreadId: message.threadId
+      }, message.itemId, message.text)
       return
     }
     if (message.status === 'completed') {
-      for (const completed of message.messages) {
-        if (!this.streamedItems.has(`${message.threadId}:${completed.itemId}`)) {
-          await this.sendAgent({
-            ioThreadId,
-            role: 'agent',
-            text: completed.text
-          })
+      await this.messageStreamer.complete({
+        ioThreadId,
+        agentThreadId: message.threadId
+      }, message.messages.map((completed) => {
+        return {
+          itemId: completed.itemId,
+          text: completed.text
         }
-      }
+      }))
       return
     }
     if (message.status === 'failed' && message.text.trim().length > 0) {
+      this.messageStreamer.clearThread(ioThreadId)
       await this.sendAgent({
         ioThreadId,
         role: 'agent',
