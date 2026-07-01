@@ -1,25 +1,29 @@
 import { inject, injectable } from 'inversify'
-import { Result } from '../value/Result.js'
-import { allIoThreadId, Message, MessageFile } from '../value/Message.js'
-import { ChannelOutput, ChannelOutputContext, ChannelType } from './Channel.js'
-import { Logger } from '../component/Logger.js'
-import { Configer } from '../component/Configer.js'
-import { FileStore } from '../component/FileStore.js'
-import { EmailChannelOutput } from './EmailChannel.js'
-import { FeishuChannelOutput } from './FeishuChannel.js'
-import { FeishuWebhookChannelOutput } from './FeishuWebhookChannel.js'
-import { WebChannelOutput } from './WebChannel.js'
-import { parseMarkdownFileReferences } from '../util/Markdown.js'
+import { Result } from '../../value/Result.js'
+import { Message } from '../../value/Message.js'
+import { AppEvent, ChannelMessageSendRequestedEvent } from '../../value/Event.js'
+import { ChannelOutput, ChannelOutputContext } from './ChannelOutput.js'
+import { Logger } from '../Logger.js'
+import { Configer } from '../Configer.js'
+import { EventBus } from '../EventBus.js'
+import { IoThreadIdManager } from '../IoThreadIdManager.js'
+import { EmailChannelOutput } from './EmailChannelOutput.js'
+import { FeishuChannelOutput } from './FeishuChannelOutput.js'
+import { FeishuWebhookChannelOutput } from './FeishuWebhookChannelOutput.js'
+import { WebChannelOutput } from './WebChannelOutput.js'
 
 @injectable()
 export class ChannelOutputManager {
+  private readonly listener = (event: ChannelMessageSendRequestedEvent) => this.send(event.message, event.inputType)
   private readonly availableOutputs: ChannelOutput[]
   private readonly outputs = new Map<string, ChannelOutput>()
   private readonly outputQueues = new Map<string, Promise<void>>()
+  private started = false
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
-    @inject(FileStore) private readonly fileStore: FileStore,
+    @inject(EventBus) private readonly eventBus: EventBus,
+    @inject(IoThreadIdManager) private readonly ioThreadIdManager: IoThreadIdManager,
     @inject(WebChannelOutput) web: WebChannelOutput,
     @inject(FeishuChannelOutput) feishu: FeishuChannelOutput,
     @inject(FeishuWebhookChannelOutput) feishuWebhook: FeishuWebhookChannelOutput,
@@ -34,7 +38,11 @@ export class ChannelOutputManager {
   }
 
   async start(): Promise<void> {
-    this.configer.subscribe('channels', async () => {
+    if (!this.started) {
+      this.started = true
+      this.eventBus.on(AppEvent.ChannelMessageSendRequested, this.listener)
+    }
+    this.configer.subscribe('channelo', async () => {
       const applied = await this.applyConfig()
       if (applied.isFailed) {
         await this.sendSystem(`通道输出配置应用失败：${applied.message}`)
@@ -43,7 +51,17 @@ export class ChannelOutputManager {
     await this.applyConfig()
   }
 
-  async sendUser(message: Message, inputType?: ChannelType): Promise<Result<void>> {
+  async send(message: Message, inputType?: ChannelOutputContext['inputType']): Promise<Result<void>> {
+    if (message.role === 'user') {
+      return this.sendUser(message, inputType)
+    }
+    if (message.role === 'agent') {
+      return this.sendAgent(message, inputType)
+    }
+    return this.sendSystem(message.text, message.ioThreadId)
+  }
+
+  async sendUser(message: Message, inputType?: ChannelOutputContext['inputType']): Promise<Result<void>> {
     if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
       return Result.fail('text or file is required')
     }
@@ -53,34 +71,50 @@ export class ChannelOutputManager {
       text: message.text,
       files: message.files?.length ?? 0
     })
-    return this.send({
+    const stored: Message = {
       ...message,
       role: 'user'
-    }, {
+    }
+    return this.broadcast(stored, {
       inputType
     })
   }
 
-  async sendAgent(message: Message): Promise<Result<void>> {
-    return this.send(await this.prepareAgentMessage({
+  async sendAgent(message: Message, inputType?: ChannelOutputContext['inputType']): Promise<Result<void>> {
+    if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
+      return Result.fail('text or file is required')
+    }
+    const stored: Message = {
       ...message,
       role: 'agent'
-    }))
+    }
+    return this.broadcast(stored, {
+      inputType
+    })
   }
 
   async sendSystem(text: string, ioThreadId?: string): Promise<Result<void>> {
     if (text.trim().length === 0) {
       return Result.fail('text is required')
     }
-    return this.send({
-      ioThreadId: ioThreadId ?? allIoThreadId,
+    const targetIoThreadId = ioThreadId?.trim() || this.ioThreadIdManager.getLastActiveIoThreadId()
+    if (!targetIoThreadId) {
+      return Result.fail('active ioThreadId not found')
+    }
+    const message = {
+      ioThreadId: targetIoThreadId,
       role: 'system',
       text
-    })
+    } satisfies Message
+    return this.broadcast(message)
   }
 
   async stop(): Promise<Result<void>> {
     const failures: string[] = []
+    if (this.started) {
+      this.started = false
+      this.eventBus.off(AppEvent.ChannelMessageSendRequested, this.listener)
+    }
     await this.flushOutputs()
     for (const output of this.outputs.values()) {
       const result = await output.stop()
@@ -119,50 +153,6 @@ export class ChannelOutputManager {
     }
     Logger.info('channel output config applied')
     return Result.successVoid()
-  }
-
-  private async send(message: Message, context?: ChannelOutputContext): Promise<Result<void>> {
-    if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
-      return Result.fail('text or file is required')
-    }
-    return this.broadcast(message, context)
-  }
-
-  private async prepareAgentMessage(message: Message): Promise<Message> {
-    const parsed = parseMarkdownFileReferences(message.text)
-    if (parsed.files.length === 0) {
-      return message
-    }
-    const files = new Map<string, MessageFile>()
-    for (const file of message.files ?? []) {
-      files.set(file.id, file)
-    }
-    for (const reference of parsed.files) {
-      const file = await this.resolveFileReference(reference.path)
-      if (file) {
-        files.set(file.id, file)
-      }
-    }
-    return {
-      ...message,
-      text: parsed.text,
-      files: files.size > 0 ? [...files.values()] : undefined
-    }
-  }
-
-  private async resolveFileReference(path: string): Promise<MessageFile | undefined> {
-    try {
-      if (path.startsWith('/api/files/')) {
-        return this.fileStore.resolveUrl(path)
-      }
-      return await this.fileStore.importPath(path.replaceAll('/', '\\'))
-    } catch (error) {
-      Logger.warn('agent markdown file reference ignored', {
-        path,
-        message: error instanceof Error ? error.message : String(error)
-      })
-      return undefined
-    }
   }
 
   private async broadcast(message: Message, context?: ChannelOutputContext): Promise<Result<void>> {

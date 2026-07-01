@@ -1,7 +1,4 @@
-import { existsSync, statSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
-import { homedir } from 'node:os'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { z } from 'zod'
 
 export type CodexioConfig = {
@@ -11,21 +8,24 @@ export type CodexioConfig = {
     token: string
     autoPort: boolean
   }
+  agents: {
+    codex: {
+      enabled: boolean
+      bundled: boolean
+      command: string
+      developerInstructions: string
+      requestTimeoutSeconds: number
+    }
+  }
+  workspace: {
+    path: string
+  }
   proxy: {
     enabled: boolean
     host: string
     port: number
   }
-  agents: {
-    codex?: {
-      enabled: boolean
-      bundled?: boolean
-    }
-    claude?: {
-      enabled: boolean
-    }
-  }
-  channels: {
+  channeli: {
     web?: {
       enabled: boolean
     }
@@ -36,14 +36,10 @@ export type CodexioConfig = {
       chatId: string
       ws: string
     }
-    feishuWebhook?: {
-      enabled: boolean
-      url: string
-    }
     email?: {
       enabled: boolean
       user: string
-      agent: {
+      account: {
         imap: {
           host: string
           port: number
@@ -52,6 +48,29 @@ export type CodexioConfig = {
           password: string
           mailbox: string
         }
+      }
+      idle: boolean
+      pollSeconds: number
+    }
+  }
+  channelo: {
+    web?: {
+      enabled: boolean
+    }
+    feishu?: {
+      enabled: boolean
+      appId: string
+      appSecret: string
+      chatId: string
+    }
+    feishuWebhook?: {
+      enabled: boolean
+      url: string
+    }
+    email?: {
+      enabled: boolean
+      user: string
+      account: {
         smtp: {
           host: string
           port: number
@@ -61,16 +80,7 @@ export type CodexioConfig = {
           from: string
         }
       }
-      idle: boolean
-      pollSeconds: number
     }
-  }
-  workspace: {
-    path: string
-  }
-  update: {
-    enabled: boolean
-    baseUrl: string
   }
 }
 
@@ -96,39 +106,46 @@ const configFields: ConfigField[] = [
   field('server.port', 'Server', 'Port', 'number', '重启 Codexio', positiveInt, 8787),
   field('server.token', 'Server', 'Token', 'password', '重启 Codexio', z.string(), ''),
   field('server.autoPort', 'Server', 'Auto Port', 'boolean', '重启 Codexio', z.boolean(), false),
-  field('proxy.enabled', 'Proxy', 'Enabled', 'boolean', '重启 Agent', z.boolean(), false),
-  field('proxy.host', 'Proxy', 'Host', 'string', '重启 Agent', z.string(), '127.0.0.1'),
-  field('proxy.port', 'Proxy', 'Port', 'number', '重启 Agent', positiveInt, 7890),
-  field('agents.codex.enabled', 'Agents', 'Codex', 'boolean', '重启 Agent', z.boolean(), true),
-  field('agents.codex.bundled', 'Agents', 'Bundled Codex', 'boolean', '重启 Agent', z.boolean(), false),
-  field('agents.claude.enabled', 'Agents', 'Claude', 'boolean', '重启 Agent', z.boolean(), false),
-  field('workspace.path', 'Workspace', 'Path', 'string', '重启 Agent', z.string().min(1), '.'),
-  field('channels.web.enabled', 'Web', 'Enabled', 'boolean', '重启 Codexio', z.boolean(), true),
-  field('channels.feishu.enabled', 'Feishu', 'Enabled', 'boolean', '重连 Feishu', z.boolean(), false),
-  field('channels.feishu.appId', 'Feishu', 'App ID', 'string', '重连 Feishu', z.string(), ''),
-  field('channels.feishu.appSecret', 'Feishu', 'App Secret', 'password', '重连 Feishu', z.string(), ''),
-  field('channels.feishu.chatId', 'Feishu', 'Chat ID', 'string', '重连 Feishu', z.string(), ''),
-  field('channels.feishu.ws', 'Feishu', 'WebSocket', 'string', '重连 Feishu', z.string(), ''),
-  field('channels.feishuWebhook.enabled', 'Feishu Webhook', 'Enabled', 'boolean', '重连 Feishu Webhook', z.boolean(), false),
-  field('channels.feishuWebhook.url', 'Feishu Webhook', 'URL', 'password', '重连 Feishu Webhook', z.string(), ''),
-  field('channels.email.enabled', 'Email', 'Enabled', 'boolean', '重连 Email', z.boolean(), false),
-  field('channels.email.user', 'Email', 'User', 'string', '重连 Email', z.string(), ''),
-  field('channels.email.agent.imap.host', 'Email IMAP', 'Host', 'string', '重连 Email', z.string(), ''),
-  field('channels.email.agent.imap.port', 'Email IMAP', 'Port', 'number', '重连 Email', positiveInt, 993),
-  field('channels.email.agent.imap.secure', 'Email IMAP', 'Secure', 'boolean', '重连 Email', z.boolean(), true),
-  field('channels.email.agent.imap.user', 'Email IMAP', 'User', 'string', '重连 Email', z.string(), ''),
-  field('channels.email.agent.imap.password', 'Email IMAP', 'Password', 'password', '重连 Email', z.string(), ''),
-  field('channels.email.agent.imap.mailbox', 'Email IMAP', 'Mailbox', 'string', '重连 Email', z.string(), 'INBOX'),
-  field('channels.email.agent.smtp.host', 'Email SMTP', 'Host', 'string', '重连 Email', z.string(), ''),
-  field('channels.email.agent.smtp.port', 'Email SMTP', 'Port', 'number', '重连 Email', positiveInt, 465),
-  field('channels.email.agent.smtp.secure', 'Email SMTP', 'Secure', 'boolean', '重连 Email', z.boolean(), true),
-  field('channels.email.agent.smtp.user', 'Email SMTP', 'User', 'string', '重连 Email', z.string(), ''),
-  field('channels.email.agent.smtp.password', 'Email SMTP', 'Password', 'password', '重连 Email', z.string(), ''),
-  field('channels.email.agent.smtp.from', 'Email SMTP', 'From', 'string', '重连 Email', z.string(), ''),
-  field('channels.email.idle', 'Email', 'Idle', 'boolean', '重连 Email', z.boolean(), true),
-  field('channels.email.pollSeconds', 'Email', 'Poll Seconds', 'number', '重连 Email', positiveInt, 30),
-  field('update.enabled', 'Update', 'Enabled', 'boolean', '立即生效', z.boolean(), true),
-  field('update.baseUrl', 'Update', 'Base URL', 'string', '立即生效', z.string(), 'https://next.firco.cn')
+  field('agents.codex.enabled', 'Codex Agent', 'Enabled', 'boolean', '重启 Codex Agent', z.boolean(), false),
+  field('agents.codex.bundled', 'Codex Agent', 'Bundled', 'boolean', '重启 Codex Agent', z.boolean(), true),
+  field('agents.codex.command', 'Codex Agent', 'Command', 'string', '重启 Codex Agent', z.string(), 'codex'),
+  field('agents.codex.developerInstructions', 'Codex Agent', 'Developer Instructions', 'string', '重启 Codex Agent', z.string(), ''),
+  field('agents.codex.requestTimeoutSeconds', 'Codex Agent', 'Request Timeout Seconds', 'number', '重启 Codex Agent', positiveInt, 120),
+  field('workspace.path', 'Workspace', 'Path', 'string', '重启 Codex Agent', z.string(), ''),
+  field('proxy.enabled', 'Proxy', 'Enabled', 'boolean', '重启 Codexio', z.boolean(), false),
+  field('proxy.host', 'Proxy', 'Host', 'string', '重启 Codexio', z.string(), '127.0.0.1'),
+  field('proxy.port', 'Proxy', 'Port', 'number', '重启 Codexio', positiveInt, 7890),
+  field('channeli.web.enabled', 'Web Input', 'Enabled', 'boolean', '重启 Codexio', z.boolean(), true),
+  field('channeli.feishu.enabled', 'Feishu Input', 'Enabled', 'boolean', '重连 Feishu 输入', z.boolean(), false),
+  field('channeli.feishu.appId', 'Feishu Input', 'App ID', 'string', '重连 Feishu 输入', z.string(), ''),
+  field('channeli.feishu.appSecret', 'Feishu Input', 'App Secret', 'password', '重连 Feishu 输入', z.string(), ''),
+  field('channeli.feishu.chatId', 'Feishu Input', 'Chat ID', 'string', '重连 Feishu 输入', z.string(), ''),
+  field('channeli.feishu.ws', 'Feishu Input', 'WebSocket', 'string', '重连 Feishu 输入', z.string(), ''),
+  field('channeli.email.enabled', 'Email Input', 'Enabled', 'boolean', '重连 Email 输入', z.boolean(), false),
+  field('channeli.email.user', 'Email Input', 'User', 'string', '重连 Email 输入', z.string(), ''),
+  field('channeli.email.account.imap.host', 'Email Input IMAP', 'Host', 'string', '重连 Email 输入', z.string(), ''),
+  field('channeli.email.account.imap.port', 'Email Input IMAP', 'Port', 'number', '重连 Email 输入', positiveInt, 993),
+  field('channeli.email.account.imap.secure', 'Email Input IMAP', 'Secure', 'boolean', '重连 Email 输入', z.boolean(), true),
+  field('channeli.email.account.imap.user', 'Email Input IMAP', 'User', 'string', '重连 Email 输入', z.string(), ''),
+  field('channeli.email.account.imap.password', 'Email Input IMAP', 'Password', 'password', '重连 Email 输入', z.string(), ''),
+  field('channeli.email.account.imap.mailbox', 'Email Input IMAP', 'Mailbox', 'string', '重连 Email 输入', z.string(), 'INBOX'),
+  field('channeli.email.idle', 'Email Input', 'Idle', 'boolean', '重连 Email 输入', z.boolean(), true),
+  field('channeli.email.pollSeconds', 'Email Input', 'Poll Seconds', 'number', '重连 Email 输入', positiveInt, 30),
+  field('channelo.web.enabled', 'Web Output', 'Enabled', 'boolean', '重启 Codexio', z.boolean(), true),
+  field('channelo.feishu.enabled', 'Feishu Output', 'Enabled', 'boolean', '重连 Feishu 输出', z.boolean(), false),
+  field('channelo.feishu.appId', 'Feishu Output', 'App ID', 'string', '重连 Feishu 输出', z.string(), ''),
+  field('channelo.feishu.appSecret', 'Feishu Output', 'App Secret', 'password', '重连 Feishu 输出', z.string(), ''),
+  field('channelo.feishu.chatId', 'Feishu Output', 'Chat ID', 'string', '重连 Feishu 输出', z.string(), ''),
+  field('channelo.feishuWebhook.enabled', 'Feishu Webhook Output', 'Enabled', 'boolean', '重连 Feishu Webhook 输出', z.boolean(), false),
+  field('channelo.feishuWebhook.url', 'Feishu Webhook Output', 'URL', 'password', '重连 Feishu Webhook 输出', z.string(), ''),
+  field('channelo.email.enabled', 'Email Output', 'Enabled', 'boolean', '重连 Email 输出', z.boolean(), false),
+  field('channelo.email.user', 'Email Output', 'User', 'string', '重连 Email 输出', z.string(), ''),
+  field('channelo.email.account.smtp.host', 'Email Output SMTP', 'Host', 'string', '重连 Email 输出', z.string(), ''),
+  field('channelo.email.account.smtp.port', 'Email Output SMTP', 'Port', 'number', '重连 Email 输出', positiveInt, 465),
+  field('channelo.email.account.smtp.secure', 'Email Output SMTP', 'Secure', 'boolean', '重连 Email 输出', z.boolean(), true),
+  field('channelo.email.account.smtp.user', 'Email Output SMTP', 'User', 'string', '重连 Email 输出', z.string(), ''),
+  field('channelo.email.account.smtp.password', 'Email Output SMTP', 'Password', 'password', '重连 Email 输出', z.string(), ''),
+  field('channelo.email.account.smtp.from', 'Email Output SMTP', 'From', 'string', '重连 Email 输出', z.string(), '')
 ]
 
 export const configFieldDescriptors: ConfigFieldDescriptor[] = configFields.map(({ path, group, label, type, apply }) => ({
@@ -141,32 +158,15 @@ export const configFieldDescriptors: ConfigFieldDescriptor[] = configFields.map(
 
 export const ConfigSchema = z.preprocess((value) => deepMergeConfig(defaultConfigObject(), value), createConfigSchema())
 
-export function createDefaultConfig(workspacePath = '.'): CodexioConfig {
+export function createDefaultConfig(): CodexioConfig {
   const config = ConfigSchema.parse(defaultConfigObject())
   config.server.token = createToken()
-  config.workspace.path = normalizeWorkspacePath(workspacePath)
   return config
 }
 
-export async function parseCodexioConfig(value: unknown, configPath: string): Promise<CodexioConfig> {
+export async function parseCodexioConfig(value: unknown, _configPath: string): Promise<CodexioConfig> {
   const resolved = resolveReferences(value ?? {})
-  const config = ConfigSchema.parse(resolved)
-  config.workspace.path = normalizeWorkspacePath(config.workspace.path, dirname(resolve(configPath)))
-  return config
-}
-
-export function normalizeWorkspacePath(path: string, basePath = process.cwd()): string {
-  const trimmedPath = path.trim()
-  if (trimmedPath === '~') {
-    return homedir()
-  }
-  if (trimmedPath.startsWith('~/') || trimmedPath.startsWith('~\\')) {
-    return join(homedir(), trimmedPath.slice(2))
-  }
-  if (isAbsolute(trimmedPath)) {
-    return trimmedPath
-  }
-  return resolve(basePath, trimmedPath)
+  return ConfigSchema.parse(resolved)
 }
 
 export function validateCodexioConfig(config: CodexioConfig): void {
@@ -174,37 +174,40 @@ export function validateCodexioConfig(config: CodexioConfig): void {
   if (config.server.token.trim().length === 0) {
     issues.push('server.token is required')
   }
-  const enabledAgents = Object.entries(config.agents).filter(([, agentConfig]) => agentConfig?.enabled)
-  if (enabledAgents.length === 0) {
-    issues.push('one agent must be enabled')
+  const enabledChanneli = Object.entries(config.channeli).filter(([, channelConfig]) => channelConfig?.enabled)
+  const enabledChannelo = Object.entries(config.channelo).filter(([, channelConfig]) => channelConfig?.enabled)
+  if (enabledChanneli.length === 0) {
+    issues.push('one channeli must be enabled')
   }
-  if (enabledAgents.length > 1) {
-    issues.push('only one agent can be enabled')
+  if (enabledChannelo.length === 0) {
+    issues.push('one channelo must be enabled')
   }
-  if (existsSync(config.workspace.path) && !statSync(config.workspace.path).isDirectory()) {
-    issues.push(`workspace.path is not a directory: ${config.workspace.path}`)
+  if (config.channeli.feishu?.enabled) {
+    requireValue(issues, config.channeli.feishu.appId, 'channeli.feishu.appId is required')
+    requireValue(issues, config.channeli.feishu.appSecret, 'channeli.feishu.appSecret is required')
+    requireValue(issues, config.channeli.feishu.chatId, 'channeli.feishu.chatId is required')
   }
-  const enabledChannels = Object.entries(config.channels).filter(([, channelConfig]) => channelConfig?.enabled)
-  if (enabledChannels.length === 0) {
-    issues.push('one channel must be enabled')
+  if (config.channelo.feishu?.enabled) {
+    requireValue(issues, config.channelo.feishu.appId, 'channelo.feishu.appId is required')
+    requireValue(issues, config.channelo.feishu.appSecret, 'channelo.feishu.appSecret is required')
+    requireValue(issues, config.channelo.feishu.chatId, 'channelo.feishu.chatId is required')
   }
-  if (config.channels.feishu?.enabled) {
-    requireValue(issues, config.channels.feishu.appId, 'channels.feishu.appId is required')
-    requireValue(issues, config.channels.feishu.appSecret, 'channels.feishu.appSecret is required')
-    requireValue(issues, config.channels.feishu.chatId, 'channels.feishu.chatId is required')
+  if (config.channelo.feishuWebhook?.enabled) {
+    requireValue(issues, config.channelo.feishuWebhook.url, 'channelo.feishuWebhook.url is required')
   }
-  if (config.channels.feishuWebhook?.enabled) {
-    requireValue(issues, config.channels.feishuWebhook.url, 'channels.feishuWebhook.url is required')
+  if (config.channeli.email?.enabled) {
+    const email = config.channeli.email
+    requireValue(issues, email.user, 'channeli.email.user is required')
+    requireValue(issues, email.account.imap.host, 'channeli.email.account.imap.host is required')
+    requireValue(issues, email.account.imap.user, 'channeli.email.account.imap.user is required')
+    requireValue(issues, email.account.imap.password, 'channeli.email.account.imap.password is required')
   }
-  if (config.channels.email?.enabled) {
-    const email = config.channels.email
-    requireValue(issues, email.user, 'channels.email.user is required')
-    requireValue(issues, email.agent.imap.host, 'channels.email.agent.imap.host is required')
-    requireValue(issues, email.agent.imap.user, 'channels.email.agent.imap.user is required')
-    requireValue(issues, email.agent.imap.password, 'channels.email.agent.imap.password is required')
-    requireValue(issues, email.agent.smtp.host, 'channels.email.agent.smtp.host is required')
-    requireValue(issues, email.agent.smtp.user, 'channels.email.agent.smtp.user is required')
-    requireValue(issues, email.agent.smtp.password, 'channels.email.agent.smtp.password is required')
+  if (config.channelo.email?.enabled) {
+    const email = config.channelo.email
+    requireValue(issues, email.user, 'channelo.email.user is required')
+    requireValue(issues, email.account.smtp.host, 'channelo.email.account.smtp.host is required')
+    requireValue(issues, email.account.smtp.user, 'channelo.email.account.smtp.user is required')
+    requireValue(issues, email.account.smtp.password, 'channelo.email.account.smtp.password is required')
   }
   if (issues.length > 0) {
     throw new Error([

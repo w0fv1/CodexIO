@@ -97,12 +97,6 @@ class CodexioDesktop {
         }
       },
       {
-        label: '更新',
-        click: () => {
-          void this.checkUpdate()
-        }
-      },
-      {
         type: 'separator'
       },
       {
@@ -194,16 +188,6 @@ class CodexioDesktop {
 
   private async openConfig(): Promise<void> {
     await shell.openExternal(await this.resolveUrl('/config'))
-  }
-
-  private async checkUpdate(): Promise<void> {
-    try {
-      const { default: electronUpdater } = await import('electron-updater')
-      const { autoUpdater } = electronUpdater
-      await autoUpdater.checkForUpdatesAndNotify()
-    } catch {
-      await shell.openExternal('https://next.firco.cn/manage/nfirco/release')
-    }
   }
 
   private async resolveUrl(path: string): Promise<string> {

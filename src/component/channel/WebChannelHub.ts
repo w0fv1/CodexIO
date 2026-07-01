@@ -4,86 +4,59 @@ import { Duplex } from 'node:stream'
 import { inject, injectable } from 'inversify'
 import { WebSocket, WebSocketServer } from 'ws'
 import { z } from 'zod'
-import { FileStore } from '../component/FileStore.js'
-import { Logger } from '../component/Logger.js'
-import { renderMarkdownHtml, shouldRenderMarkdown } from '../util/Markdown.js'
-import { allIoThreadId, Message, MessageFile } from '../value/Message.js'
-import { Thread } from '../value/Thread.js'
-import { Result } from '../value/Result.js'
-import { Configer } from '../component/Configer.js'
-import { ThreadManager } from '../component/ThreadManager.js'
-import { ThreadMessage, ThreadMessageStore } from '../component/ThreadMessageStore.js'
-import { ChannelInput, ChannelInputReceive, ChannelOutput } from './Channel.js'
+import { FileStore } from '../FileStore.js'
+import { Logger } from '../Logger.js'
+import { renderMarkdownHtml, shouldRenderMarkdown } from '../../util/Markdown.js'
+import { Message, MessageFile } from '../../value/Message.js'
+import { Result } from '../../value/Result.js'
+import { ChannelInputReceiver } from '../../controller/channeli/ChannelInput.js'
 
 const WebSocketInputSchema = z.object({
-  ioThreadId: z.string().optional(),
+  webThreadId: z.string().min(1),
   text: z.string().default(''),
   files: z.array(z.string()).default([])
 })
 
 type WebSocketMessageOutput = {
   event: 'message'
+  id: string
   role: Message['role']
   ioThreadId: string
-  allIoThreadId: string
+  webThreadId?: string
   text: string
   createdAt: number
   html?: string
   files?: MessageFile[]
 }
 
-type WebSocketThreadListOutput = {
-  event: 'threads'
-  threads: Thread[]
-}
-
-type WebSocketThreadOutput = {
-  event: 'thread'
-  thread: Thread
-}
-
-type WebSocketThreadDeletedOutput = {
-  event: 'threadDeleted'
+type WebThread = {
   id: string
-}
-
-type WebSocketMessagesOutput = {
-  event: 'messages'
+  title: string
   messages: WebSocketMessageOutput[]
+  updatedAt: number
 }
 
 @injectable()
 export class WebChannelHub {
   private readonly sockets = new Set<WebSocket>()
+  private readonly threads = new Map<string, WebThread>()
   private readonly server = new WebSocketServer({
     noServer: true
   })
   private attached?: HttpServer
-  private receive?: ChannelInputReceive
+  private receiver?: ChannelInputReceiver
+  private inputStarted = false
   private stopped = false
 
   constructor(
-    @inject(FileStore) private readonly fileStore: FileStore,
-    @inject(ThreadManager) private readonly threadManager: ThreadManager,
-    @inject(ThreadMessageStore) private readonly messageStore: ThreadMessageStore
+    @inject(FileStore) private readonly fileStore: FileStore
   ) {
     this.server.on('connection', (socket) => this.connect(socket))
-    this.threadManager.subscribe((thread) => {
-      this.broadcast({
-        event: 'thread',
-        thread
-      })
-    })
-    this.threadManager.subscribeDelete((id) => {
-      this.broadcast({
-        event: 'threadDeleted',
-        id
-      })
-    })
   }
 
-  startInput(receive: ChannelInputReceive): void {
-    this.receive = receive
+  startInput(receiver: ChannelInputReceiver): void {
+    this.receiver = receiver
+    this.inputStarted = true
     this.stopped = false
   }
 
@@ -99,7 +72,8 @@ export class WebChannelHub {
   }
 
   stopInput(): Result<void> {
-    this.receive = undefined
+    this.receiver = undefined
+    this.inputStarted = false
     for (const socket of this.sockets) {
       socket.close()
     }
@@ -120,20 +94,10 @@ export class WebChannelHub {
     return Result.successVoid()
   }
 
-  send(message: Message): Result<void> {
-    const stored = this.messageStore.append(message)
-    for (const socket of this.sockets) {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify(this.toWebSocketMessage(stored)))
-      }
-    }
-    return Result.successVoid()
-  }
-
   private upgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
     try {
       const url = new URL(request.url ?? '/', 'http://localhost')
-      if (url.pathname !== '/ws' || !this.receive) {
+      if (url.pathname !== '/ws' || !this.inputStarted) {
         Logger.warn('web socket upgrade rejected', {
           path: url.pathname
         })
@@ -157,17 +121,11 @@ export class WebChannelHub {
     socket.send(JSON.stringify({
       event: 'ready'
     }))
-    socket.send(JSON.stringify({
-      event: 'threads',
-      threads: this.threadManager.list()
-    } satisfies WebSocketThreadListOutput))
-    socket.send(JSON.stringify({
-      event: 'messages',
-      messages: this.messageStore.list().map((message) => this.toWebSocketMessage(message))
-    } satisfies WebSocketMessagesOutput))
+    for (const message of this.historyMessages()) {
+      socket.send(JSON.stringify(message))
+    }
     socket.on('message', async (data) => {
-      const receive = this.receive
-      if (!receive) {
+      if (!this.inputStarted) {
         socket.send(JSON.stringify({
           event: 'error',
           message: 'web channel is disabled'
@@ -190,8 +148,7 @@ export class WebChannelHub {
         return
       }
       const text = parsed.data.text
-      const ioThreadId = parsed.data.ioThreadId ?? randomUUID()
-      this.threadManager.ensure(ioThreadId)
+      const webThreadId = parsed.data.webThreadId.trim()
       let files: MessageFile[] = []
       try {
         files = this.fileStore.resolveMany(parsed.data.files)
@@ -207,13 +164,25 @@ export class WebChannelHub {
         return
       }
       Logger.info('web message received', {
-        ioThreadId,
+        webThreadId,
         length: text.length,
         files: files.length
       })
-      const result = await receive({
-        role: 'user',
-        ioThreadId,
+      const receiver = this.receiver
+      if (!receiver) {
+        socket.send(JSON.stringify({
+          event: 'error',
+          message: 'web channel is disabled'
+        }))
+        return
+      }
+      const result = await receiver.receive('web', {
+        platformThreadIds: [
+          {
+            source: 'web',
+            id: webThreadId
+          }
+        ],
         text,
         files
       })
@@ -223,8 +192,7 @@ export class WebChannelHub {
         })
         socket.send(JSON.stringify({
           event: 'error',
-          ioThreadId,
-          allIoThreadId,
+          webThreadId,
           message: result.message
         }))
       }
@@ -237,22 +205,26 @@ export class WebChannelHub {
     })
   }
 
-  private broadcast(data: WebSocketThreadOutput | WebSocketThreadDeletedOutput): void {
+  send(message: Message, webThreadId?: string): Result<void> {
+    const data = this.toWebSocketMessage(message, webThreadId)
+    this.save(data)
     for (const socket of this.sockets) {
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify(data))
       }
     }
+    return Result.successVoid()
   }
 
-  private toWebSocketMessage(message: ThreadMessage): WebSocketMessageOutput {
+  private toWebSocketMessage(message: Message, webThreadId?: string): WebSocketMessageOutput {
     const data: WebSocketMessageOutput = {
       event: 'message',
+      id: randomUUID(),
       role: message.role,
       ioThreadId: message.ioThreadId,
-      allIoThreadId,
+      webThreadId,
       text: message.text,
-      createdAt: message.createdAt
+      createdAt: Date.now()
     }
     if (message.files && message.files.length > 0) {
       data.files = message.files
@@ -262,63 +234,38 @@ export class WebChannelHub {
     }
     return data
   }
-}
 
-@injectable()
-export class WebChannelInput implements ChannelInput {
-  readonly type = 'web'
-
-  constructor(
-    @inject(Configer) private readonly configer: Configer,
-    @inject(WebChannelHub) private readonly hub: WebChannelHub
-  ) {}
-
-  async start(receive: ChannelInputReceive): Promise<boolean> {
-    const webConfig = await this.configer.get('channels.web')
-    if (!webConfig?.enabled) {
-      return false
+  private save(message: WebSocketMessageOutput): void {
+    const threadId = (message.webThreadId ?? message.ioThreadId).trim()
+    if (threadId.length === 0) {
+      return
     }
-    this.hub.startInput(receive)
-    return true
-  }
-
-  async stop(): Promise<Result<void>> {
-    return this.hub.stopInput()
-  }
-}
-
-@injectable()
-export class WebChannelOutput implements ChannelOutput {
-  readonly type = 'web'
-
-  constructor(
-    @inject(Configer) private readonly configer: Configer,
-    @inject(WebChannelHub) private readonly hub: WebChannelHub
-  ) {}
-
-  async start(): Promise<boolean> {
-    const webConfig = await this.configer.get('channels.web')
-    if (!webConfig?.enabled) {
-      return false
+    const thread = this.ensureThread(threadId)
+    thread.messages.push(message)
+    thread.updatedAt = message.createdAt
+    if (!thread.title && message.role === 'user' && message.text.trim().length > 0) {
+      thread.title = message.text.trim().slice(0, 40)
     }
-    const host = await this.configer.get('server.host')
-    const port = await this.configer.get('server.port')
-    Logger.info('web channel ready', {
-      host,
-      port,
-      url: `http://${host}:${port}`
-    })
-    return true
   }
 
-  async send(message: Message): Promise<Result<void>> {
-    if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
-      return Result.fail('text or file is required')
+  private ensureThread(ioThreadId: string): WebThread {
+    const existing = this.threads.get(ioThreadId)
+    if (existing) {
+      return existing
     }
-    return this.hub.send(message)
+    const thread: WebThread = {
+      id: ioThreadId,
+      title: '',
+      messages: [],
+      updatedAt: Date.now()
+    }
+    this.threads.set(ioThreadId, thread)
+    return thread
   }
 
-  async stop(): Promise<Result<void>> {
-    return Result.successVoid()
+  private historyMessages(): WebSocketMessageOutput[] {
+    return [...this.threads.values()]
+      .sort((left, right) => left.updatedAt - right.updatedAt)
+      .flatMap((thread) => [...thread.messages].sort((left, right) => left.createdAt - right.createdAt))
   }
 }

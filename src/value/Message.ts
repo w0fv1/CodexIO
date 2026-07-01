@@ -8,9 +8,7 @@ export type MessageFile = {
   url?: string
 }
 
-export type MessageRole = 'user' | 'agent' | 'system'
-
-export const allIoThreadId = 'io_all'
+export type MessageRole = 'user' | 'system' | 'agent'
 
 export type Message = {
   role: MessageRole

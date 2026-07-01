@@ -1,43 +1,56 @@
 import * as Lark from '@larksuiteoapi/node-sdk'
-import { extname } from 'node:path'
 import { readFile } from 'node:fs/promises'
-import { allIoThreadId, Message } from '../value/Message.js'
-import { CodexioConfig } from '../value/ConfigDefinition.js'
-import { Logger } from '../component/Logger.js'
-import { Result } from '../value/Result.js'
-import { isImageFile } from '../component/FileStore.js'
+import { extname } from 'node:path'
+import { inject, injectable } from 'inversify'
+import { CodexioConfig } from '../../value/ConfigDefinition.js'
+import { Message } from '../../value/Message.js'
+import { Result } from '../../value/Result.js'
+import { Logger } from '../Logger.js'
+import { Configer } from '../Configer.js'
+import { isImageFile } from '../FileStore.js'
+import { IoThreadIdManager } from '../IoThreadIdManager.js'
+import { ChannelOutput, ChannelOutputContext } from './ChannelOutput.js'
 
-type FeishuChannelConfig = CodexioConfig['channels']['feishu']
+type FeishuChannelOutputConfig = CodexioConfig['channelo']['feishu']
 
-export class FeishuMessageSender {
-  private readonly client: Lark.Client
-  private chatId: string
-  private readonly messageIdByIoThreadId = new Map<string, string>()
+@injectable()
+export class FeishuChannelOutput implements ChannelOutput {
+  readonly type = 'feishu'
+  private config?: FeishuChannelOutputConfig
+  private client?: Lark.Client
+  private chatId = ''
 
-  constructor(private readonly config?: FeishuChannelConfig, client?: Lark.Client) {
-    if (!config?.appId || !config.appSecret) {
+  constructor(
+    @inject(Configer) private readonly configer: Configer,
+    @inject(IoThreadIdManager) private readonly ioThreadIdManager: IoThreadIdManager
+  ) {}
+
+  async start(): Promise<boolean> {
+    this.config = await this.configer.get('channelo.feishu')
+    if (!this.config?.enabled) {
+      return false
+    }
+    if (!this.config?.appId || !this.config.appSecret) {
       throw new Error('feishu appId and appSecret are required')
     }
-    this.client = client ?? new Lark.Client({
-      appId: config.appId,
-      appSecret: config.appSecret
+    Logger.info('feishu openapi output starting', {
+      chatId: this.config.chatId?.trim() ?? ''
     })
-    this.chatId = config.chatId?.trim() ?? ''
+    this.client = new Lark.Client({
+      appId: this.config.appId,
+      appSecret: this.config.appSecret
+    })
+    this.chatId = this.config.chatId?.trim() ?? ''
+    return true
   }
 
-  updateChatId(chatId: string): void {
-    this.chatId = chatId.trim()
-  }
-
-  rememberThread(ioThreadId: string, messageId: string): void {
-    const normalizedIoThreadId = ioThreadId.trim()
-    const normalizedMessageId = messageId.trim()
-    if (normalizedIoThreadId.length > 0 && normalizedMessageId.length > 0) {
-      this.messageIdByIoThreadId.set(normalizedIoThreadId, normalizedMessageId)
+  async send(message: Message, context?: ChannelOutputContext): Promise<Result<void>> {
+    if (message.role === 'user' && context?.inputType === 'feishu') {
+      return Result.successVoid()
     }
-  }
-
-  async send(message: Message): Promise<Result<void>> {
+    if (!this.client) {
+      return Result.fail('feishu client not ready')
+    }
     if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
       return Result.fail('text or file is required')
     }
@@ -45,7 +58,7 @@ export class FeishuMessageSender {
       return Result.fail('feishu chat not ready')
     }
     try {
-      Logger.info('feishu send started', {
+      Logger.info('feishu openapi send started', {
         role: message.role,
         length: message.text.length,
         files: message.files?.length ?? 0
@@ -106,13 +119,12 @@ export class FeishuMessageSender {
           })
         }
       }
-      const text = message.text
       const content: Array<Array<Record<string, string>>> = []
-      if (text.trim().length > 0) {
+      if (message.text.trim().length > 0) {
         content.push([
           {
             tag: 'md',
-            text
+            text: message.text
           }
         ])
       }
@@ -143,25 +155,9 @@ export class FeishuMessageSender {
           })
         })
       }
-      const replyMessageIds = message.ioThreadId === allIoThreadId
-        ? [...new Set(this.messageIdByIoThreadId.values())]
-        : []
-      let replyMessageId = message.ioThreadId === allIoThreadId ? undefined : this.messageIdByIoThreadId.get(message.ioThreadId)
+      let replyMessageId = this.feishuMessageId(message.ioThreadId)
       for (const outgoingMessage of outgoingMessages) {
-        if (replyMessageIds.length > 0) {
-          for (const item of replyMessageIds) {
-            await this.client.im.v1.message.reply({
-              path: {
-                message_id: item
-              },
-              data: {
-                msg_type: outgoingMessage.msgType,
-                content: outgoingMessage.content,
-                reply_in_thread: true
-              }
-            })
-          }
-        } else if (replyMessageId) {
+        if (replyMessageId) {
           await this.client.im.v1.message.reply({
             path: {
               message_id: replyMessageId
@@ -183,21 +179,23 @@ export class FeishuMessageSender {
               content: outgoingMessage.content
             }
           })
-          if (message.ioThreadId !== allIoThreadId) {
-            const createdMessageId = created?.data?.message_id?.trim()
-            if (!createdMessageId) {
-              throw new Error('feishu message_id missing')
-            }
-            replyMessageId = createdMessageId
-            this.rememberThread(message.ioThreadId, createdMessageId)
+          const createdMessageId = created?.data?.message_id?.trim()
+          if (!createdMessageId) {
+            throw new Error('feishu message_id missing')
           }
+          replyMessageId = createdMessageId
+          this.ioThreadIdManager.bind(message.ioThreadId, {
+            source: 'feishu',
+            id: `${this.chatId}:message:${createdMessageId}`
+          })
         }
       }
-      Logger.info('feishu send completed', {
+      Logger.info('feishu openapi send completed', {
         role: message.role,
         images: images.length,
         files: files.length
       })
+      return Result.successVoid()
     } catch (error) {
       let normalizedError: unknown = error
       if (error && typeof error === 'object') {
@@ -216,9 +214,19 @@ export class FeishuMessageSender {
           }
         }
       }
-      Logger.error('feishu send failed', normalizedError)
+      Logger.error('feishu openapi send failed', normalizedError)
       return Result.fromError(error)
     }
+  }
+
+  async stop(): Promise<Result<void>> {
+    this.client = undefined
     return Result.successVoid()
+  }
+
+  private feishuMessageId(ioThreadId: string): string | undefined {
+    const platformThreadId = this.ioThreadIdManager.getPlatformThreadId(ioThreadId)
+      .find((item) => item.source === 'feishu' && item.id.includes(':message:'))
+    return platformThreadId?.id.split(':message:').at(1)?.trim()
   }
 }

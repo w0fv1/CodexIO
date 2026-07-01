@@ -11,9 +11,12 @@ agents:
   codex:
     enabled: true
     bundled: false
-  claude:
-    enabled: false
-channels:
+    command: codex
+    developerInstructions: ''
+    requestTimeoutSeconds: 120
+workspace:
+  path: workspace
+channeli:
   web:
     enabled: true
   feishu:
@@ -22,13 +25,10 @@ channels:
     appSecret: ''
     chatId: ''
     ws: ''
-  feishuWebhook:
-    enabled: false
-    url: ''
   email:
     enabled: false
     user: ''
-    agent:
+    account:
       imap:
         host: ''
         port: 993
@@ -36,6 +36,23 @@ channels:
         user: ''
         password: ''
         mailbox: INBOX
+    idle: true
+    pollSeconds: 30
+channelo:
+  web:
+    enabled: true
+  feishu:
+    enabled: false
+    appId: ''
+    appSecret: ''
+    chatId: ''
+  feishuWebhook:
+    enabled: false
+    url: ''
+  email:
+    enabled: false
+    user: ''
+    account:
       smtp:
         host: ''
         port: 465
@@ -43,10 +60,3 @@ channels:
         user: ''
         password: ''
         from: ''
-    idle: true
-    pollSeconds: 30
-workspace:
-  path: workspace
-update:
-  enabled: true
-  baseUrl: https://next.firco.cn

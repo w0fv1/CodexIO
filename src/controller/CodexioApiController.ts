@@ -5,16 +5,15 @@ import cors from 'cors'
 import multer from 'multer'
 import { z } from 'zod'
 import { inject, injectable } from 'inversify'
-import { AgentManager } from '../agent/AgentManager.js'
-import { ChannelOutputManager } from '../channel/ChannelOutputManager.js'
+import { ChannelOutputManager } from '../component/channelo/ChannelOutputManager.js'
 import { Logger } from '../component/Logger.js'
 import { FileStore } from '../component/FileStore.js'
 import { configFieldDescriptors } from '../value/ConfigDefinition.js'
 import { Configer } from '../component/Configer.js'
 import { configPageHtml } from './ConfigPage.js'
 import { Result } from '../value/Result.js'
-import { webPageHtml } from '../channel/WebPage.js'
-import { WebChannelHub } from '../channel/WebChannel.js'
+import { webPageHtml } from './channeli/WebPage.js'
+import { WebChannelHub } from '../component/channel/WebChannelHub.js'
 import { resolveAvailableServerPort } from '../util/Network.js'
 import { EventBus } from '../component/EventBus.js'
 import { AppEvent } from '../value/Event.js'
@@ -52,7 +51,6 @@ export class CodexioApiController {
   constructor(
     @inject(Configer) private readonly configer: Configer,
     @inject(ChannelOutputManager) private readonly outputManager: ChannelOutputManager,
-    @inject(AgentManager) private readonly agentManager: AgentManager,
     @inject(FileStore) private readonly fileStore: FileStore,
     @inject(WebChannelHub) private readonly webChannel: WebChannelHub,
     @inject(EventBus) private readonly eventBus: EventBus
@@ -212,11 +210,8 @@ export class CodexioApiController {
         response.json(Result.success({
           config: {
             server: await this.configer.get('server'),
-            proxy: await this.configer.get('proxy'),
-            agents: await this.configer.get('agents'),
-            channels: await this.configer.get('channels'),
-            workspace: await this.configer.get('workspace'),
-            update: await this.configer.get('update')
+            channeli: await this.configer.get('channeli'),
+            channelo: await this.configer.get('channelo')
           },
           descriptor: configFieldDescriptors
         }))
@@ -280,7 +275,6 @@ export class CodexioApiController {
 
     this.web.get('/api/status', (_request, response) => {
       response.json(Result.success({
-        ...this.agentManager.status(),
         pid
       }))
     })

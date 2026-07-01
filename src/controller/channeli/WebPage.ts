@@ -75,7 +75,7 @@ export const webPageHtml = `<!doctype html>
           <button
             type="button"
             class="mb-1 flex h-11 w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 text-left text-sm transition"
-            :class="thread.id === activeIoThreadId ? (theme === 'dark' ? 'bg-slate-900 text-slate-50' : 'bg-slate-100 text-slate-950') : (theme === 'dark' ? 'text-slate-400 hover:bg-slate-900 hover:text-slate-100' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950')"
+            :class="thread.id === activeThreadId ? (theme === 'dark' ? 'bg-slate-900 text-slate-50' : 'bg-slate-100 text-slate-950') : (theme === 'dark' ? 'text-slate-400 hover:bg-slate-900 hover:text-slate-100' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950')"
             :title="thread.title || '新对话'"
             @click="switchThread(thread.id)"
           >
@@ -146,7 +146,6 @@ export const webPageHtml = `<!doctype html>
             class="group flex items-start gap-2"
             :class="{
               'justify-end': message.type === 'user',
-              'justify-start': message.type === 'agent',
               'justify-center': message.type === 'system' || message.type === 'error'
             }"
           >
@@ -158,10 +157,10 @@ export const webPageHtml = `<!doctype html>
             ></div>
             <template x-if="message.type === 'user'">
               <div class="flex max-w-[88%] min-w-0 items-start gap-2 sm:max-w-[78%]">
-                <div class="message-actions hidden shrink-0 pt-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 sm:block">
-                  <button type="button" class="grid size-8 cursor-pointer place-items-center rounded-[10px] transition active:translate-y-px" :class="theme === 'dark' ? 'bg-slate-900/80 text-slate-400 hover:bg-slate-800 hover:text-slate-50' : 'bg-white/80 text-slate-500 hover:bg-white hover:text-slate-900'" :aria-label="copiedId === message.id ? '已复制' : '复制消息'" :title="copiedId === message.id ? '已复制' : '复制消息'" @click="copyMessage(message)">
-                    <svg x-cloak x-show="copiedId !== message.id" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
-                    <svg x-cloak x-show="copiedId === message.id" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+                <div class="message-actions hidden shrink-0 self-end opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 sm:block">
+                  <button type="button" class="grid size-6 cursor-pointer place-items-center rounded-md transition active:translate-y-px" :class="theme === 'dark' ? 'bg-slate-900/80 text-slate-400 hover:bg-slate-800 hover:text-slate-50' : 'bg-white/80 text-slate-500 hover:bg-white hover:text-slate-900'" :aria-label="copiedId === message.id ? '已复制' : '复制消息'" :title="copiedId === message.id ? '已复制' : '复制消息'" @click="copyMessage(message)">
+                    <svg x-cloak x-show="copiedId !== message.id" xmlns="http://www.w3.org/2000/svg" class="size-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+                    <svg x-cloak x-show="copiedId === message.id" xmlns="http://www.w3.org/2000/svg" class="size-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
                   </button>
                 </div>
                 <div class="min-w-0 rounded-2xl rounded-br-md bg-blue-600 px-4 py-2.5 text-sm leading-6 text-white shadow-sm">
@@ -189,14 +188,9 @@ export const webPageHtml = `<!doctype html>
             </template>
             <template x-if="message.type === 'agent'">
               <div class="flex max-w-[88%] min-w-0 items-start gap-2 sm:max-w-[78%]">
-                <div class="min-w-0 break-words rounded-2xl rounded-bl-md border px-4 py-2.5 text-sm leading-6 shadow-sm" :class="theme === 'dark' ? 'border-slate-800 bg-slate-900 text-slate-200' : 'border-slate-200 bg-white text-slate-900'">
-                  <div
-                    x-show="message.html"
-                    class="[&_a]:text-blue-600 [&_a]:underline [&_a]:underline-offset-2 [&_blockquote]:my-3 [&_blockquote]:border-l-[3px] [&_blockquote]:border-slate-300 [&_blockquote]:pl-3 [&_blockquote]:text-slate-600 [&_code]:rounded-md [&_code]:bg-slate-100 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.95em] [&_code]:text-slate-950 [&_ol]:my-2.5 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:mb-3 [&_p:last-child]:mb-0 [&_pre]:my-3 [&_pre]:overflow-auto [&_pre]:rounded-lg [&_pre]:bg-slate-900 [&_pre]:p-3 [&_pre]:text-slate-200 [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:text-inherit [&_table]:my-3 [&_table]:block [&_table]:w-full [&_table]:border-collapse [&_table]:overflow-auto [&_td]:border [&_td]:border-slate-200 [&_td]:px-2 [&_td]:py-1.5 [&_td]:text-left [&_th]:border [&_th]:border-slate-200 [&_th]:px-2 [&_th]:py-1.5 [&_th]:text-left [&_ul]:my-2.5 [&_ul]:list-disc [&_ul]:pl-5"
-                    :class="theme === 'dark' ? '[&_a]:text-blue-400 [&_blockquote]:border-slate-600 [&_blockquote]:text-slate-400 [&_code]:bg-slate-800 [&_code]:text-slate-50 [&_td]:border-slate-700 [&_th]:border-slate-700' : ''"
-                    x-html="message.html"
-                  ></div>
-                  <div x-show="!message.html" class="whitespace-pre-wrap" x-text="message.text"></div>
+                <div class="min-w-0 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm leading-6 shadow-sm" :class="theme === 'dark' ? 'bg-slate-900 text-slate-100' : 'bg-white text-slate-950'">
+                  <div x-show="message.html" class="whitespace-pre-wrap break-words" x-html="message.html"></div>
+                  <div x-show="!message.html && message.text" class="whitespace-pre-wrap break-words" x-text="message.text"></div>
                   <div x-show="message.files && message.files.length" class="mt-2 grid gap-2">
                     <template x-for="file in message.files || []" :key="file.id">
                       <div>
@@ -204,11 +198,11 @@ export const webPageHtml = `<!doctype html>
                           <img class="max-h-80 max-w-[min(320px,100%)] rounded-[10px] object-contain" :class="theme === 'dark' ? 'bg-slate-800' : 'bg-slate-100'" :src="file.url" :alt="file.name || 'image'">
                         </template>
                         <template x-if="!isImageFile(file)">
-                          <a class="flex max-w-full items-center gap-2 rounded-lg border px-2.5 py-2 no-underline" :class="theme === 'dark' ? 'border-slate-700 bg-slate-950 text-slate-200' : 'border-slate-200 bg-slate-50 text-slate-700'" :href="file.url" target="_blank" rel="noopener">
-                            <svg xmlns="http://www.w3.org/2000/svg" class="size-5 shrink-0" :class="theme === 'dark' ? 'text-slate-400' : 'text-slate-500'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg>
+                          <a class="flex max-w-full items-center gap-2 rounded-lg px-2.5 py-2 no-underline" :class="theme === 'dark' ? 'bg-slate-800 text-slate-100' : 'bg-slate-100 text-slate-900'" :href="file.url" target="_blank" rel="noopener">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="size-5 shrink-0 opacity-80" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg>
                             <span class="min-w-0">
                               <span class="block truncate font-medium" x-text="file.name || 'file'"></span>
-                              <span class="block text-xs" :class="theme === 'dark' ? 'text-slate-400' : 'text-slate-500'" x-text="formatFileSize(file.size)"></span>
+                              <span class="block text-xs opacity-70" x-text="formatFileSize(file.size)"></span>
                             </span>
                           </a>
                         </template>
@@ -216,10 +210,10 @@ export const webPageHtml = `<!doctype html>
                     </template>
                   </div>
                 </div>
-                <div class="message-actions hidden shrink-0 pt-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 sm:block">
-                  <button type="button" class="grid size-8 cursor-pointer place-items-center rounded-[10px] transition active:translate-y-px" :class="theme === 'dark' ? 'bg-slate-900/80 text-slate-400 hover:bg-slate-800 hover:text-slate-50' : 'bg-white/80 text-slate-500 hover:bg-white hover:text-slate-900'" :aria-label="copiedId === message.id ? '已复制' : '复制消息'" :title="copiedId === message.id ? '已复制' : '复制消息'" @click="copyMessage(message)">
-                    <svg x-cloak x-show="copiedId !== message.id" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
-                    <svg x-cloak x-show="copiedId === message.id" xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+                <div class="message-actions hidden shrink-0 self-end opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 sm:block">
+                  <button type="button" class="grid size-6 cursor-pointer place-items-center rounded-md transition active:translate-y-px" :class="theme === 'dark' ? 'bg-slate-900/80 text-slate-400 hover:bg-slate-800 hover:text-slate-50' : 'bg-white/80 text-slate-500 hover:bg-white hover:text-slate-900'" :aria-label="copiedId === message.id ? '已复制' : '复制消息'" :title="copiedId === message.id ? '已复制' : '复制消息'" @click="copyMessage(message)">
+                    <svg x-cloak x-show="copiedId !== message.id" xmlns="http://www.w3.org/2000/svg" class="size-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+                    <svg x-cloak x-show="copiedId === message.id" xmlns="http://www.w3.org/2000/svg" class="size-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
                   </button>
                 </div>
               </div>
@@ -310,8 +304,7 @@ export const webPageHtml = `<!doctype html>
       return {
         socket: null,
         threads: [],
-        activeIoThreadId: '',
-        allIoThreadId: 'io_all',
+        activeThreadId: '',
         sidebarOpen: false,
         messages: [],
         draft: '',
@@ -335,7 +328,7 @@ export const webPageHtml = `<!doctype html>
         },
         createThread(activate) {
           const thread = {
-            id: this.newIoThreadId(),
+            id: this.newWebThreadId(),
             title: '',
             messages: [],
             unread: 0,
@@ -343,12 +336,12 @@ export const webPageHtml = `<!doctype html>
             updatedAt: Date.now()
           }
           this.threads.unshift(thread)
-          if (activate || !this.activeIoThreadId) {
+          if (activate || !this.activeThreadId) {
             this.switchThread(thread.id)
           }
           return thread
         },
-        newIoThreadId() {
+        newWebThreadId() {
           if (window.crypto && typeof window.crypto.randomUUID === 'function') {
             return window.crypto.randomUUID()
           }
@@ -356,7 +349,7 @@ export const webPageHtml = `<!doctype html>
         },
         switchThread(id) {
           if (!id) {
-            this.activeIoThreadId = ''
+            this.activeThreadId = ''
             this.messages = []
             this.autoScroll = true
             this.$nextTick(() => {
@@ -366,7 +359,7 @@ export const webPageHtml = `<!doctype html>
             return
           }
           const thread = this.ensureThread(id)
-          this.activeIoThreadId = thread.id
+          this.activeThreadId = thread.id
           thread.unread = 0
           this.messages = thread.messages
           this.sidebarOpen = false
@@ -377,7 +370,7 @@ export const webPageHtml = `<!doctype html>
           })
         },
         activeThread() {
-          return this.activeIoThreadId ? this.ensureThread(this.activeIoThreadId) : null
+          return this.activeThreadId ? this.ensureThread(this.activeThreadId) : null
         },
         activeThreadTitle() {
           const thread = this.activeThread()
@@ -392,7 +385,7 @@ export const webPageHtml = `<!doctype html>
             return thread
           }
           thread = {
-            id: id || this.newIoThreadId(),
+            id: id || this.newWebThreadId(),
             title: '',
             messages: [],
             unread: 0,
@@ -400,8 +393,8 @@ export const webPageHtml = `<!doctype html>
             updatedAt: Date.now()
           }
           this.threads.unshift(thread)
-          if (!this.activeIoThreadId) {
-            this.activeIoThreadId = thread.id
+          if (!this.activeThreadId) {
+            this.activeThreadId = thread.id
             this.messages = thread.messages
           }
           return thread
@@ -422,7 +415,7 @@ export const webPageHtml = `<!doctype html>
           const thread = this.ensureThread(input.id)
           thread.title = typeof input.title === 'string' && input.title.length > 0 ? input.title : thread.title
           thread.isWorking = Boolean(input.isWorking)
-          if (thread.id === this.activeIoThreadId) {
+          if (thread.id === this.activeThreadId) {
             this.messages = thread.messages
           }
         },
@@ -432,9 +425,9 @@ export const webPageHtml = `<!doctype html>
             return
           }
           this.threads.splice(index, 1)
-          if (this.activeIoThreadId === id) {
+          if (this.activeThreadId === id) {
             const next = this.threads[0]
-            this.activeIoThreadId = next ? next.id : ''
+            this.activeThreadId = next ? next.id : ''
             this.messages = next ? next.messages : []
           }
         },
@@ -506,80 +499,32 @@ export const webPageHtml = `<!doctype html>
           try {
             message = JSON.parse(data)
           } catch {
-            this.append(this.activeIoThreadId || this.allIoThreadId, 'error', 'Invalid message')
+            if (!this.activeThreadId) {
+              this.createThread(true)
+            }
+            this.append(this.activeThreadId, 'error', 'Invalid message')
             return
-          }
-          if (message.allIoThreadId) {
-            this.allIoThreadId = message.allIoThreadId
           }
           if (message.event === 'ready') {
             return
           }
-          if (message.event === 'threads') {
-            for (const thread of message.threads || []) {
-              this.upsertThread(thread)
-            }
-            return
-          }
-          if (message.event === 'messages') {
-            this.replaceMessages(message.messages || [])
-            return
-          }
-          if (message.event === 'thread') {
-            this.upsertThread(message.thread)
-            return
-          }
-          if (message.event === 'threadDeleted') {
-            this.removeThread(message.id)
-            return
-          }
           if (message.event === 'error') {
-            this.append(message.ioThreadId, 'error', message.message || 'Request failed')
+            this.append(message.webThreadId || message.ioThreadId, 'error', message.message || 'Request failed')
             return
           }
           if (message.event !== 'message') {
             return
           }
           if (message.role === 'user') {
-            this.append(message.ioThreadId, 'user', message.text || '', null, message.files || [])
+            this.append(message.webThreadId || message.ioThreadId, 'user', message.text || '', null, message.files || [])
             return
           }
           if (message.role === 'system') {
-            this.append(message.ioThreadId, 'system', message.text || '')
+            this.append(message.webThreadId || message.ioThreadId, 'system', message.text || '')
             return
           }
           if (message.role === 'agent') {
-            this.append(message.ioThreadId, 'agent', message.text || '', message.html, message.files || [])
-          }
-        },
-        replaceMessages(messages) {
-          for (const thread of this.threads) {
-            thread.messages = []
-            thread.unread = 0
-          }
-          const activeId = this.activeIoThreadId
-          for (const message of messages) {
-            const type = message.role === 'agent' ? 'agent' : message.role
-            const thread = this.ensureThread(message.ioThreadId)
-            thread.messages.push({
-              id: this.nextId++,
-              type,
-              text: message.text || '',
-              html: message.html,
-              files: message.files || []
-            })
-            thread.updatedAt = message.createdAt || Date.now()
-            this.updateThreadTitle(thread, thread.messages[thread.messages.length - 1])
-            if (activeId && thread.id !== activeId) {
-              thread.unread = 0
-            }
-          }
-          const active = this.activeThread()
-          this.messages = active ? active.messages : []
-          if (this.autoScroll) {
-            this.$nextTick(() => {
-              this.scrollToBottom(false)
-            })
+            this.append(message.webThreadId || message.ioThreadId, 'agent', message.text || '', message.html || null, message.files || [])
           }
         },
         send() {
@@ -587,7 +532,7 @@ export const webPageHtml = `<!doctype html>
           if (!value && this.draftFiles.length === 0) {
             return
           }
-          if (!this.activeIoThreadId) {
+          if (!this.activeThreadId) {
             this.createThread(true)
           }
           if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
@@ -598,8 +543,8 @@ export const webPageHtml = `<!doctype html>
             text: value,
             files: this.draftFiles.map((file) => file.id)
           }
-          if (this.activeIoThreadId) {
-            payload.ioThreadId = this.activeIoThreadId
+          if (this.activeThreadId) {
+            payload.webThreadId = this.activeThreadId
           }
           this.socket.send(JSON.stringify(payload))
           this.draft = ''
@@ -609,7 +554,7 @@ export const webPageHtml = `<!doctype html>
             this.$refs.text.focus()
           })
         },
-        append(ioThreadId, type, text, html, files) {
+        append(threadId, type, text, html, files) {
           const message = {
             id: this.nextId++,
             type,
@@ -617,35 +562,14 @@ export const webPageHtml = `<!doctype html>
             html,
             files: files || []
           }
-          if (ioThreadId === this.allIoThreadId) {
-            for (const item of this.threads) {
-              const copied = {
-                ...message,
-                id: this.nextId++
-              }
-              item.messages.push(copied)
-              item.updatedAt = Date.now()
-              if (item.id !== this.activeIoThreadId) {
-                item.unread += 1
-              }
-            }
-            const active = this.activeThread()
-            this.messages = active ? active.messages : []
-            if (this.autoScroll) {
-              this.$nextTick(() => {
-                this.scrollToBottom(false)
-              })
-            }
+          if (!threadId) {
             return
           }
-          if (!ioThreadId) {
-            return
-          }
-          const thread = this.ensureThread(ioThreadId)
+          const thread = this.ensureThread(threadId)
           thread.messages.push(message)
           thread.updatedAt = Date.now()
           this.updateThreadTitle(thread, message)
-          if (thread.id !== this.activeIoThreadId) {
+          if (thread.id !== this.activeThreadId) {
             thread.unread += 1
             return
           }
@@ -674,7 +598,7 @@ export const webPageHtml = `<!doctype html>
               }
             }, 1200)
           } catch {
-            this.append(this.activeIoThreadId, 'error', '复制失败')
+            this.append(this.activeThreadId, 'error', '复制失败')
           }
         },
         async uploadFiles(event) {
@@ -701,13 +625,13 @@ export const webPageHtml = `<!doctype html>
               })
               const result = await response.json()
               if (result.isFailed) {
-                this.append(this.activeIoThreadId, 'error', result.message || '上传失败')
+                this.append(this.activeThreadId, 'error', result.message || '上传失败')
                 continue
               }
               this.draftFiles.push(result.data.file)
             }
           } catch {
-            this.append(this.activeIoThreadId, 'error', '上传失败')
+            this.append(this.activeThreadId, 'error', '上传失败')
           } finally {
             this.uploading = false
             this.$nextTick(() => {

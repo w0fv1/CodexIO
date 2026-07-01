@@ -88,7 +88,7 @@ export class Configer {
         }
       }
     }
-    const config = createDefaultConfig(join(dirname(this.path), 'workspace'))
+    const config = createDefaultConfig()
     await this.write(config)
     return config
   }
@@ -149,7 +149,7 @@ export class Configer {
   private async load(): Promise<CodexioConfig> {
     const config = await parseCodexioConfig(await YamlFile.read(this.path), this.path)
     if (config.server.token.trim().length === 0) {
-      config.server.token = createDefaultConfig(join(this.metadata.dataPath, 'workspace')).server.token
+      config.server.token = createDefaultConfig().server.token
       await this.write(config)
     }
     return config
