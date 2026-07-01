@@ -10,12 +10,14 @@ import { IoThreadIdManager } from '../IoThreadIdManager.js'
 import { EmailChannelOutput } from './EmailChannelOutput.js'
 import { FeishuChannelOutput } from './FeishuChannelOutput.js'
 import { FeishuWebhookChannelOutput } from './FeishuWebhookChannelOutput.js'
+import { NfircoThreadOutput } from './NfircoThreadOutput.js'
 import { WebChannelOutput } from './WebChannelOutput.js'
 
 const inputOutputTypes = new Set<string>([
   'web',
   'feishu',
-  'email'
+  'email',
+  'nfircoThread'
 ])
 
 @injectable()
@@ -33,13 +35,15 @@ export class ChannelOutputManager {
     @inject(WebChannelOutput) web: WebChannelOutput,
     @inject(FeishuChannelOutput) feishu: FeishuChannelOutput,
     @inject(FeishuWebhookChannelOutput) feishuWebhook: FeishuWebhookChannelOutput,
-    @inject(EmailChannelOutput) email: EmailChannelOutput
+    @inject(EmailChannelOutput) email: EmailChannelOutput,
+    @inject(NfircoThreadOutput) nfircoThread: NfircoThreadOutput
   ) {
     this.availableOutputs = [
       web,
       feishu,
       feishuWebhook,
-      email
+      email,
+      nfircoThread
     ]
   }
 

@@ -109,6 +109,11 @@ export class CodexioApiController {
       return Result.successVoid()
     }
     const listener = this.listener
+    if (!listener.listening) {
+      this.listener = undefined
+      this.webChannel.stop()
+      return Result.successVoid()
+    }
     try {
       this.webChannel.stop()
       await new Promise<void>((resolveStop, reject) => {

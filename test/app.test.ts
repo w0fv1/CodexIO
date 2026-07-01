@@ -16,11 +16,13 @@ import { FileStore } from '../src/component/FileStore.js'
 import { WebChannelInput } from '../src/controller/channeli/WebChannelInput.js'
 import { FeishuChannelInput } from '../src/controller/channeli/FeishuChannelInput.js'
 import { EmailChannelInput } from '../src/controller/channeli/EmailChannelInput.js'
+import { NfircoThreadInput } from '../src/controller/channeli/NfircoThreadInput.js'
 import { WebChannelHub } from '../src/component/channel/WebChannelHub.js'
 import { WebChannelOutput } from '../src/component/channelo/WebChannelOutput.js'
 import { FeishuChannelOutput } from '../src/component/channelo/FeishuChannelOutput.js'
 import { FeishuWebhookChannelOutput } from '../src/component/channelo/FeishuWebhookChannelOutput.js'
 import { EmailChannelOutput } from '../src/component/channelo/EmailChannelOutput.js'
+import { NfircoThreadOutput } from '../src/component/channelo/NfircoThreadOutput.js'
 import { EventBus } from '../src/component/EventBus.js'
 import { AppEvent } from '../src/value/Event.js'
 import { IoThreadIdManager } from '../src/component/IoThreadIdManager.js'
@@ -227,6 +229,8 @@ async function createTestCodexioApp(configer: Configer): Promise<{
   const feishuOutput = new FeishuChannelOutput(configer, ioThreadIdManager)
   const emailInput = new EmailChannelInput(configer)
   const emailOutput = new EmailChannelOutput(configer)
+  const nfircoThreadInput = new NfircoThreadInput(configer)
+  const nfircoThreadOutput = new NfircoThreadOutput(configer, ioThreadIdManager)
   const outputManager = new ChannelOutputManager(
     configer,
     eventBus,
@@ -234,13 +238,14 @@ async function createTestCodexioApp(configer: Configer): Promise<{
     webOutput,
     feishuOutput,
     new FeishuWebhookChannelOutput(configer),
-    emailOutput
+    emailOutput,
+    nfircoThreadOutput
   )
   const codexClient = new CodexClient(configer, metadata)
   const codexAgent = new CodexAgent(configer, eventBus, ioThreadIdManager, codexClient, new CodexMessageStreamer(eventBus))
   const echoAgent = new EchoAgent(eventBus)
   const agentManager = new AgentManager(configer, eventBus, codexAgent, echoAgent)
-  const inputManager = new ChannelInputManager(configer, eventBus, ioThreadIdManager, new CommandExecutor(eventBus), webInput, feishuInput, emailInput)
+  const inputManager = new ChannelInputManager(configer, eventBus, ioThreadIdManager, new CommandExecutor(eventBus), webInput, feishuInput, emailInput, nfircoThreadInput)
   const apiController = new CodexioApiController(configer, outputManager, fileStore, webHub, eventBus)
   await outputManager.start()
   await agentManager.start()

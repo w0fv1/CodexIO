@@ -19,6 +19,7 @@ import type { Message } from '../src/value/Message.js'
 import { shouldReceiveFeishuMessage, shouldReceiveFeishuSender } from '../src/value/FeishuMessage.js'
 import { renderMarkdownHtml } from '../src/util/Markdown.js'
 import { resolveUserPath } from '../src/util/Path.js'
+import { parseNfircoThreadSocketEvent } from '../src/component/channel/NfircoThreadClient.js'
 
 const testMetadata = new CodexioMetadata()
 
@@ -33,7 +34,27 @@ describe('core', () => {
     expect(config.channeli.web?.enabled).toBe(true)
     expect(config.channeli.feishu?.aite).toBe(true)
     expect(config.channeli.feishu?.allowedOpenIds).toEqual([])
+    expect(config.channeli.nfircoThread?.enabled).toBe(false)
+    expect(config.channelo.nfircoThread?.enabled).toBe(false)
     expect(config.channelo.web?.enabled).toBe(true)
+  })
+
+  it('parses nfirco thread message events', () => {
+    expect(parseNfircoThreadSocketEvent({
+      type: 'thread.message.created',
+      eventId: 'event-1',
+      threadUuid: 'thread-1',
+      categoryUuid: 'category-1',
+      messageUuid: 'message-1',
+      text: 'hello'
+    })).toEqual({
+      type: 'thread.message.created',
+      eventId: 'event-1',
+      threadUuid: 'thread-1',
+      categoryUuid: 'category-1',
+      messageUuid: 'message-1',
+      text: 'hello'
+    })
   })
 
   it('controls whether feishu group messages require aite', () => {
@@ -632,7 +653,8 @@ async function createRecordingChannelOutputManager(
     output('web') as never,
     output('feishu') as never,
     output('feishuWebhook') as never,
-    output('email') as never
+    output('email') as never,
+    output('nfircoThread') as never
   )
   await manager.start()
   return manager

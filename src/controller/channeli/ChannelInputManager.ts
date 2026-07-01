@@ -10,6 +10,7 @@ import { CommandExecutor } from '../CommandExecutor.js'
 import { ChannelInput, ChannelInputMessage, ChannelInputReceiver, ChannelType } from './ChannelInput.js'
 import { EmailChannelInput } from './EmailChannelInput.js'
 import { FeishuChannelInput } from './FeishuChannelInput.js'
+import { NfircoThreadInput } from './NfircoThreadInput.js'
 import { WebChannelInput } from './WebChannelInput.js'
 
 @injectable()
@@ -24,12 +25,14 @@ export class ChannelInputManager implements ChannelInputReceiver {
     @inject(CommandExecutor) private readonly commandExecutor: CommandExecutor,
     @inject(WebChannelInput) web: WebChannelInput,
     @inject(FeishuChannelInput) feishu: FeishuChannelInput,
-    @inject(EmailChannelInput) email: EmailChannelInput
+    @inject(EmailChannelInput) email: EmailChannelInput,
+    @inject(NfircoThreadInput) nfircoThread: NfircoThreadInput
   ) {
     this.availableInputs = [
       web,
       feishu,
-      email
+      email,
+      nfircoThread
     ]
   }
 
