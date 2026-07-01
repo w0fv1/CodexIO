@@ -81,6 +81,12 @@ type CodexClientRuntimeConfig = {
   requestTimeoutMs: number
 }
 
+type CodexChildExit = {
+  exitCode?: number
+  signal?: string
+  stderr?: unknown
+}
+
 @injectable()
 export class CodexClient {
   private readonly events = new EventEmitter()
@@ -149,9 +155,10 @@ export class CodexClient {
       })
       void child.then((result) => {
         Logger.info('codex app-server exited', {
-          exitCode: result.exitCode
+          exitCode: result.exitCode,
+          signal: result.signal
         })
-        this.handleChildClosed(child, new Error(`codex app-server exited with code ${result.exitCode}`))
+        this.handleChildClosed(child, new Error(formatChildExit(result)))
       }).catch((error) => {
         Logger.error('codex app-server failed', error)
         this.handleChildClosed(child, error instanceof Error ? error : new Error(String(error)))
@@ -715,4 +722,16 @@ function collectValues(value: unknown): string[] {
 function failFromError<T>(error: unknown): Result<T> {
   const failed = Result.fromError(error)
   return Result.fail(failed.message)
+}
+
+function formatChildExit(result: CodexChildExit): string {
+  const reason = result.exitCode !== undefined
+    ? `code ${result.exitCode}`
+    : result.signal
+      ? `signal ${result.signal}`
+      : 'unknown status'
+  const stderr = typeof result.stderr === 'string' && result.stderr.trim().length > 0
+    ? `: ${result.stderr.trim()}`
+    : ''
+  return `codex app-server exited with ${reason}${stderr}`
 }

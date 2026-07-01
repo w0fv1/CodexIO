@@ -1,3 +1,4 @@
+import { mkdir } from 'node:fs/promises'
 import { inject, injectable } from 'inversify'
 import { AppEvent, ChannelMessageReceivedEvent } from '../../value/Event.js'
 import { Result } from '../../value/Result.js'
@@ -50,6 +51,7 @@ export class AgentManager {
       })
     }
     const agent = await this.getActiveAgent()
+    await this.ensureWorkspace()
     const started = await agent.start()
     if (started.isFailed) {
       return started
@@ -111,5 +113,14 @@ export class AgentManager {
     return await this.configer.get('agents.codex.enabled')
       ? this.codexAgent
       : this.echoAgent
+  }
+
+  private async ensureWorkspace(): Promise<void> {
+    const workspacePath = await this.configer.get('workspace.path')
+    if (typeof workspacePath === 'string' && workspacePath.trim().length > 0) {
+      await mkdir(workspacePath, {
+        recursive: true
+      })
+    }
   }
 }
