@@ -12,6 +12,12 @@ import { FeishuChannelOutput } from './FeishuChannelOutput.js'
 import { FeishuWebhookChannelOutput } from './FeishuWebhookChannelOutput.js'
 import { WebChannelOutput } from './WebChannelOutput.js'
 
+const inputOutputTypes = new Set<string>([
+  'web',
+  'feishu',
+  'email'
+])
+
 @injectable()
 export class ChannelOutputManager {
   private readonly listener = (event: ChannelMessageSendRequestedEvent) => this.send(event.message, event.inputType)
@@ -159,7 +165,16 @@ export class ChannelOutputManager {
     if (this.outputs.size === 0) {
       return Result.fail('channel output not found')
     }
-    for (const output of this.outputs.values()) {
+    const outputs = [...this.outputs.values()].filter((output) => {
+      if (!context?.inputType) {
+        return true
+      }
+      return output.type === 'web' || output.type === context.inputType || !inputOutputTypes.has(output.type)
+    })
+    if (outputs.length === 0) {
+      return Result.fail('channel output not found')
+    }
+    for (const output of outputs) {
       this.enqueueOutput(output, message, context)
     }
     return Result.successVoid()

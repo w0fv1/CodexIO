@@ -1,5 +1,5 @@
 import { inject, injectable } from 'inversify'
-import { AppEvent } from '../../value/Event.js'
+import { AppEvent, ChannelMessageSendRequestedEvent } from '../../value/Event.js'
 import { Result } from '../../value/Result.js'
 import { EventBus } from '../EventBus.js'
 import { Logger } from '../Logger.js'
@@ -7,6 +7,7 @@ import { Logger } from '../Logger.js'
 export type CodexStreamThread = {
   ioThreadId: string
   agentThreadId: string
+  inputType?: ChannelMessageSendRequestedEvent['inputType']
 }
 
 export type CodexStreamMessage = {
@@ -125,12 +126,12 @@ export class CodexMessageStreamer {
   }
 
   private async flushCompletedSegments(item: StreamItem): Promise<void> {
-    let boundary = findDoubleNewlineBoundary(item.buffer)
+    let boundary = findSentenceSegmentBoundary(item.buffer)
     while (boundary > 0) {
       const segment = item.buffer.slice(0, boundary)
       item.buffer = item.buffer.slice(boundary).trimStart()
       await this.queueSend(item, segment)
-      boundary = findDoubleNewlineBoundary(item.buffer)
+      boundary = findSentenceSegmentBoundary(item.buffer)
     }
   }
 
@@ -159,6 +160,7 @@ export class CodexMessageStreamer {
       return
     }
     const results = await this.eventBus.emitAsync(AppEvent.ChannelMessageSendRequested, {
+      inputType: thread.inputType,
       message: {
         ioThreadId: thread.ioThreadId,
         role: 'agent',
@@ -202,12 +204,22 @@ export class CodexMessageStreamer {
   }
 }
 
-function findDoubleNewlineBoundary(text: string): number {
-  const windows = text.indexOf('\r\n\r\n')
-  const unix = text.indexOf('\n\n')
-  const candidates = [windows, unix].filter((index) => index >= 0)
-  if (candidates.length === 0) {
-    return 0
+function findSentenceSegmentBoundary(text: string): number {
+  for (let index = 0; index < text.length; index += 1) {
+    if (!isDoubleNewlineAt(text, index)) {
+      continue
+    }
+    if (endsWithSentencePunctuation(text.slice(0, index))) {
+      return index
+    }
   }
-  return Math.min(...candidates)
+  return 0
+}
+
+function isDoubleNewlineAt(text: string, index: number): boolean {
+  return text.startsWith('\n\n', index) || text.startsWith('\r\n\r\n', index)
+}
+
+function endsWithSentencePunctuation(text: string): boolean {
+  return /[。！？.!?][”’"'）)\]}]*\s*$/.test(text)
 }

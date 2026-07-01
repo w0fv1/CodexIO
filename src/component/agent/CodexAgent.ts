@@ -17,6 +17,7 @@ export class CodexAgent implements Agent {
   private loginIoThreadId?: string
   private readonly threadIdByIoThreadId = new Map<string, string>()
   private readonly ioThreadIdByThreadId = new Map<string, string>()
+  private readonly inputTypeByIoThreadId = new Map<string, ChannelMessageReceivedEvent['inputType']>()
   private readonly emittedErrors = new Set<string>()
   private readonly disposers: Array<() => void> = []
 
@@ -64,6 +65,7 @@ export class CodexAgent implements Agent {
       }
     }
     this.loginIoThreadId = event.message.ioThreadId
+    this.inputTypeByIoThreadId.set(event.message.ioThreadId, event.inputType)
     const loggedIn = await this.client.login()
     if (loggedIn.isFailed) {
       return Result.fail(loggedIn.message)
@@ -99,6 +101,7 @@ export class CodexAgent implements Agent {
     this.loginIoThreadId = undefined
     this.threadIdByIoThreadId.clear()
     this.ioThreadIdByThreadId.clear()
+    this.inputTypeByIoThreadId.clear()
     this.messageStreamer.clear()
     this.emittedErrors.clear()
     return this.client.stop()
@@ -109,6 +112,7 @@ export class CodexAgent implements Agent {
     if (!ioThreadId) {
       return
     }
+    const inputType = this.inputTypeByIoThreadId.get(ioThreadId)
     await this.sendAgent({
       ioThreadId,
       role: 'agent',
@@ -119,7 +123,7 @@ export class CodexAgent implements Agent {
             `打开：${login.verificationUrl}`,
             `验证码：${login.userCode}`
           ].join('\n')
-    })
+    }, inputType)
   }
 
   private async receiveCodexMessage(message: CodexClientMessage): Promise<void> {
@@ -134,23 +138,28 @@ export class CodexAgent implements Agent {
       if (!message.itemId) {
         return
       }
+      const inputType = this.inputTypeByIoThreadId.get(ioThreadId)
       await this.messageStreamer.append({
         ioThreadId,
-        agentThreadId: message.threadId
+        agentThreadId: message.threadId,
+        inputType
       }, message.itemId, message.text)
       return
     }
     if (message.status === 'completed') {
+      const inputType = this.inputTypeByIoThreadId.get(ioThreadId)
       if (message.itemId && message.messages.length <= 1) {
         await this.messageStreamer.completeItem({
           ioThreadId,
-          agentThreadId: message.threadId
+          agentThreadId: message.threadId,
+          inputType
         }, message.itemId, message.messages[0]?.text)
         return
       }
       await this.messageStreamer.complete({
         ioThreadId,
-        agentThreadId: message.threadId
+        agentThreadId: message.threadId,
+        inputType
       }, message.messages.map((completed) => {
         return {
           itemId: completed.itemId,
@@ -165,7 +174,7 @@ export class CodexAgent implements Agent {
         ioThreadId,
         role: 'agent',
         text: message.text
-      })
+      }, this.inputTypeByIoThreadId.get(ioThreadId))
     }
   }
 
@@ -184,7 +193,7 @@ export class CodexAgent implements Agent {
       ioThreadId,
       role: 'agent',
       text
-    })
+    }, this.inputTypeByIoThreadId.get(ioThreadId))
   }
 
   private async formatClientError(error: Error): Promise<string> {
@@ -208,8 +217,9 @@ export class CodexAgent implements Agent {
     this.ioThreadIdByThreadId.set(threadId, ioThreadId)
   }
 
-  private async sendAgent(message: Message): Promise<void> {
+  private async sendAgent(message: Message, inputType?: ChannelMessageReceivedEvent['inputType']): Promise<void> {
     const results = await this.eventBus.emitAsync(AppEvent.ChannelMessageSendRequested, {
+      inputType,
       message
     })
     for (const result of results) {

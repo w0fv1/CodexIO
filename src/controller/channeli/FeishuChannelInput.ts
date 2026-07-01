@@ -4,13 +4,21 @@ import { CodexioConfig } from '../../value/ConfigDefinition.js'
 import { Result } from '../../value/Result.js'
 import { Logger } from '../../component/Logger.js'
 import { Configer } from '../../component/Configer.js'
-import { parseFeishuMessageText } from '../../value/FeishuMessage.js'
-import { ChannelInput, ChannelInputReceiver } from './ChannelInput.js'
+import { parseFeishuMessageText, shouldReceiveFeishuMessage, shouldReceiveFeishuSender } from '../../value/FeishuMessage.js'
+import { ChannelInput, ChannelInputMessage, ChannelInputReceiver } from './ChannelInput.js'
 
 type FeishuChannelInputConfig = CodexioConfig['channeli']['feishu']
 type FeishuMessageEvent = {
+  sender?: {
+    sender_id?: {
+      open_id?: unknown
+      user_id?: unknown
+      union_id?: unknown
+    }
+  }
   message: {
     chat_id: string
+    chat_type?: string
     message_type: string
     content: string
     mentions?: Array<{
@@ -48,6 +56,7 @@ export class FeishuChannelInput implements ChannelInput {
       return false
     }
     this.receiver = receiver
+    this.chatId = this.inputConfig.chatId?.trim() ?? ''
     Logger.info('feishu ws input starting', {
       chatId: this.inputConfig.chatId?.trim() ?? '',
       wsEnabled: Boolean(this.inputConfig.ws?.trim())
@@ -102,6 +111,7 @@ export class FeishuChannelInput implements ChannelInput {
     this.wsClient?.close()
     this.wsClient = undefined
     this.receiver = undefined
+    this.chatId = ''
     return Result.successVoid()
   }
 
@@ -115,6 +125,7 @@ export class FeishuChannelInput implements ChannelInput {
     const feishuThreadId = typeof feishuMessage.thread_id === 'string' && feishuMessage.thread_id.trim().length > 0 ? feishuMessage.thread_id.trim() : ''
     const feishuMessageId = typeof feishuMessage.message_id === 'string' && feishuMessage.message_id.trim().length > 0 ? feishuMessage.message_id.trim() : ''
     const feishuRootId = typeof feishuMessage.root_id === 'string' && feishuMessage.root_id.trim().length > 0 ? feishuMessage.root_id.trim() : ''
+    const sender = readFeishuSender(data)
     const feishuEntities = [
       feishuThreadId.length > 0 ? `${chatId}:thread:${feishuThreadId}` : '',
       feishuRootId.length > 0 ? `${chatId}:message:${feishuRootId}` : '',
@@ -154,6 +165,21 @@ export class FeishuChannelInput implements ChannelInput {
         Logger.warn('feishu message parse failed')
         return
       }
+      if (!shouldReceiveFeishuMessage(data.message.chat_type, data.message.mentions, this.inputConfig?.aite ?? true)) {
+        Logger.info('feishu message ignored', {
+          chatId: data.message.chat_id,
+          reason: 'aite required'
+        })
+        return
+      }
+      if (!shouldReceiveFeishuSender(sender.openId, this.inputConfig?.allowedOpenIds ?? [])) {
+        Logger.info('feishu message ignored', {
+          chatId: data.message.chat_id,
+          reason: 'sender not allowed',
+          openId: sender.openId
+        })
+        return
+      }
       Logger.info('feishu message received', {
         chatId: data.message.chat_id,
         length: parsedText.text.length
@@ -167,7 +193,9 @@ export class FeishuChannelInput implements ChannelInput {
       }
       void receiver.receive('feishu', {
         platformThreadIds: feishuThreadIds as [typeof feishuThreadIds[number], ...typeof feishuThreadIds[number][]],
-        text: parsedText.text
+        text: parsedText.text,
+        mentioned: Boolean(data.message.mentions?.some((mention) => mention.key.trim().length > 0)),
+        sender
       }).then((result) => {
         if (result.isFailed) {
           Logger.warn('feishu message receive failed', {
@@ -180,5 +208,14 @@ export class FeishuChannelInput implements ChannelInput {
     } catch (error) {
       Logger.error('feishu event failed', error)
     }
+  }
+}
+
+function readFeishuSender(data: FeishuMessageEvent): NonNullable<ChannelInputMessage['sender']> {
+  const senderId = data.sender?.sender_id
+  return {
+    openId: typeof senderId?.open_id === 'string' ? senderId.open_id.trim() : '',
+    userId: typeof senderId?.user_id === 'string' ? senderId.user_id.trim() : '',
+    unionId: typeof senderId?.union_id === 'string' ? senderId.union_id.trim() : ''
   }
 }

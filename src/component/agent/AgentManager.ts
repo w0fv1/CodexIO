@@ -5,6 +5,7 @@ import { Result } from '../../value/Result.js'
 import { Configer } from '../Configer.js'
 import { EventBus } from '../EventBus.js'
 import { Logger } from '../Logger.js'
+import { resolveUserPath } from '../../util/Path.js'
 import { Agent } from './Agent.js'
 import { CodexAgent } from './CodexAgent.js'
 import { EchoAgent } from './EchoAgent.js'
@@ -117,8 +118,9 @@ export class AgentManager {
 
   private async ensureWorkspace(): Promise<void> {
     const workspacePath = await this.configer.get('workspace.path')
-    if (typeof workspacePath === 'string' && workspacePath.trim().length > 0) {
-      await mkdir(workspacePath, {
+    const resolvedWorkspacePath = typeof workspacePath === 'string' ? resolveUserPath(workspacePath) : ''
+    if (resolvedWorkspacePath.length > 0) {
+      await mkdir(resolvedWorkspacePath, {
         recursive: true
       })
     }

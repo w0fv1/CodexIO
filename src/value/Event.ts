@@ -14,6 +14,7 @@ export type ChannelMessageReceivedEvent = {
 }
 
 export type ChannelInputReceiveResult = {
+  consumed?: boolean
   ioThreadId?: string
 }
 

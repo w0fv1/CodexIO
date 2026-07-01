@@ -68,6 +68,9 @@ export const configPageHtml = String.raw`
       if (type === 'number') {
         return Number(input.value)
       }
+      if (type === 'stringList') {
+        return input.value.split(/[\n,]/).map((item) => item.trim()).filter((item) => item.length > 0)
+      }
       return input.value
     }
     const render = () => {
@@ -85,15 +88,20 @@ export const configPageHtml = String.raw`
           const label = document.createElement('span')
           label.className = 'text-sm text-slate-300'
           label.textContent = field.label
-          const input = document.createElement('input')
+          const input = document.createElement(field.type === 'stringList' ? 'textarea' : 'input')
           input.dataset.path = field.path
           input.className = 'rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-blue-500'
-          input.type = field.type === 'password' ? 'password' : field.type === 'boolean' ? 'checkbox' : field.type === 'number' ? 'number' : 'text'
+          if (input instanceof HTMLInputElement) {
+            input.type = field.type === 'password' ? 'password' : field.type === 'boolean' ? 'checkbox' : field.type === 'number' ? 'number' : 'text'
+          }
           const value = getValue(config, field.path)
           values[field.path] = value
           if (field.type === 'boolean') {
             input.checked = Boolean(value)
             input.className = 'h-5 w-5 accent-blue-600'
+          } else if (field.type === 'stringList') {
+            input.value = Array.isArray(value) ? value.join('\n') : ''
+            input.rows = 3
           } else {
             input.value = value ?? ''
           }

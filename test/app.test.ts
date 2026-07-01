@@ -29,6 +29,7 @@ import { AgentManager } from '../src/component/agent/AgentManager.js'
 import { CodexAgent } from '../src/component/agent/CodexAgent.js'
 import { CodexClient } from '../src/component/agent/CodexClient.js'
 import { CodexMessageStreamer } from '../src/component/agent/CodexMessageStreamer.js'
+import { CommandExecutor } from '../src/controller/CommandExecutor.js'
 
 const testToken = 'test-message-token'
 const testMetadata = new CodexioMetadata()
@@ -239,7 +240,7 @@ async function createTestCodexioApp(configer: Configer): Promise<{
   const codexAgent = new CodexAgent(configer, eventBus, ioThreadIdManager, codexClient, new CodexMessageStreamer(eventBus))
   const echoAgent = new EchoAgent(eventBus)
   const agentManager = new AgentManager(configer, eventBus, codexAgent, echoAgent)
-  const inputManager = new ChannelInputManager(configer, eventBus, ioThreadIdManager, webInput, feishuInput, emailInput)
+  const inputManager = new ChannelInputManager(configer, eventBus, ioThreadIdManager, new CommandExecutor(eventBus), webInput, feishuInput, emailInput)
   const apiController = new CodexioApiController(configer, outputManager, fileStore, webHub, eventBus)
   await outputManager.start()
   await agentManager.start()

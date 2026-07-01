@@ -18,6 +18,8 @@ export type FeishuMention = {
   key: string
 }
 
+export type FeishuChatType = 'p2p' | 'group' | string
+
 export type FeishuMessageTextParseResult =
   | {
     success: true
@@ -60,6 +62,27 @@ export function parseFeishuMessageText(messageType: string, content: string, men
     success: true,
     text
   }
+}
+
+export function shouldReceiveFeishuMessage(chatType: FeishuChatType | undefined, mentions: FeishuMention[] | undefined, requireAite: boolean): boolean {
+  if (!requireAite) {
+    return true
+  }
+  if (chatType === 'p2p') {
+    return true
+  }
+  if (chatType !== 'group') {
+    return true
+  }
+  return Boolean(mentions?.some((mention) => mention.key.trim().length > 0))
+}
+
+export function shouldReceiveFeishuSender(openId: string | undefined, allowedOpenIds: string[]): boolean {
+  const allowed = new Set(allowedOpenIds.map((item) => item.trim()).filter((item) => item.length > 0))
+  if (allowed.size === 0) {
+    return true
+  }
+  return Boolean(openId && allowed.has(openId.trim()))
 }
 
 function parseTextContent(value: unknown): string | undefined {

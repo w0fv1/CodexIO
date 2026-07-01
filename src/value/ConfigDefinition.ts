@@ -36,6 +36,8 @@ export type CodexioConfig = {
       appSecret: string
       chatId: string
       ws: string
+      aite: boolean
+      allowedOpenIds: string[]
     }
     email?: {
       enabled: boolean
@@ -89,7 +91,7 @@ export type ConfigFieldDescriptor = {
   path: string
   group: string
   label: string
-  type: 'boolean' | 'number' | 'string' | 'password'
+  type: 'boolean' | 'number' | 'string' | 'password' | 'stringList'
   apply: string
 }
 
@@ -101,6 +103,7 @@ type ConfigField = ConfigFieldDescriptor & {
 type ConfigObject = Record<string, unknown>
 
 const positiveInt = z.number().int().positive()
+const workspacePath = z.preprocess((value) => value === null ? '~' : value, z.string())
 
 const configFields: ConfigField[] = [
   field('server.host', 'Server', 'Host', 'string', '重启 Codexio', z.string(), '127.0.0.1'),
@@ -112,7 +115,7 @@ const configFields: ConfigField[] = [
   field('agents.codex.command', 'Codex Agent', 'Command', 'string', '重启 Codex Agent', z.string(), 'codex'),
   field('agents.codex.developerInstructions', 'Codex Agent', 'Developer Instructions', 'string', '重启 Codex Agent', z.string(), ''),
   field('agents.codex.requestTimeoutSeconds', 'Codex Agent', 'Request Timeout Seconds', 'number', '重启 Codex Agent', positiveInt, 120),
-  field('workspace.path', 'Workspace', 'Path', 'string', '重启 Codex Agent', z.string(), ''),
+  field('workspace.path', 'Workspace', 'Path', 'string', '重启 Codex Agent', workspacePath, ''),
   field('proxy.enabled', 'Proxy', 'Enabled', 'boolean', '重启 Codexio', z.boolean(), false),
   field('proxy.host', 'Proxy', 'Host', 'string', '重启 Codexio', z.string(), '127.0.0.1'),
   field('proxy.port', 'Proxy', 'Port', 'number', '重启 Codexio', positiveInt, 7890),
@@ -123,6 +126,8 @@ const configFields: ConfigField[] = [
   field('channeli.feishu.appSecret', 'Feishu Input', 'App Secret', 'password', '重连 Feishu 输入', z.string(), ''),
   field('channeli.feishu.chatId', 'Feishu Input', 'Chat ID', 'string', '重连 Feishu 输入', z.string(), ''),
   field('channeli.feishu.ws', 'Feishu Input', 'WebSocket', 'string', '重连 Feishu 输入', z.string(), ''),
+  field('channeli.feishu.aite', 'Feishu Input', 'Require Aite', 'boolean', '重连 Feishu 输入', z.boolean(), true),
+  field('channeli.feishu.allowedOpenIds', 'Feishu Input', 'Allowed Open IDs', 'stringList', '重连 Feishu 输入', z.array(z.string()), []),
   field('channeli.email.enabled', 'Email Input', 'Enabled', 'boolean', '重连 Email 输入', z.boolean(), false),
   field('channeli.email.user', 'Email Input', 'User', 'string', '重连 Email 输入', z.string(), ''),
   field('channeli.email.account.imap.host', 'Email Input IMAP', 'Host', 'string', '重连 Email 输入', z.string(), ''),

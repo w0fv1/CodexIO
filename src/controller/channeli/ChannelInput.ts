@@ -10,6 +10,12 @@ export type ChannelInputMessage = {
   platformThreadIds: [PlatformThreadId, ...PlatformThreadId[]]
   text: string
   files?: MessageFile[]
+  mentioned?: boolean
+  sender?: {
+    openId?: string
+    userId?: string
+    unionId?: string
+  }
 }
 
 export interface ChannelInputReceiver {

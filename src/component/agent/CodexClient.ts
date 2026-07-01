@@ -7,6 +7,7 @@ import { Configer } from '../Configer.js'
 import { CodexioMetadata } from '../CodexioMetadata.js'
 import { Logger } from '../Logger.js'
 import { createProcessEnv } from '../../util/ProcessEnvironment.js'
+import { resolveUserPath } from '../../util/Path.js'
 import { MessageFile } from '../../value/Message.js'
 import { Result } from '../../value/Result.js'
 
@@ -673,11 +674,12 @@ export class CodexClient {
             '--stdio'
           ]
         }
+    const cwd = resolveUserPath(workspacePath)
     return {
       bundled,
       command: command.command,
       args: command.args,
-      cwd: workspacePath.trim().length > 0 ? workspacePath.trim() : this.metadata.rootPath,
+      cwd: cwd.length > 0 ? cwd : this.metadata.rootPath,
       codexHomePath: bundled ? this.metadata.codexHomePath : undefined,
       proxyUrl: proxyEnabled ? `http://${proxyHost}:${proxyPort}` : undefined,
       noProxyHosts: [

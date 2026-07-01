@@ -6,6 +6,7 @@ import { IoThreadIdManager } from '../../component/IoThreadIdManager.js'
 import { AppEvent, ChannelInputReceiveResult } from '../../value/Event.js'
 import { Message } from '../../value/Message.js'
 import { Result } from '../../value/Result.js'
+import { CommandExecutor } from '../CommandExecutor.js'
 import { ChannelInput, ChannelInputMessage, ChannelInputReceiver, ChannelType } from './ChannelInput.js'
 import { EmailChannelInput } from './EmailChannelInput.js'
 import { FeishuChannelInput } from './FeishuChannelInput.js'
@@ -20,6 +21,7 @@ export class ChannelInputManager implements ChannelInputReceiver {
     @inject(Configer) private readonly configer: Configer,
     @inject(EventBus) private readonly eventBus: EventBus,
     @inject(IoThreadIdManager) private readonly ioThreadIdManager: IoThreadIdManager,
+    @inject(CommandExecutor) private readonly commandExecutor: CommandExecutor,
     @inject(WebChannelInput) web: WebChannelInput,
     @inject(FeishuChannelInput) feishu: FeishuChannelInput,
     @inject(EmailChannelInput) email: EmailChannelInput
@@ -60,6 +62,14 @@ export class ChannelInputManager implements ChannelInputReceiver {
     const sendFailures = sendResultList.filter((item) => item.isFailed)
     if (sendFailures.length > 0) {
       return Result.fail(sendFailures.map((item) => item.message).join('\n'))
+    }
+    const command = await this.commandExecutor.receive({
+      inputType,
+      message,
+      input
+    })
+    if (command.isFailed || command.data?.consumed) {
+      return command
     }
     const resultList = await this.eventBus.emitAsync(AppEvent.ChannelMessageReceived, {
       inputType,

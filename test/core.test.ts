@@ -1,5 +1,5 @@
 import { mkdtemp, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ChannelOutputManager } from '../src/component/channelo/ChannelOutputManager.js'
@@ -11,11 +11,14 @@ import { Agent } from '../src/component/agent/Agent.js'
 import { AgentManager } from '../src/component/agent/AgentManager.js'
 import { CodexClient } from '../src/component/agent/CodexClient.js'
 import { CodexMessageStreamer } from '../src/component/agent/CodexMessageStreamer.js'
+import { CommandExecutor, parseCommandInput } from '../src/controller/CommandExecutor.js'
 import { AppEvent, ChannelMessageReceivedEvent } from '../src/value/Event.js'
-import { ConfigSchema, createDefaultConfig, validateCodexioConfig } from '../src/value/ConfigDefinition.js'
+import { ConfigSchema, createDefaultConfig, parseCodexioConfig, validateCodexioConfig } from '../src/value/ConfigDefinition.js'
 import { Result } from '../src/value/Result.js'
 import type { Message } from '../src/value/Message.js'
+import { shouldReceiveFeishuMessage, shouldReceiveFeishuSender } from '../src/value/FeishuMessage.js'
 import { renderMarkdownHtml } from '../src/util/Markdown.js'
+import { resolveUserPath } from '../src/util/Path.js'
 
 const testMetadata = new CodexioMetadata()
 
@@ -28,7 +31,77 @@ describe('core', () => {
     expect(config.proxy.host).toBe('127.0.0.1')
     expect(config.proxy.noProxy).toBe('')
     expect(config.channeli.web?.enabled).toBe(true)
+    expect(config.channeli.feishu?.aite).toBe(true)
+    expect(config.channeli.feishu?.allowedOpenIds).toEqual([])
     expect(config.channelo.web?.enabled).toBe(true)
+  })
+
+  it('controls whether feishu group messages require aite', () => {
+    expect(shouldReceiveFeishuMessage('group', [], true)).toBe(false)
+    expect(shouldReceiveFeishuMessage('group', [
+      {
+        key: '@_user_1'
+      }
+    ], true)).toBe(true)
+    expect(shouldReceiveFeishuMessage('group', [], false)).toBe(true)
+    expect(shouldReceiveFeishuMessage('p2p', [], true)).toBe(true)
+  })
+
+  it('allows feishu senders by open id list', () => {
+    expect(shouldReceiveFeishuSender(undefined, [])).toBe(true)
+    expect(shouldReceiveFeishuSender('ou_1', [])).toBe(true)
+    expect(shouldReceiveFeishuSender('ou_1', [
+      'ou_1'
+    ])).toBe(true)
+    expect(shouldReceiveFeishuSender('ou_2', [
+      'ou_1'
+    ])).toBe(false)
+  })
+
+  it('parses command prefixes', () => {
+    expect(parseCommandInput('$test')).toEqual({
+      type: 'command',
+      name: 'test',
+      args: []
+    })
+    expect(parseCommandInput('￥help now')).toEqual({
+      type: 'command',
+      name: 'help',
+      args: [
+        'now'
+      ]
+    })
+    expect(parseCommandInput('hello')).toEqual({
+      type: 'message',
+      text: 'hello'
+    })
+  })
+
+  it('consumes test commands without sending them to the agent event', async () => {
+    const eventBus = new EventBus()
+    const executor = new CommandExecutor(eventBus)
+    const result = await executor.receive({
+      inputType: 'feishu',
+      message: {
+        ioThreadId: 'io-thread',
+        role: 'user',
+        text: '$test'
+      },
+      input: {
+        platformThreadIds: [
+          {
+            source: 'feishu',
+            id: 'chat:message:om_1'
+          }
+        ],
+        text: '$test',
+        mentioned: true,
+        sender: {
+          openId: 'ou_1'
+        }
+      }
+    })
+    expect(result.data?.consumed).toBe(true)
   })
 
   it('rejects configs without enabled channel input and output', () => {
@@ -115,6 +188,35 @@ describe('core', () => {
       'next.firco.cn',
       '*.firco.cn'
     ])
+  })
+
+  it('resolves tilde workspace paths to the user home directory', async () => {
+    const parsed = await parseCodexioConfig({
+      workspace: {
+        path: null
+      }
+    }, 'config.yaml')
+    expect(parsed.workspace.path).toBe('~')
+    expect(resolveUserPath('~')).toBe(homedir())
+    expect(resolveUserPath('~/work')).toBe(join(homedir(), 'work'))
+    expect(resolveUserPath('~\\work')).toBe(join(homedir(), 'work'))
+    const values = new Map<string, unknown>([
+      ['agents.codex.bundled', false],
+      ['workspace.path', '~'],
+      ['proxy.enabled', false],
+      ['proxy.host', '127.0.0.1'],
+      ['proxy.port', 7890],
+      ['proxy.noProxy', ''],
+      ['server.host', '127.0.0.1'],
+      ['agents.codex.command', 'codex'],
+      ['agents.codex.developerInstructions', ''],
+      ['agents.codex.requestTimeoutSeconds', 120]
+    ])
+    const client = new CodexClient({
+      get: async (path: string) => values.get(path)
+    } as unknown as Configer, testMetadata)
+    const runtimeConfig = await client['readRuntimeConfig']()
+    expect(runtimeConfig.cwd).toBe(homedir())
   })
 
   it('removes the final newline from rendered markdown html', () => {
@@ -275,6 +377,27 @@ describe('core', () => {
     ])
   })
 
+  it('routes channel output to web, the originating channel, and output-only channels', async () => {
+    const sent: Array<{ type: string, message: Message }> = []
+    const manager = await createRecordingChannelOutputManager(sent, new IoThreadIdManager(), [
+      'web',
+      'feishu',
+      'feishuWebhook',
+      'email'
+    ])
+    await manager.sendAgent({
+      ioThreadId: 'io-thread',
+      role: 'agent',
+      text: 'hello'
+    }, 'feishu')
+    await manager.stop()
+    expect(sent.map((item) => item.type)).toEqual([
+      'web',
+      'feishu',
+      'feishuWebhook'
+    ])
+  })
+
   it('routes channel messages to echo by default and codex when enabled', async () => {
     let codexEnabled = false
     const eventBus = new EventBus()
@@ -330,6 +453,124 @@ describe('core', () => {
     ])
   })
 
+  it('does not flush codex deltas at a double newline after a colon', async () => {
+    const sent: Message[] = []
+    const eventBus = new EventBus()
+    eventBus.on(AppEvent.ChannelMessageSendRequested, async (event) => {
+      sent.push(event.message)
+      return Result.successVoid()
+    })
+    const streamer = new CodexMessageStreamer(eventBus)
+    const thread = {
+      ioThreadId: 'io-thread',
+      agentThreadId: 'codex-thread'
+    }
+    await streamer.append(thread, 'item', '根因有两个:\n\n')
+    expect(sent).toEqual([])
+    await streamer.append(thread, 'item', '第一个原因。')
+    expect(sent).toEqual([])
+    await streamer.completeItem(thread, 'item')
+    expect(sent).toEqual([
+      {
+        ioThreadId: 'io-thread',
+        role: 'agent',
+        text: '根因有两个:\n\n第一个原因。'
+      }
+    ])
+  })
+
+  it('flushes codex deltas at a double newline after a sentence end', async () => {
+    const sent: Message[] = []
+    const eventBus = new EventBus()
+    eventBus.on(AppEvent.ChannelMessageSendRequested, async (event) => {
+      sent.push(event.message)
+      return Result.successVoid()
+    })
+    const streamer = new CodexMessageStreamer(eventBus)
+    const thread = {
+      ioThreadId: 'io-thread',
+      agentThreadId: 'codex-thread'
+    }
+    await streamer.append(thread, 'item', '服务恢复了。\n\n继续验证。')
+    expect(sent).toEqual([
+      {
+        ioThreadId: 'io-thread',
+        role: 'agent',
+        text: '服务恢复了。'
+      }
+    ])
+    await streamer.completeItem(thread, 'item')
+    expect(sent).toEqual([
+      {
+        ioThreadId: 'io-thread',
+        role: 'agent',
+        text: '服务恢复了。'
+      },
+      {
+        ioThreadId: 'io-thread',
+        role: 'agent',
+        text: '继续验证。'
+      }
+    ])
+  })
+
+  it('flushes the remaining codex buffer on completion without sentence end punctuation', async () => {
+    const sent: Message[] = []
+    const eventBus = new EventBus()
+    eventBus.on(AppEvent.ChannelMessageSendRequested, async (event) => {
+      sent.push(event.message)
+      return Result.successVoid()
+    })
+    const streamer = new CodexMessageStreamer(eventBus)
+    const thread = {
+      ioThreadId: 'io-thread',
+      agentThreadId: 'codex-thread'
+    }
+    await streamer.append(thread, 'item', '我改了 ThreadComposer.svelte:\n\n新增 sendDisabled')
+    expect(sent).toEqual([])
+    await streamer.completeItem(thread, 'item')
+    expect(sent).toEqual([
+      {
+        ioThreadId: 'io-thread',
+        role: 'agent',
+        text: '我改了 ThreadComposer.svelte:\n\n新增 sendDisabled'
+      }
+    ])
+  })
+
+  it('keeps the originating channel on codex stream output', async () => {
+    const sent: Array<{ inputType: string | undefined, message: Message }> = []
+    const eventBus = new EventBus()
+    eventBus.on(AppEvent.ChannelMessageSendRequested, async (event) => {
+      sent.push({
+        inputType: event.inputType,
+        message: event.message
+      })
+      return Result.successVoid()
+    })
+    const streamer = new CodexMessageStreamer(eventBus)
+    await streamer.complete({
+      ioThreadId: 'io-thread',
+      agentThreadId: 'codex-thread',
+      inputType: 'feishu'
+    }, [
+      {
+        itemId: 'item',
+        text: '你好。'
+      }
+    ])
+    expect(sent).toEqual([
+      {
+        inputType: 'feishu',
+        message: {
+          ioThreadId: 'io-thread',
+          role: 'agent',
+          text: '你好。'
+        }
+      }
+    ])
+  })
+
   it('does not resend codex item text when the turn completes', async () => {
     const sent: Message[] = []
     const eventBus = new EventBus()
@@ -360,15 +601,26 @@ describe('core', () => {
   })
 })
 
-async function createRecordingChannelOutputManager(sent: Message[], ioThreadIdManager = new IoThreadIdManager()): Promise<ChannelOutputManager> {
+async function createRecordingChannelOutputManager(
+  sent: Message[] | Array<{ type: string, message: Message }>,
+  ioThreadIdManager = new IoThreadIdManager(),
+  enabledTypes = ['web']
+): Promise<ChannelOutputManager> {
   const configer = {
     subscribe: () => {}
   } as unknown as Configer
   const output = (type: string) => ({
     type,
-    start: async () => type === 'web',
+    start: async () => enabledTypes.includes(type),
     send: async (message: Message) => {
-      sent.push(message)
+      if (enabledTypes.length === 1) {
+        ;(sent as Message[]).push(message)
+      } else {
+        ;(sent as Array<{ type: string, message: Message }>).push({
+          type,
+          message
+        })
+      }
       return Result.successVoid()
     },
     stop: async () => Result.successVoid()
