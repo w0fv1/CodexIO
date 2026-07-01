@@ -4,18 +4,16 @@ import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { pid } from 'node:process'
 import { Container, inject, injectable } from 'inversify'
-import { ChannelInputManager } from './channel/ChannelInputManager.js'
-import { ChannelOutputManager } from './channel/ChannelOutputManager.js'
-import { AgentManager } from './agent/AgentManager.js'
+import { ChannelInputManager } from './controller/channeli/ChannelInputManager.js'
+import { ChannelOutputManager } from './component/channelo/ChannelOutputManager.js'
 import { Configer } from './component/Configer.js'
 import { Result } from './value/Result.js'
-import { Updater } from './component/Updater.js'
 import { Logger } from './component/Logger.js'
 import { CodexioMetadata } from './component/CodexioMetadata.js'
 import { CodexioApiController } from './controller/CodexioApiController.js'
 import { EventBus } from './component/EventBus.js'
 import { AppEvent } from './value/Event.js'
-import { allIoThreadId } from './value/Message.js'
+import { AgentManager } from './component/agent/AgentManager.js'
 
 @injectable()
 export class CodexioApplication {
@@ -26,10 +24,9 @@ export class CodexioApplication {
     @inject(CodexioMetadata) private readonly codexioMetadata: CodexioMetadata,
     @inject(ChannelInputManager) private readonly inputManager: ChannelInputManager,
     @inject(ChannelOutputManager) private readonly outputManager: ChannelOutputManager,
-    @inject(AgentManager) private readonly agentManager: AgentManager,
     @inject(CodexioApiController) private readonly apiController: CodexioApiController,
-    @inject(Updater) private readonly updater: Updater,
-    @inject(EventBus) private readonly eventBus: EventBus
+    @inject(EventBus) private readonly eventBus: EventBus,
+    @inject(AgentManager) private readonly agentManager: AgentManager
   ) {
     this.eventBus.on(AppEvent.StopRequested, () => {
       void this.stop()
@@ -49,12 +46,11 @@ export class CodexioApplication {
     try {
       await this.apiController.start()
       await this.outputManager.start()
-      await this.inputManager.start()
       const agentStarted = await this.agentManager.start()
       if (agentStarted.isFailed) {
-        await this.outputManager.sendSystem(agentStarted.message, allIoThreadId)
+        throw new Error(agentStarted.message)
       }
-      this.updater.start()
+      await this.inputManager.start()
       await mkdir(dirname(this.codexioMetadata.serverStatePath), {
         recursive: true
       })
