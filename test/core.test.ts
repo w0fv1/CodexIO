@@ -293,6 +293,35 @@ describe('core', () => {
       }
     ])
   })
+
+  it('does not resend codex item text when the turn completes', async () => {
+    const sent: Message[] = []
+    const eventBus = new EventBus()
+    eventBus.on(AppEvent.ChannelMessageSendRequested, async (event) => {
+      sent.push(event.message)
+      return Result.successVoid()
+    })
+    const streamer = new CodexMessageStreamer(eventBus)
+    const thread = {
+      ioThreadId: 'io-thread',
+      agentThreadId: 'codex-thread'
+    }
+    await streamer.append(thread, 'item', '你好')
+    await streamer.completeItem(thread, 'item')
+    await streamer.complete(thread, [
+      {
+        itemId: 'item',
+        text: '你好'
+      }
+    ])
+    expect(sent).toEqual([
+      {
+        ioThreadId: 'io-thread',
+        role: 'agent',
+        text: '你好'
+      }
+    ])
+  })
 })
 
 async function createRecordingChannelOutputManager(sent: Message[], ioThreadIdManager = new IoThreadIdManager()): Promise<ChannelOutputManager> {

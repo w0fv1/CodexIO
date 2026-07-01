@@ -19,17 +19,27 @@ type StreamItem = CodexStreamThread & {
   buffer: string
   sending: Promise<void>
   receivedDelta: boolean
+  cancelled: boolean
 }
 
 @injectable()
 export class CodexMessageStreamer {
   private readonly items = new Map<string, StreamItem>()
+  private readonly completedItems = new Set<string>()
 
   constructor(
     @inject(EventBus) private readonly eventBus: EventBus
   ) {}
 
   async append(thread: CodexStreamThread, itemId: string, delta: string): Promise<void> {
+    if (this.completedItems.has(this.completedKey(thread.ioThreadId, itemId))) {
+      Logger.warn('codex stream delta ignored after item completed', {
+        ioThreadId: thread.ioThreadId,
+        itemId,
+        length: delta.length
+      })
+      return
+    }
     const item = this.getItem(thread, itemId)
     item.receivedDelta = true
     item.buffer += delta
@@ -37,32 +47,67 @@ export class CodexMessageStreamer {
   }
 
   async complete(thread: CodexStreamThread, messages: CodexStreamMessage[]): Promise<void> {
+    const activeThreadItems = [...this.items.values()].filter((item) => item.ioThreadId === thread.ioThreadId)
+    const hasCompletedThreadItem = [...this.completedItems].some((key) => key.startsWith(`${thread.ioThreadId}\u0000`))
+    if (messages.length > 0 && activeThreadItems.length === 0 && hasCompletedThreadItem) {
+      this.clearCompletedThreadItems(thread.ioThreadId)
+      return
+    }
+    const completedItemIds = new Set<string>()
     for (const message of messages) {
-      const key = this.key(thread.agentThreadId, message.itemId)
-      const item = this.items.get(key)
-      if (item?.receivedDelta) {
-        await this.flushRemaining(item)
-        this.items.delete(key)
+      const key = this.completedKey(thread.ioThreadId, message.itemId)
+      if (this.completedItems.has(key)) {
         continue
       }
-      await this.send(thread, message.text)
+      const item = this.getCompletedItem(thread, message.itemId)
+      if (!item.receivedDelta && item.buffer.length === 0) {
+        item.buffer = message.text
+      }
+      await this.flushRemaining(item)
+      completedItemIds.add(item.itemId)
+      this.completedItems.add(key)
+      this.items.delete(this.itemKey(item.agentThreadId, item.itemId))
     }
+    for (const item of [...this.items.values()]) {
+      if (item.ioThreadId === thread.ioThreadId && !completedItemIds.has(item.itemId)) {
+        await this.flushRemaining(item)
+        this.completedItems.add(this.completedKey(item.ioThreadId, item.itemId))
+        this.items.delete(this.itemKey(item.agentThreadId, item.itemId))
+      }
+    }
+    this.clearCompletedThreadItems(thread.ioThreadId)
+  }
+
+  async completeItem(thread: CodexStreamThread, itemId: string, text?: string): Promise<void> {
+    const item = this.getCompletedItem(thread, itemId)
+    if (!item.receivedDelta && item.buffer.length === 0 && text !== undefined) {
+      item.buffer = text
+    }
+    await this.flushRemaining(item)
+    this.completedItems.add(this.completedKey(item.ioThreadId, item.itemId))
+    this.items.delete(this.itemKey(item.agentThreadId, item.itemId))
   }
 
   clearThread(ioThreadId: string): void {
     for (const [key, item] of this.items.entries()) {
       if (item.ioThreadId === ioThreadId) {
+        item.cancelled = true
         this.items.delete(key)
       }
     }
+    this.clearCompletedThreadItems(ioThreadId)
   }
 
   clear(): void {
+    for (const item of this.items.values()) {
+      item.cancelled = true
+    }
     this.items.clear()
+    this.completedItems.clear()
   }
 
   private getItem(thread: CodexStreamThread, itemId: string): StreamItem {
-    const key = this.key(thread.agentThreadId, itemId)
+    const key = this.itemKey(thread.agentThreadId, itemId)
     const existing = this.items.get(key)
     if (existing) {
       return existing
@@ -72,7 +117,8 @@ export class CodexMessageStreamer {
       itemId,
       buffer: '',
       sending: Promise.resolve(),
-      receivedDelta: false
+      receivedDelta: false,
+      cancelled: false
     }
     this.items.set(key, item)
     return item
@@ -80,7 +126,7 @@ export class CodexMessageStreamer {
 
   private async flushCompletedSegments(item: StreamItem): Promise<void> {
     let boundary = findDoubleNewlineBoundary(item.buffer)
-    while (boundary >= 0) {
+    while (boundary > 0) {
       const segment = item.buffer.slice(0, boundary)
       item.buffer = item.buffer.slice(boundary).trimStart()
       await this.queueSend(item, segment)
@@ -105,6 +151,9 @@ export class CodexMessageStreamer {
   }
 
   private async send(thread: CodexStreamThread, text: string): Promise<void> {
+    if ('cancelled' in thread && thread.cancelled) {
+      return
+    }
     const segment = text.trim()
     if (segment.length === 0) {
       return
@@ -124,8 +173,32 @@ export class CodexMessageStreamer {
     }
   }
 
-  private key(agentThreadId: string, itemId: string): string {
+  private itemKey(agentThreadId: string, itemId: string): string {
     return `${agentThreadId}:${itemId}`
+  }
+
+  private getCompletedItem(thread: CodexStreamThread, itemId: string): StreamItem {
+    const existing = this.items.get(this.itemKey(thread.agentThreadId, itemId))
+    if (existing) {
+      return existing
+    }
+    const threadItems = [...this.items.values()].filter((item) => item.ioThreadId === thread.ioThreadId)
+    if (threadItems.length === 1) {
+      return threadItems[0]
+    }
+    return this.getItem(thread, itemId)
+  }
+
+  private completedKey(ioThreadId: string, itemId: string): string {
+    return `${ioThreadId}\u0000${itemId}`
+  }
+
+  private clearCompletedThreadItems(ioThreadId: string): void {
+    for (const key of [...this.completedItems]) {
+      if (key.startsWith(`${ioThreadId}\u0000`)) {
+        this.completedItems.delete(key)
+      }
+    }
   }
 }
 
@@ -134,7 +207,7 @@ function findDoubleNewlineBoundary(text: string): number {
   const unix = text.indexOf('\n\n')
   const candidates = [windows, unix].filter((index) => index >= 0)
   if (candidates.length === 0) {
-    return -1
+    return 0
   }
   return Math.min(...candidates)
 }

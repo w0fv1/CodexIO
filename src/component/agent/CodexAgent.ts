@@ -141,6 +141,13 @@ export class CodexAgent implements Agent {
       return
     }
     if (message.status === 'completed') {
+      if (message.itemId && message.messages.length <= 1) {
+        await this.messageStreamer.completeItem({
+          ioThreadId,
+          agentThreadId: message.threadId
+        }, message.itemId, message.messages[0]?.text)
+        return
+      }
       await this.messageStreamer.complete({
         ioThreadId,
         agentThreadId: message.threadId

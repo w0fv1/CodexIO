@@ -466,6 +466,31 @@ export class CodexClient {
         }
         return
       }
+      case 'item/completed': {
+        const threadId = readString(data, 'threadId')
+        const item = data.item
+        const itemId = readString(data, 'itemId') ?? readString(item, 'id')
+        const type = readString(item, 'type')
+        const text = readString(item, 'text') ?? ''
+        const turnId = readString(data, 'turnId') ?? (threadId ? this.turnIdByThreadId.get(threadId) : undefined)
+        if (threadId && turnId && itemId && (!type || type === 'agentMessage')) {
+          this.emitMessage({
+            threadId,
+            turnId,
+            itemId,
+            status: 'completed',
+            text: '',
+            messages: [
+              {
+                itemId,
+                role: 'assistant',
+                text
+              }
+            ]
+          })
+        }
+        return
+      }
       case 'turn/completed':
         this.handleTurnCompleted(data)
         return
