@@ -55,12 +55,12 @@ export type CodexioConfig = {
       idle: boolean
       pollSeconds: number
     }
-    nfircoThread?: {
+    nfirco?: {
       enabled: boolean
       baseUrl: string
       account: string
       password: string
-      categoryUuid: string
+      section: string
     }
   }
   channelo: {
@@ -91,7 +91,7 @@ export type CodexioConfig = {
         }
       }
     }
-    nfircoThread?: {
+    nfirco?: {
       enabled: boolean
       baseUrl: string
       account: string
@@ -151,11 +151,11 @@ const configFields: ConfigField[] = [
   field('channeli.email.account.imap.mailbox', 'Email Input IMAP', 'Mailbox', 'string', '重连 Email 输入', z.string(), 'INBOX'),
   field('channeli.email.idle', 'Email Input', 'Idle', 'boolean', '重连 Email 输入', z.boolean(), true),
   field('channeli.email.pollSeconds', 'Email Input', 'Poll Seconds', 'number', '重连 Email 输入', positiveInt, 30),
-  field('channeli.nfircoThread.enabled', 'Nfirco Thread Input', 'Enabled', 'boolean', '重连 Nfirco Thread 输入', z.boolean(), false),
-  field('channeli.nfircoThread.baseUrl', 'Nfirco Thread Input', 'Base URL', 'string', '重连 Nfirco Thread 输入', z.string(), ''),
-  field('channeli.nfircoThread.account', 'Nfirco Thread Input', 'Account', 'string', '重连 Nfirco Thread 输入', z.string(), ''),
-  field('channeli.nfircoThread.password', 'Nfirco Thread Input', 'Password', 'password', '重连 Nfirco Thread 输入', z.string(), ''),
-  field('channeli.nfircoThread.categoryUuid', 'Nfirco Thread Input', 'Category UUID', 'string', '重连 Nfirco Thread 输入', z.string(), ''),
+  field('channeli.nfirco.enabled', 'Nfirco Thread Input', 'Enabled', 'boolean', '重连 Nfirco Thread 输入', z.boolean(), false),
+  field('channeli.nfirco.baseUrl', 'Nfirco Thread Input', 'Base URL', 'string', '重连 Nfirco Thread 输入', z.string(), ''),
+  field('channeli.nfirco.account', 'Nfirco Thread Input', 'Account', 'string', '重连 Nfirco Thread 输入', z.string(), ''),
+  field('channeli.nfirco.password', 'Nfirco Thread Input', 'Password', 'password', '重连 Nfirco Thread 输入', z.string(), ''),
+  field('channeli.nfirco.section', 'Nfirco Thread Input', 'Section', 'string', '重连 Nfirco Thread 输入', z.string(), ''),
   field('channelo.web.enabled', 'Web Output', 'Enabled', 'boolean', '重启 Codexio', z.boolean(), true),
   field('channelo.feishu.enabled', 'Feishu Output', 'Enabled', 'boolean', '重连 Feishu 输出', z.boolean(), false),
   field('channelo.feishu.appId', 'Feishu Output', 'App ID', 'string', '重连 Feishu 输出', z.string(), ''),
@@ -171,10 +171,10 @@ const configFields: ConfigField[] = [
   field('channelo.email.account.smtp.user', 'Email Output SMTP', 'User', 'string', '重连 Email 输出', z.string(), ''),
   field('channelo.email.account.smtp.password', 'Email Output SMTP', 'Password', 'password', '重连 Email 输出', z.string(), ''),
   field('channelo.email.account.smtp.from', 'Email Output SMTP', 'From', 'string', '重连 Email 输出', z.string(), ''),
-  field('channelo.nfircoThread.enabled', 'Nfirco Thread Output', 'Enabled', 'boolean', '重连 Nfirco Thread 输出', z.boolean(), false),
-  field('channelo.nfircoThread.baseUrl', 'Nfirco Thread Output', 'Base URL', 'string', '重连 Nfirco Thread 输出', z.string(), ''),
-  field('channelo.nfircoThread.account', 'Nfirco Thread Output', 'Account', 'string', '重连 Nfirco Thread 输出', z.string(), ''),
-  field('channelo.nfircoThread.password', 'Nfirco Thread Output', 'Password', 'password', '重连 Nfirco Thread 输出', z.string(), '')
+  field('channelo.nfirco.enabled', 'Nfirco Thread Output', 'Enabled', 'boolean', '重连 Nfirco Thread 输出', z.boolean(), false),
+  field('channelo.nfirco.baseUrl', 'Nfirco Thread Output', 'Base URL', 'string', '重连 Nfirco Thread 输出', z.string(), ''),
+  field('channelo.nfirco.account', 'Nfirco Thread Output', 'Account', 'string', '重连 Nfirco Thread 输出', z.string(), ''),
+  field('channelo.nfirco.password', 'Nfirco Thread Output', 'Password', 'password', '重连 Nfirco Thread 输出', z.string(), '')
 ]
 
 export const configFieldDescriptors: ConfigFieldDescriptor[] = configFields.map(({ path, group, label, type, apply }) => ({
@@ -231,12 +231,12 @@ export function validateCodexioConfig(config: CodexioConfig): void {
     requireValue(issues, email.account.imap.user, 'channeli.email.account.imap.user is required')
     requireValue(issues, email.account.imap.password, 'channeli.email.account.imap.password is required')
   }
-  if (config.channeli.nfircoThread?.enabled) {
-    const nfircoThread = config.channeli.nfircoThread
-    requireValue(issues, nfircoThread.baseUrl, 'channeli.nfircoThread.baseUrl is required')
-    requireValue(issues, nfircoThread.account, 'channeli.nfircoThread.account is required')
-    requireValue(issues, nfircoThread.password, 'channeli.nfircoThread.password is required')
-    requireValue(issues, nfircoThread.categoryUuid, 'channeli.nfircoThread.categoryUuid is required')
+  if (config.channeli.nfirco?.enabled) {
+    const nfirco = config.channeli.nfirco
+    requireValue(issues, nfirco.baseUrl, 'channeli.nfirco.baseUrl is required')
+    requireValue(issues, nfirco.account, 'channeli.nfirco.account is required')
+    requireValue(issues, nfirco.password, 'channeli.nfirco.password is required')
+    requireValue(issues, nfirco.section, 'channeli.nfirco.section is required')
   }
   if (config.channelo.email?.enabled) {
     const email = config.channelo.email
@@ -245,11 +245,11 @@ export function validateCodexioConfig(config: CodexioConfig): void {
     requireValue(issues, email.account.smtp.user, 'channelo.email.account.smtp.user is required')
     requireValue(issues, email.account.smtp.password, 'channelo.email.account.smtp.password is required')
   }
-  if (config.channelo.nfircoThread?.enabled) {
-    const nfircoThread = config.channelo.nfircoThread
-    requireValue(issues, nfircoThread.baseUrl, 'channelo.nfircoThread.baseUrl is required')
-    requireValue(issues, nfircoThread.account, 'channelo.nfircoThread.account is required')
-    requireValue(issues, nfircoThread.password, 'channelo.nfircoThread.password is required')
+  if (config.channelo.nfirco?.enabled) {
+    const nfirco = config.channelo.nfirco
+    requireValue(issues, nfirco.baseUrl, 'channelo.nfirco.baseUrl is required')
+    requireValue(issues, nfirco.account, 'channelo.nfirco.account is required')
+    requireValue(issues, nfirco.password, 'channelo.nfirco.password is required')
   }
   if (issues.length > 0) {
     throw new Error([

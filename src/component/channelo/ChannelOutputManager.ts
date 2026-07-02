@@ -17,7 +17,7 @@ const inputOutputTypes = new Set<string>([
   'web',
   'feishu',
   'email',
-  'nfircoThread'
+  'nfirco'
 ])
 
 @injectable()
@@ -36,14 +36,14 @@ export class ChannelOutputManager {
     @inject(FeishuChannelOutput) feishu: FeishuChannelOutput,
     @inject(FeishuWebhookChannelOutput) feishuWebhook: FeishuWebhookChannelOutput,
     @inject(EmailChannelOutput) email: EmailChannelOutput,
-    @inject(NfircoThreadOutput) nfircoThread: NfircoThreadOutput
+    @inject(NfircoThreadOutput) nfirco: NfircoThreadOutput
   ) {
     this.availableOutputs = [
       web,
       feishu,
       feishuWebhook,
       email,
-      nfircoThread
+      nfirco
     ]
   }
 

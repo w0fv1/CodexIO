@@ -9,12 +9,12 @@ import { Result } from '../../value/Result.js'
 import { createNfircoThreadMessage, normalizeNfircoThreadCredentials } from '../channel/NfircoThreadClient.js'
 import { ChannelOutput, ChannelOutputContext } from './ChannelOutput.js'
 
-type NfircoThreadOutputConfig = CodexioConfig['channelo']['nfircoThread']
+type NfircoOutputConfig = CodexioConfig['channelo']['nfirco']
 
 @injectable()
 export class NfircoThreadOutput implements ChannelOutput {
-  readonly type = 'nfircoThread'
-  private config?: NfircoThreadOutputConfig
+  readonly type = 'nfirco'
+  private config?: NfircoOutputConfig
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
@@ -22,7 +22,7 @@ export class NfircoThreadOutput implements ChannelOutput {
   ) {}
 
   async start(): Promise<boolean> {
-    this.config = await this.configer.get('channelo.nfircoThread')
+    this.config = await this.configer.get('channelo.nfirco')
     if (!this.config?.enabled) {
       return false
     }
@@ -31,7 +31,7 @@ export class NfircoThreadOutput implements ChannelOutput {
   }
 
   async send(message: Message, context?: ChannelOutputContext): Promise<Result<void>> {
-    if (context?.inputType === 'nfircoThread' && message.role === 'user') {
+    if (context?.inputType === 'nfirco' && message.role === 'user') {
       return Result.successVoid()
     }
     if (!this.config?.enabled) {
@@ -70,6 +70,6 @@ export class NfircoThreadOutput implements ChannelOutput {
 
   private findThreadUuid(ioThreadId: string): string | undefined {
     const threads = this.ioThreadIdManager.getPlatformThreadId(ioThreadId)
-    return threads.find((thread) => thread.source === 'nfircoThread')?.id
+    return threads.find((thread) => thread.source === 'nfirco')?.id
   }
 }

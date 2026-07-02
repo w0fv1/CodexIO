@@ -34,8 +34,8 @@ describe('core', () => {
     expect(config.channeli.web?.enabled).toBe(true)
     expect(config.channeli.feishu?.aite).toBe(true)
     expect(config.channeli.feishu?.allowedOpenIds).toEqual([])
-    expect(config.channeli.nfircoThread?.enabled).toBe(false)
-    expect(config.channelo.nfircoThread?.enabled).toBe(false)
+    expect(config.channeli.nfirco?.enabled).toBe(false)
+    expect(config.channelo.nfirco?.enabled).toBe(false)
     expect(config.channelo.web?.enabled).toBe(true)
   })
 
@@ -44,14 +44,14 @@ describe('core', () => {
       type: 'thread.message.created',
       eventId: 'event-1',
       threadUuid: 'thread-1',
-      categoryUuid: 'category-1',
+      section: 'section-1',
       messageUuid: 'message-1',
       text: 'hello'
     })).toEqual({
       type: 'thread.message.created',
       eventId: 'event-1',
       threadUuid: 'thread-1',
-      categoryUuid: 'category-1',
+      section: 'section-1',
       messageUuid: 'message-1',
       text: 'hello'
     })
@@ -654,7 +654,7 @@ async function createRecordingChannelOutputManager(
     output('feishu') as never,
     output('feishuWebhook') as never,
     output('email') as never,
-    output('nfircoThread') as never
+    output('nfirco') as never
   )
   await manager.start()
   return manager

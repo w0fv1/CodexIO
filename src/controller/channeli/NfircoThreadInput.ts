@@ -7,60 +7,45 @@ import { Result } from '../../value/Result.js'
 import { isNfircoThreadMessageEvent, normalizeNfircoThreadCredentials, openNfircoThreadSocket, parseNfircoThreadSocketEvent } from '../../component/channel/NfircoThreadClient.js'
 import { ChannelInput, ChannelInputReceiver } from './ChannelInput.js'
 
-type NfircoThreadInputConfig = CodexioConfig['channeli']['nfircoThread']
+type NfircoInputConfig = CodexioConfig['channeli']['nfirco']
 
 @injectable()
 export class NfircoThreadInput implements ChannelInput {
-  readonly type = 'nfircoThread'
+  readonly type = 'nfirco'
   private socket?: WebSocket
   private receiver?: ChannelInputReceiver
-  private config?: NfircoThreadInputConfig
+  private config?: NfircoInputConfig
+  private reconnectTimer?: ReturnType<typeof setTimeout>
+  private stopped = true
   private handledEventIds = new Set<string>()
+  private reconnectDelayMs = 1000
 
   constructor(@inject(Configer) private readonly configer: Configer) {}
 
   async start(receiver: ChannelInputReceiver): Promise<boolean> {
-    this.config = await this.configer.get('channeli.nfircoThread')
+    this.config = await this.configer.get('channeli.nfirco')
     if (!this.config?.enabled) {
       return false
     }
     this.receiver = receiver
     this.handledEventIds.clear()
-    const credentials = normalizeNfircoThreadCredentials(this.config)
-    const categoryUuid = this.config.categoryUuid.trim()
-    await new Promise<void>((resolve, reject) => {
-      const socket = openNfircoThreadSocket(credentials)
-      this.socket = socket
-      socket.once('open', () => {
-        socket.send(JSON.stringify({
-          type: 'thread.category.subscribe',
-          categoryUuid
-        }))
-        Logger.info('nfirco thread input connected', {
-          categoryUuid
-        })
-        resolve()
+    this.stopped = false
+    await this.connect().catch((error) => {
+      Logger.warn('nfirco thread initial connect failed', {
+        message: error instanceof Error ? error.message : String(error)
       })
-      socket.once('error', reject)
-      socket.on('message', (data) => {
-        void this.receive(data.toString()).catch((error) => {
-          Logger.warn('nfirco thread message receive crashed', {
-            message: error instanceof Error ? error.message : String(error)
-          })
-        })
-      })
-      socket.on('close', (code, reason) => {
-        Logger.warn('nfirco thread input closed', {
-          code,
-          reason: reason.toString()
-        })
-      })
+      this.scheduleReconnect()
     })
     return true
   }
 
   async stop(): Promise<Result<void>> {
     Logger.info('nfirco thread input stopping')
+    this.stopped = true
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = undefined
+    }
     this.socket?.close()
     this.socket = undefined
     this.receiver = undefined
@@ -69,8 +54,88 @@ export class NfircoThreadInput implements ChannelInput {
     return Result.successVoid()
   }
 
-  private async receive(payload: string): Promise<void> {
-    const event = parseNfircoThreadSocketEvent(JSON.parse(payload))
+  private async connect(): Promise<void> {
+    const config = this.config
+    if (!config?.enabled || this.stopped) {
+      return
+    }
+    const credentials = normalizeNfircoThreadCredentials(config)
+    const section = config.section.trim()
+    await new Promise<void>((resolve, reject) => {
+      let settled = false
+      const socket = openNfircoThreadSocket(credentials)
+      this.socket = socket
+      socket.once('open', () => {
+        socket.send(JSON.stringify({
+          type: 'thread.section.subscribe',
+          section
+        }))
+      })
+      socket.once('error', (error) => {
+        Logger.warn('nfirco thread input error', {
+          message: error.message
+        })
+        if (!settled) {
+          settled = true
+          reject(error)
+        }
+      })
+      socket.on('message', (data) => {
+        try {
+          const payload = data.toString()
+          const event = parseNfircoThreadSocketEvent(JSON.parse(payload))
+          if (!settled && event?.type === 'thread.section.subscribed') {
+            settled = true
+            Logger.info('nfirco thread input connected', {
+              section
+            })
+            resolve()
+            return
+          }
+          void this.receiveEvent(event).catch((error) => {
+            Logger.warn('nfirco thread message receive crashed', {
+              message: error instanceof Error ? error.message : String(error)
+            })
+          })
+        } catch (error) {
+          Logger.warn('nfirco thread message receive crashed', {
+            message: error instanceof Error ? error.message : String(error)
+          })
+        }
+      })
+      socket.on('close', (code, reason) => {
+        Logger.warn('nfirco thread input closed', {
+          code,
+          reason: reason.toString()
+        })
+        if (!settled) {
+          settled = true
+          reject(new Error(`nfirco thread input closed before subscribed: ${code}`))
+        }
+        if (this.socket === socket) {
+          this.socket = undefined
+        }
+        this.scheduleReconnect()
+      })
+    })
+  }
+
+  private scheduleReconnect(): void {
+    if (this.stopped || !this.config?.enabled || this.reconnectTimer) {
+      return
+    }
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined
+      void this.connect().catch((error) => {
+        Logger.warn('nfirco thread reconnect failed', {
+          message: error instanceof Error ? error.message : String(error)
+        })
+        this.scheduleReconnect()
+      })
+    }, this.reconnectDelayMs)
+  }
+
+  private async receiveEvent(event: ReturnType<typeof parseNfircoThreadSocketEvent>): Promise<void> {
     if (!isNfircoThreadMessageEvent(event)) {
       return
     }
@@ -82,10 +147,10 @@ export class NfircoThreadInput implements ChannelInput {
     if (!receiver) {
       return
     }
-    const result = await receiver.receive('nfircoThread', {
+    const result = await receiver.receive('nfirco', {
       platformThreadIds: [
         {
-          source: 'nfircoThread',
+          source: 'nfirco',
           id: event.threadUuid
         }
       ],

@@ -11,7 +11,7 @@ export type NfircoThreadMessageEvent = {
   type: 'thread.message.created'
   eventId: string
   threadUuid: string
-  categoryUuid?: string
+  section?: string
   messageUuid: string
   text: string
 }
@@ -74,7 +74,7 @@ export function parseNfircoThreadSocketEvent(value: unknown): NfircoThreadSocket
     type,
     eventId: typeof record.eventId === 'string' && record.eventId.trim().length > 0 ? record.eventId.trim() : messageUuid,
     threadUuid,
-    categoryUuid: typeof record.categoryUuid === 'string' && record.categoryUuid.trim().length > 0 ? record.categoryUuid.trim() : undefined,
+    section: typeof record.section === 'string' && record.section.trim().length > 0 ? record.section.trim() : undefined,
     messageUuid,
     text
   }

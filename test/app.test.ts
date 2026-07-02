@@ -3,7 +3,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { WebSocket } from 'ws'
+import { WebSocket, WebSocketServer } from 'ws'
 import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
 import { resolveAvailableServerPort } from '../src/util/Network.js'
 import { webPageHtml } from '../src/controller/channeli/WebPage.js'
@@ -173,6 +173,112 @@ describe('server', () => {
     expect(result.data.stopping).toBe(true)
     await closed
   })
+
+  it('reconnects nfirco thread input after the socket closes', async () => {
+    const port = await resolveAvailableServerPort('127.0.0.1', 8787)
+    const httpServer = new HttpServer()
+    const wsServer = new WebSocketServer({
+      server: httpServer,
+      path: '/api/threadio/ws'
+    })
+    const sockets: WebSocket[] = []
+    let connectionCount = 0
+    wsServer.on('connection', (socket) => {
+      sockets.push(socket)
+      connectionCount += 1
+      const currentConnection = connectionCount
+      socket.on('message', (data) => {
+        const message = JSON.parse(data.toString()) as Record<string, unknown>
+        if (message.type === 'thread.section.subscribe') {
+          socket.send(JSON.stringify({
+            type: 'thread.section.subscribed',
+            section: message.section
+          }))
+          if (currentConnection === 1) {
+            setTimeout(() => {
+              socket.close()
+            }, 10)
+          }
+        }
+      })
+    })
+    httpServer.listen(port, '127.0.0.1')
+    await new Promise<void>((resolve, reject) => {
+      httpServer.once('listening', resolve)
+      httpServer.once('error', reject)
+    })
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-nfirco-input-'))
+    const configPath = join(dir, 'config.yaml')
+    await writeFile(configPath, [
+      'server:',
+      '  host: 127.0.0.1',
+      'channeli:',
+      '  nfirco:',
+      '    enabled: true',
+      `    baseUrl: http://127.0.0.1:${port}`,
+      '    account: user',
+      '    password: pass',
+      '    section: section-1',
+      'channelo:',
+      '  web:',
+      '    enabled: true'
+    ].join('\n'))
+    const input = new NfircoThreadInput(new Configer(new CodexioMetadata({
+      rootPath: testMetadata.rootPath,
+      configPath
+    })))
+    ;(input as unknown as { reconnectDelayMs: number }).reconnectDelayMs = 10
+    const received: Array<Record<string, unknown>> = []
+    await input.start({
+      receive: async (inputType, message) => {
+        received.push({
+          inputType,
+          text: message.text,
+          platformThreadId: message.platformThreadIds[0]?.id
+        })
+        return Result.success({
+          ioThreadId: 'io-thread'
+        })
+      }
+    })
+    const startedAt = Date.now()
+    while (connectionCount < 2) {
+      if (Date.now() - startedAt > 4000) {
+        throw new Error(`nfirco reconnect timeout: ${connectionCount}`)
+      }
+      await new Promise((resolve) => {
+        setTimeout(resolve, 5)
+      })
+    }
+    sockets[1].send(JSON.stringify({
+      type: 'thread.message.created',
+      eventId: 'event-1',
+      threadUuid: 'thread-1',
+      section: 'section-1',
+      messageUuid: 'message-1',
+      text: 'hello'
+    }))
+    await waitForWebSocketMessages(received, 1)
+    expect(received).toEqual([
+      {
+        inputType: 'nfirco',
+        text: 'hello',
+        platformThreadId: 'thread-1'
+      }
+    ])
+    await input.stop()
+    for (const socket of sockets) {
+      if (socket.readyState !== WebSocket.CLOSED) {
+        socket.close()
+      }
+    }
+    await new Promise<void>((resolve) => {
+      wsServer.close(() => resolve())
+    })
+    await new Promise<void>((resolve) => {
+      httpServer.close(() => resolve())
+    })
+  })
 })
 
 async function startTestServer(): Promise<{
@@ -229,8 +335,8 @@ async function createTestCodexioApp(configer: Configer): Promise<{
   const feishuOutput = new FeishuChannelOutput(configer, ioThreadIdManager)
   const emailInput = new EmailChannelInput(configer)
   const emailOutput = new EmailChannelOutput(configer)
-  const nfircoThreadInput = new NfircoThreadInput(configer)
-  const nfircoThreadOutput = new NfircoThreadOutput(configer, ioThreadIdManager)
+  const nfircoInput = new NfircoThreadInput(configer)
+  const nfircoOutput = new NfircoThreadOutput(configer, ioThreadIdManager)
   const outputManager = new ChannelOutputManager(
     configer,
     eventBus,
@@ -239,13 +345,13 @@ async function createTestCodexioApp(configer: Configer): Promise<{
     feishuOutput,
     new FeishuWebhookChannelOutput(configer),
     emailOutput,
-    nfircoThreadOutput
+    nfircoOutput
   )
   const codexClient = new CodexClient(configer, metadata)
   const codexAgent = new CodexAgent(configer, eventBus, ioThreadIdManager, codexClient, new CodexMessageStreamer(eventBus))
   const echoAgent = new EchoAgent(eventBus)
   const agentManager = new AgentManager(configer, eventBus, codexAgent, echoAgent)
-  const inputManager = new ChannelInputManager(configer, eventBus, ioThreadIdManager, new CommandExecutor(eventBus), webInput, feishuInput, emailInput, nfircoThreadInput)
+  const inputManager = new ChannelInputManager(configer, eventBus, ioThreadIdManager, new CommandExecutor(eventBus), webInput, feishuInput, emailInput, nfircoInput)
   const apiController = new CodexioApiController(configer, outputManager, fileStore, webHub, eventBus)
   await outputManager.start()
   await agentManager.start()

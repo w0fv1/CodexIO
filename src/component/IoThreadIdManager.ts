@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { injectable } from 'inversify'
 
-export type IoThreadSource = 'web' | 'feishu' | 'email' | 'nfircoThread'
+export type IoThreadSource = 'web' | 'feishu' | 'email' | 'nfirco'
 export type ChannelThreadIdValue = {
   source: IoThreadSource
   id: string

@@ -38,12 +38,12 @@ channeli:
         mailbox: INBOX
     idle: true
     pollSeconds: 30
-  nfircoThread:
+  nfirco:
     enabled: false
     baseUrl: ''
     account: ''
     password: ''
-    categoryUuid: ''
+    section: ''
 channelo:
   web:
     enabled: true
@@ -66,8 +66,8 @@ channelo:
         user: ''
         password: ''
         from: ''
-  nfircoThread:
+  nfirco:
     enabled: false
-    baseUrl: "${channeli.nfircoThread.baseUrl}"
-    account: "${channeli.nfircoThread.account}"
-    password: "${channeli.nfircoThread.password}"
+    baseUrl: "${channeli.nfirco.baseUrl}"
+    account: "${channeli.nfirco.account}"
+    password: "${channeli.nfirco.password}"

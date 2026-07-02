@@ -26,13 +26,13 @@ export class ChannelInputManager implements ChannelInputReceiver {
     @inject(WebChannelInput) web: WebChannelInput,
     @inject(FeishuChannelInput) feishu: FeishuChannelInput,
     @inject(EmailChannelInput) email: EmailChannelInput,
-    @inject(NfircoThreadInput) nfircoThread: NfircoThreadInput
+    @inject(NfircoThreadInput) nfirco: NfircoThreadInput
   ) {
     this.availableInputs = [
       web,
       feishu,
       email,
-      nfircoThread
+      nfirco
     ]
   }
 
