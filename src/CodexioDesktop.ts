@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import { setTimeout as wait } from 'node:timers/promises'
 import electron from 'electron'
 import type { NativeImage, Tray as ElectronTray } from 'electron'
+import { autoUpdater } from 'electron-updater'
 
 type ServerState = {
   pid: number
@@ -28,6 +29,7 @@ class CodexioDesktop {
   private logPath = ''
   private statePath = ''
   private serverPath = ''
+  private checkingUpdate = false
 
   async start(): Promise<void> {
     await app.whenReady()
@@ -56,6 +58,8 @@ class CodexioDesktop {
     })
     this.createTray()
     this.startServer()
+    this.configureUpdater()
+    void this.checkForUpdates()
     if (process.argv.includes('--open')) {
       void this.openChat()
     }
@@ -95,6 +99,12 @@ class CodexioDesktop {
         }
       },
       {
+        label: '检查更新',
+        click: () => {
+          void this.checkForUpdates()
+        }
+      },
+      {
         type: 'separator'
       },
       {
@@ -106,6 +116,43 @@ class CodexioDesktop {
         }
       }
     ]))
+  }
+
+  private configureUpdater(): void {
+    autoUpdater.autoDownload = true
+    autoUpdater.autoInstallOnAppQuit = true
+    autoUpdater.on('checking-for-update', () => {
+      this.log('updater checking')
+    })
+    autoUpdater.on('update-available', (info) => {
+      this.log(`updater available version=${info.version}`)
+    })
+    autoUpdater.on('update-not-available', (info) => {
+      this.log(`updater not available version=${info.version}`)
+    })
+    autoUpdater.on('download-progress', (progress) => {
+      this.log(`updater download progress=${Math.round(progress.percent)} transferred=${progress.transferred} total=${progress.total}`)
+    })
+    autoUpdater.on('update-downloaded', (info) => {
+      this.log(`updater downloaded version=${info.version}`)
+    })
+    autoUpdater.on('error', (error) => {
+      this.log(`updater error: ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
+    })
+  }
+
+  private async checkForUpdates(): Promise<void> {
+    if (!app.isPackaged || this.checkingUpdate) {
+      return
+    }
+    this.checkingUpdate = true
+    try {
+      await autoUpdater.checkForUpdates()
+    } catch (error) {
+      this.log(`updater check failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
+    } finally {
+      this.checkingUpdate = false
+    }
   }
 
   private startServer(): void {
