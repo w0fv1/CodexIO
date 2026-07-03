@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -29,9 +29,10 @@ describe('core', () => {
   it('creates channel-only default config', () => {
     const config = createDefaultConfig()
     expect(config.server.host).toBe('127.0.0.1')
+    expect(config.agents.instruction).toContain('Markdown reference')
+    expect(config.agents.instruction).toContain('previews without a file path')
+    expect(config.agents.echo.enabled).toBe(true)
     expect(config.agents.codex.bundled).toBe(true)
-    expect(config.agents.codex.instruction).toContain('Markdown reference')
-    expect(config.agents.codex.instruction).toContain('previews without a file path')
     expect(config.workspace.path).toBe('')
     expect(config.proxy.host).toBe('127.0.0.1')
     expect(config.proxy.noProxy).toBe('')
@@ -231,6 +232,20 @@ describe('core', () => {
     expect(() => validateCodexioConfig(config)).toThrow('one channelo must be enabled')
   })
 
+  it('rejects configs without enabled agents', () => {
+    const config = ConfigSchema.parse({
+      agents: {
+        echo: {
+          enabled: false
+        },
+        codex: {
+          enabled: false
+        }
+      }
+    })
+    expect(() => validateCodexioConfig(config)).toThrow('one agent must be enabled')
+  })
+
   it('keeps codex agent and workspace config fields when importing', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'codexio-config-'))
     const configPath = join(dir, 'config.yaml')
@@ -238,6 +253,9 @@ describe('core', () => {
       'server:',
       '  token: test-token',
       'agents:',
+      '  instruction: Shared instruction',
+      '  echo:',
+      '    enabled: false',
       '  codex:',
       '    enabled: true',
       '    bundled: false',
@@ -263,6 +281,8 @@ describe('core', () => {
     const exported = await configer.exportText()
     expect(exported).toContain('agents:')
     expect(exported).toContain('workspace:')
+    expect(await configer.get('agents.instruction')).toBe('Shared instruction')
+    expect(await configer.get('agents.echo.enabled')).toBe(false)
     expect(await configer.get('agents.codex.enabled')).toBe(true)
     expect(await configer.get('agents.codex.bundled')).toBe(false)
     expect(await configer.get('agents.codex.command')).toBe('codex-dev')
@@ -309,7 +329,7 @@ describe('core', () => {
       ['proxy.noProxy', 'next.firco.cn, *.firco.cn ,'],
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codex'],
-      ['agents.codex.instruction', ''],
+      ['agents.instruction', ''],
       ['agents.codex.developerInstructions', ''],
       ['agents.codex.requestTimeoutSeconds', 120]
     ])
@@ -327,6 +347,94 @@ describe('core', () => {
     ])
   })
 
+  it('uses data workspace and a filesystem codex command by default', async () => {
+    const values = new Map<string, unknown>([
+      ['agents.codex.bundled', true],
+      ['workspace.path', ''],
+      ['proxy.enabled', false],
+      ['proxy.host', '127.0.0.1'],
+      ['proxy.port', 7890],
+      ['proxy.noProxy', ''],
+      ['server.host', '127.0.0.1'],
+      ['agents.codex.command', 'codex'],
+      ['agents.instruction', ''],
+      ['agents.codex.developerInstructions', ''],
+      ['agents.codex.requestTimeoutSeconds', 120]
+    ])
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-default-workspace-'))
+    const metadata = new CodexioMetadata({
+      rootPath: testMetadata.rootPath,
+      dataPath: dir
+    })
+    const client = new CodexClient({
+      get: async (path: string) => values.get(path)
+    } as unknown as Configer, metadata)
+    const runtimeConfig = await client['readRuntimeConfig']()
+    expect(runtimeConfig.cwd).toBe(join(dir, 'workspace'))
+    expect(runtimeConfig.command).not.toContain('app.asar')
+  })
+
+  it('resolves the system codex command from known install locations', async () => {
+    const previousPath = process.env.PATH
+    const previousLocalAppData = process.env.LOCALAPPDATA
+    const previousUserProfile = process.env.USERPROFILE
+    const localAppData = await mkdtemp(join(tmpdir(), 'codexio-localappdata-'))
+    const userProfile = await mkdtemp(join(tmpdir(), 'codexio-userprofile-'))
+    const localBin = join(localAppData, 'OpenAI', 'Codex', 'bin', 'system-codex')
+    const vscodeBin = join(userProfile, '.vscode', 'extensions', 'openai.chatgpt-test', 'bin', 'windows-x86_64')
+    await mkdir(localBin, {
+      recursive: true
+    })
+    await mkdir(vscodeBin, {
+      recursive: true
+    })
+    await writeFile(join(localBin, 'codex.exe'), '')
+    await writeFile(join(vscodeBin, 'codex.exe'), '')
+    process.env.PATH = ''
+    process.env.LOCALAPPDATA = localAppData
+    process.env.USERPROFILE = userProfile
+    try {
+      const values = new Map<string, unknown>([
+        ['agents.codex.bundled', false],
+        ['workspace.path', ''],
+        ['proxy.enabled', false],
+        ['proxy.host', '127.0.0.1'],
+        ['proxy.port', 7890],
+        ['proxy.noProxy', ''],
+        ['server.host', '127.0.0.1'],
+        ['agents.codex.command', 'codex'],
+        ['agents.instruction', ''],
+        ['agents.codex.developerInstructions', ''],
+        ['agents.codex.requestTimeoutSeconds', 120]
+      ])
+      const metadata = new CodexioMetadata({
+        rootPath: testMetadata.rootPath,
+        dataPath: await mkdtemp(join(tmpdir(), 'codexio-command-resolution-'))
+      })
+      const client = new CodexClient({
+        get: async (path: string) => values.get(path)
+      } as unknown as Configer, metadata)
+      const runtimeConfig = await client['readRuntimeConfig']()
+      expect(runtimeConfig.command).toBe(join(vscodeBin, 'codex.exe'))
+    } finally {
+      if (previousPath === undefined) {
+        delete process.env.PATH
+      } else {
+        process.env.PATH = previousPath
+      }
+      if (previousLocalAppData === undefined) {
+        delete process.env.LOCALAPPDATA
+      } else {
+        process.env.LOCALAPPDATA = previousLocalAppData
+      }
+      if (previousUserProfile === undefined) {
+        delete process.env.USERPROFILE
+      } else {
+        process.env.USERPROFILE = previousUserProfile
+      }
+    }
+  })
+
   it('adds Codexio file delivery instructions to new codex threads', async () => {
     const values = new Map<string, unknown>([
       ['agents.codex.bundled', false],
@@ -337,7 +445,7 @@ describe('core', () => {
       ['proxy.noProxy', ''],
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codex'],
-      ['agents.codex.instruction', 'File rule with Markdown reference'],
+      ['agents.instruction', 'File rule with Markdown reference'],
       ['agents.codex.developerInstructions', 'Project rule'],
       ['agents.codex.requestTimeoutSeconds', 120]
     ])
@@ -381,7 +489,7 @@ describe('core', () => {
       ['proxy.noProxy', ''],
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codex'],
-      ['agents.codex.instruction', ''],
+      ['agents.instruction', ''],
       ['agents.codex.developerInstructions', ''],
       ['agents.codex.requestTimeoutSeconds', 120]
     ])
@@ -617,7 +725,15 @@ describe('core', () => {
     const echo = createRecordingAgent('echo')
     const codex = createRecordingAgent('codex')
     const manager = new AgentManager({
-      get: async (path: string) => path === 'agents.codex.enabled' ? codexEnabled : undefined,
+      get: async (path: string) => {
+        if (path === 'agents.codex.enabled') {
+          return codexEnabled
+        }
+        if (path === 'agents.echo.enabled') {
+          return true
+        }
+        return undefined
+      },
       subscribe: () => {}
     } as unknown as Configer, eventBus, codex, echo)
     await manager.start()

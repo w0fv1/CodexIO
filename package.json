@@ -1,7 +1,7 @@
 {
   "name": "codexio",
   "private": true,
-  "version": "0.6.2",
+  "version": "0.6.7",
   "description": "Thin Electron tray wrapper for the Codexio local channel bridge.",
   "author": "w0fv1",
   "type": "module",
@@ -22,6 +22,7 @@
     "productName": "Codexio",
     "asar": true,
     "files": [
+      "assets/**/*",
       "dist/**/*",
       "package.json",
       "README.md",
@@ -31,6 +32,7 @@
       "output": "release-portable"
     },
     "win": {
+      "icon": "assets/icon.ico",
       "target": [
         {
           "target": "zip",

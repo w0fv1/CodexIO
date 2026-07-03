@@ -13,6 +13,7 @@ type ServerState = {
 }
 
 const { app, Menu, nativeImage, shell, Tray } = electron
+const iconPath = 'assets/icon.png'
 
 class CodexioDesktop {
   private tray?: ElectronTray
@@ -31,6 +32,7 @@ class CodexioDesktop {
   async start(): Promise<void> {
     await app.whenReady()
     this.appRoot = app.getAppPath()
+    app.setAppUserModelId('dev.w0fv1.codexio')
     this.dataRoot = app.isPackaged ? join(dirname(process.execPath), 'data') : app.getPath('userData')
     this.configPath = join(this.dataRoot, 'config.yaml')
     this.logPath = join(this.dataRoot, 'log', 'desktop.log')
@@ -64,7 +66,7 @@ class CodexioDesktop {
   }
 
   private createTray(): void {
-    this.tray = new Tray(createTrayIcon())
+    this.tray = new Tray(createTrayIcon(this.appRoot))
     this.tray.setToolTip('Codexio')
     this.tray.on('double-click', () => {
       void this.openChat()
@@ -214,11 +216,8 @@ class CodexioDesktop {
   }
 }
 
-function createTrayIcon(): NativeImage {
-  return nativeImage.createFromDataURL([
-    'data:image/svg+xml;charset=utf-8,',
-    encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" rx="14" fill="#020617"/><text x="32" y="42" text-anchor="middle" font-family="Arial, sans-serif" font-size="32" font-weight="700" fill="#fff">C</text></svg>')
-  ].join(''))
+function createTrayIcon(appRoot: string): NativeImage {
+  return nativeImage.createFromPath(join(appRoot, iconPath))
 }
 
 void new CodexioDesktop().start().catch((error) => {

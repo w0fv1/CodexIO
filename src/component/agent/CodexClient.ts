@@ -1,6 +1,10 @@
 import { EventEmitter } from 'node:events'
+import { existsSync, readdirSync, statSync } from 'node:fs'
+import { mkdir } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { createInterface } from 'node:readline'
+import { delimiter } from 'node:path'
+import { dirname, extname, isAbsolute, join } from 'node:path'
 import { inject, injectable } from 'inversify'
 import { execa } from 'execa'
 import { Configer } from '../Configer.js'
@@ -11,7 +15,8 @@ import { resolveUserPath } from '../../util/Path.js'
 import { MessageFile } from '../../value/Message.js'
 import { Result } from '../../value/Result.js'
 
-const codexEntryPath = createRequire(import.meta.url).resolve('@openai/codex/bin/codex.js')
+const bundledCodexRelativePath = join('resources', 'app.asar.unpacked', 'node_modules', '@openai', 'codex-win32-x64', 'vendor', 'x86_64-pc-windows-msvc', 'bin', 'codex.exe')
+const require = createRequire(import.meta.url)
 
 type RpcMessage = {
   id?: number
@@ -89,6 +94,11 @@ type CodexChildExit = {
   stderr?: unknown
 }
 
+type CodexCommand = {
+  command: string
+  args: string[]
+}
+
 @injectable()
 export class CodexClient {
   private readonly events = new EventEmitter()
@@ -123,6 +133,9 @@ export class CodexClient {
     }
     try {
       const config = await this.readRuntimeConfig()
+      await mkdir(config.cwd, {
+        recursive: true
+      })
       const env = createProcessEnv(
         config.codexHomePath,
         config.codexHomePath ? `${config.codexHomePath}/config.toml` : undefined,
@@ -660,32 +673,19 @@ export class CodexClient {
       this.configer.get('proxy.noProxy'),
       this.configer.get('server.host'),
       this.configer.get('agents.codex.command'),
-      this.configer.get('agents.codex.instruction'),
+      this.configer.get('agents.instruction'),
       this.configer.get('agents.codex.developerInstructions'),
       this.configer.get('agents.codex.requestTimeoutSeconds')
     ])
     const command = bundled
-      ? {
-          command: process.execPath,
-          args: [
-            codexEntryPath,
-            'app-server',
-            '--stdio'
-          ]
-        }
-      : {
-          command: codexCommand.trim().length > 0 ? codexCommand.trim() : 'codex',
-          args: [
-            'app-server',
-            '--stdio'
-          ]
-        }
+      ? bundledCodexCommand()
+      : externalCodexCommand(codexCommand)
     const cwd = resolveUserPath(workspacePath)
     return {
       bundled,
       command: command.command,
       args: command.args,
-      cwd: cwd.length > 0 ? cwd : this.metadata.rootPath,
+      cwd: cwd.length > 0 ? cwd : join(this.metadata.dataPath, 'workspace'),
       codexHomePath: bundled ? this.metadata.codexHomePath : undefined,
       proxyUrl: proxyEnabled ? `http://${proxyHost}:${proxyPort}` : undefined,
       noProxyHosts: [
@@ -727,6 +727,128 @@ export class CodexClient {
       this.emitError(error)
     }
   }
+}
+
+function bundledCodexCommand(): CodexCommand {
+  const packagedPath = join(dirname(process.execPath), bundledCodexRelativePath)
+  if (existsSync(packagedPath)) {
+    return {
+      command: packagedPath,
+      args: [
+        'app-server'
+      ]
+    }
+  }
+  return {
+    command: process.execPath,
+    args: [
+      require.resolve('@openai/codex/bin/codex.js'),
+      'app-server'
+    ]
+  }
+}
+
+function externalCodexCommand(commandValue: string): CodexCommand {
+  return {
+    command: resolveExternalCommand(commandValue.trim().length > 0 ? commandValue.trim() : 'codex'),
+    args: [
+      'app-server'
+    ]
+  }
+}
+
+function resolveExternalCommand(command: string): string {
+  if (!isBareCommand(command)) {
+    return command
+  }
+  for (const directory of externalCommandDirectories(command)) {
+    for (const executableName of executableNames(command)) {
+      const executablePath = join(directory, executableName)
+      if (existsSync(executablePath)) {
+        return executablePath
+      }
+    }
+  }
+  return command
+}
+
+function isBareCommand(command: string): boolean {
+  return !isAbsolute(command) && !command.includes('/') && !command.includes('\\')
+}
+
+function executableNames(command: string): string[] {
+  if (process.platform !== 'win32' || extname(command).length > 0) {
+    return [
+      command
+    ]
+  }
+  const extensions = (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD')
+    .split(';')
+    .map((item) => item.trim().toLowerCase())
+    .filter((item) => item.length > 0)
+  return [
+    command,
+    ...extensions.map((extension) => `${command}${extension}`)
+  ]
+}
+
+function externalCommandDirectories(command: string): string[] {
+  const pathDirectories = (process.env.PATH ?? '')
+    .split(delimiter)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+  if (!['codex', 'codex.exe'].includes(command.toLowerCase())) {
+    return pathDirectories
+  }
+  return uniquePaths([
+    ...pathDirectories,
+    ...codexCliDirectories()
+  ])
+}
+
+function codexCliDirectories(): string[] {
+  return [
+    ...vscodeCodexExtensionDirectories(),
+    ...openaiCodexBinDirectories()
+  ]
+}
+
+function openaiCodexBinDirectories(): string[] {
+  const root = process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'OpenAI', 'Codex', 'bin') : ''
+  if (!root || !existsSync(root)) {
+    return []
+  }
+  return readdirSync(root, {
+    withFileTypes: true
+  })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(root, entry.name))
+    .sort((left, right) => modifiedTime(right) - modifiedTime(left))
+}
+
+function vscodeCodexExtensionDirectories(): string[] {
+  const root = process.env.USERPROFILE ? join(process.env.USERPROFILE, '.vscode', 'extensions') : ''
+  if (!root || !existsSync(root)) {
+    return []
+  }
+  return readdirSync(root, {
+    withFileTypes: true
+  })
+    .filter((entry) => entry.isDirectory() && entry.name.toLowerCase().startsWith('openai.chatgpt-'))
+    .map((entry) => join(root, entry.name, 'bin', 'windows-x86_64'))
+    .sort((left, right) => modifiedTime(right) - modifiedTime(left))
+}
+
+function modifiedTime(path: string): number {
+  try {
+    return statSync(path).mtimeMs
+  } catch {
+    return 0
+  }
+}
+
+function uniquePaths(paths: string[]): string[] {
+  return Array.from(new Set(paths))
 }
 
 function readString(value: unknown, key: string): string | null {

@@ -1,5 +1,7 @@
 import { pid } from 'node:process'
 import { Server as HttpServer } from 'node:http'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import express from 'express'
 import cors from 'cors'
 import multer from 'multer'
@@ -17,6 +19,7 @@ import { WebChannelHub } from '../component/channel/WebChannelHub.js'
 import { resolveAvailableServerPort } from '../util/Network.js'
 import { EventBus } from '../component/EventBus.js'
 import { AppEvent } from '../value/Event.js'
+import { CodexioMetadata } from '../component/CodexioMetadata.js'
 
 const FileParamsSchema = z.object({
   id: z.string().min(1)
@@ -53,7 +56,8 @@ export class CodexioApiController {
     @inject(ChannelOutputManager) private readonly outputManager: ChannelOutputManager,
     @inject(FileStore) private readonly fileStore: FileStore,
     @inject(WebChannelHub) private readonly webChannel: WebChannelHub,
-    @inject(EventBus) private readonly eventBus: EventBus
+    @inject(EventBus) private readonly eventBus: EventBus,
+    @inject(CodexioMetadata) private readonly metadata: CodexioMetadata
   ) {
   }
 
@@ -143,6 +147,15 @@ export class CodexioApiController {
 
     this.web.get('/', (_request, response) => {
       response.type('html').send(webPageHtml)
+    })
+
+    this.web.get('/icon.png', async (_request, response) => {
+      try {
+        response.type('png').send(await readFile(join(this.metadata.rootPath, 'assets', 'icon.png')))
+      } catch (error) {
+        Logger.error('api icon read failed', error)
+        response.status(404).end()
+      }
     })
 
     this.web.post('/api/files', this.upload.single('file'), async (request, response) => {

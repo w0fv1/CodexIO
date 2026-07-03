@@ -111,9 +111,13 @@ export class AgentManager {
   }
 
   private async getActiveAgent(): Promise<Agent> {
-    return await this.configer.get('agents.codex.enabled')
-      ? this.codexAgent
-      : this.echoAgent
+    if (await this.configer.get('agents.codex.enabled')) {
+      return this.codexAgent
+    }
+    if (await this.configer.get('agents.echo.enabled')) {
+      return this.echoAgent
+    }
+    throw new Error('one agent must be enabled')
   }
 
   private async ensureWorkspace(): Promise<void> {

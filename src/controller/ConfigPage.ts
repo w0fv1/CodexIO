@@ -4,6 +4,7 @@ export const configPageHtml = String.raw`
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/icon.png">
   <title>Codexio Config</title>
   <script src="https://unpkg.com/@tailwindcss/browser@4"></script>
 </head>

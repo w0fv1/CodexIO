@@ -9,11 +9,14 @@ export type CodexioConfig = {
     autoPort: boolean
   }
   agents: {
+    instruction: string
+    echo: {
+      enabled: boolean
+    }
     codex: {
       enabled: boolean
       bundled: boolean
       command: string
-      instruction: string
       developerInstructions: string
       requestTimeoutSeconds: number
     }
@@ -132,10 +135,11 @@ const configFields: ConfigField[] = [
   field('server.port', 'Server', 'Port', 'number', '重启 Codexio', positiveInt, 8787),
   field('server.token', 'Server', 'Token', 'password', '重启 Codexio', z.string(), ''),
   field('server.autoPort', 'Server', 'Auto Port', 'boolean', '重启 Codexio', z.boolean(), false),
+  field('agents.instruction', 'Agents', 'Instruction', 'string', '重启 Agent', z.string(), defaultCodexInstruction),
+  field('agents.echo.enabled', 'Echo Agent', 'Enabled', 'boolean', '重启 Echo Agent', z.boolean(), true),
   field('agents.codex.enabled', 'Codex Agent', 'Enabled', 'boolean', '重启 Codex Agent', z.boolean(), false),
   field('agents.codex.bundled', 'Codex Agent', 'Bundled', 'boolean', '重启 Codex Agent', z.boolean(), true),
   field('agents.codex.command', 'Codex Agent', 'Command', 'string', '重启 Codex Agent', z.string(), 'codex'),
-  field('agents.codex.instruction', 'Codex Agent', 'Instruction', 'string', '重启 Codex Agent', z.string(), defaultCodexInstruction),
   field('agents.codex.developerInstructions', 'Codex Agent', 'Developer Instructions', 'string', '重启 Codex Agent', z.string(), ''),
   field('agents.codex.requestTimeoutSeconds', 'Codex Agent', 'Request Timeout Seconds', 'number', '重启 Codex Agent', positiveInt, 120),
   field('workspace.path', 'Workspace', 'Path', 'string', '重启 Codex Agent', workspacePath, ''),
@@ -212,6 +216,13 @@ export function validateCodexioConfig(config: CodexioConfig): void {
   const issues: string[] = []
   if (config.server.token.trim().length === 0) {
     issues.push('server.token is required')
+  }
+  const enabledAgents = [
+    config.agents.codex,
+    config.agents.echo
+  ].filter((agentConfig) => agentConfig.enabled)
+  if (enabledAgents.length === 0) {
+    issues.push('one agent must be enabled')
   }
   const enabledChanneli = Object.entries(config.channeli).filter(([, channelConfig]) => channelConfig?.enabled)
   const enabledChannelo = Object.entries(config.channelo).filter(([, channelConfig]) => channelConfig?.enabled)

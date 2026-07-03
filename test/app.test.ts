@@ -537,7 +537,7 @@ async function createTestCodexioApp(configer: Configer): Promise<{
   const echoAgent = new EchoAgent(eventBus)
   const agentManager = new AgentManager(configer, eventBus, codexAgent, echoAgent)
   const inputManager = new ChannelInputManager(configer, eventBus, ioThreadIdManager, new CommandExecutor(eventBus), webInput, feishuInput, emailInput, nfircoInput)
-  const apiController = new CodexioApiController(configer, outputManager, fileStore, webHub, eventBus)
+  const apiController = new CodexioApiController(configer, outputManager, fileStore, webHub, eventBus, metadata)
   await outputManager.start()
   await agentManager.start()
   await inputManager.start()
