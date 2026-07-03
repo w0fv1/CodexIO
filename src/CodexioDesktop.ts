@@ -1,6 +1,6 @@
 import { spawn, ChildProcess } from 'node:child_process'
 import { appendFileSync, existsSync } from 'node:fs'
-import { mkdir, readFile } from 'node:fs/promises'
+import { mkdir, readFile, rm } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { setTimeout as wait } from 'node:timers/promises'
 import electron from 'electron'
@@ -13,9 +13,10 @@ type ServerState = {
   port: number
 }
 
-const { app, Menu, nativeImage, shell, Tray } = electron
+const { app, Menu, nativeImage, shell, Tray, Notification } = electron
 const { autoUpdater } = electronUpdater
 const iconPath = 'assets/icon.png'
+type UpdateCheckSource = 'automatic' | 'manual'
 
 class CodexioDesktop {
   private tray?: ElectronTray
@@ -31,6 +32,9 @@ class CodexioDesktop {
   private statePath = ''
   private serverPath = ''
   private checkingUpdate = false
+  private updateCheckSource: UpdateCheckSource = 'automatic'
+  private updateDownloadStarted = false
+  private serverFailureNotified = false
 
   async start(): Promise<void> {
     await app.whenReady()
@@ -57,8 +61,12 @@ class CodexioDesktop {
     await mkdir(dirname(this.configPath), {
       recursive: true
     })
+    await rm(this.statePath, {
+      force: true
+    })
     this.createTray()
     this.startServer()
+    void this.notifyServerReady('启动成功')
     this.configureUpdater()
     void this.checkForUpdates()
     if (process.argv.includes('--open')) {
@@ -100,9 +108,9 @@ class CodexioDesktop {
         }
       },
       {
-        label: '检查更新',
+        label: '更新',
         click: () => {
-          void this.checkForUpdates()
+          void this.checkForUpdates('manual')
         }
       },
       {
@@ -124,33 +132,56 @@ class CodexioDesktop {
     autoUpdater.autoInstallOnAppQuit = true
     autoUpdater.on('checking-for-update', () => {
       this.log('updater checking')
+      if (this.updateCheckSource === 'manual') {
+        this.notify('Codexio 更新', '正在检查更新...')
+      }
     })
     autoUpdater.on('update-available', (info) => {
       this.log(`updater available version=${info.version}`)
+      this.updateDownloadStarted = true
+      this.notify('Codexio 更新', `发现新版本 ${info.version}，正在下载。`)
     })
     autoUpdater.on('update-not-available', (info) => {
       this.log(`updater not available version=${info.version}`)
+      if (this.updateCheckSource === 'manual') {
+        this.notify('Codexio 更新', '当前已是最新版本。')
+      }
     })
     autoUpdater.on('download-progress', (progress) => {
       this.log(`updater download progress=${Math.round(progress.percent)} transferred=${progress.transferred} total=${progress.total}`)
     })
     autoUpdater.on('update-downloaded', (info) => {
       this.log(`updater downloaded version=${info.version}`)
+      this.notify('Codexio 更新已下载', `版本 ${info.version} 已准备好，退出后会自动安装。点击立即重启安装。`, () => {
+        autoUpdater.quitAndInstall()
+      })
+      this.updateDownloadStarted = false
     })
     autoUpdater.on('error', (error) => {
       this.log(`updater error: ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
+      if (this.updateCheckSource === 'manual' || this.updateDownloadStarted) {
+        this.notify('Codexio 更新失败', normalizeErrorMessage(error))
+      }
+      this.updateDownloadStarted = false
     })
   }
 
-  private async checkForUpdates(): Promise<void> {
+  private async checkForUpdates(source: UpdateCheckSource = 'automatic'): Promise<void> {
     if (!app.isPackaged || this.checkingUpdate) {
+      if (source === 'manual') {
+        this.notify('Codexio 更新', app.isPackaged ? '正在检查更新...' : '开发模式不检查更新。')
+      }
       return
     }
     this.checkingUpdate = true
+    this.updateCheckSource = source
     try {
       await autoUpdater.checkForUpdates()
     } catch (error) {
       this.log(`updater check failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
+      if (source === 'manual') {
+        this.notify('Codexio 更新失败', normalizeErrorMessage(error))
+      }
     } finally {
       this.checkingUpdate = false
     }
@@ -189,6 +220,9 @@ class CodexioDesktop {
     })
     this.server.once('error', (error) => {
       this.log(`server spawn failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
+      this.notify('Codexio 服务启动失败', normalizeErrorMessage(error), () => {
+        void shell.openPath(dirname(this.logPath))
+      })
     })
     this.server.once('exit', (code, signal) => {
       this.log(`server exited code=${code ?? ''} signal=${signal ?? ''}`)
@@ -216,6 +250,7 @@ class CodexioDesktop {
     this.serverFailures = 0
     this.restarting = false
     this.startServer()
+    void this.notifyServerReady('重启成功')
   }
 
   private async scheduleServerRestart(): Promise<void> {
@@ -223,9 +258,16 @@ class CodexioDesktop {
     this.serverFailures = uptime > 30_000 ? 0 : this.serverFailures + 1
     const delay = Math.min(30_000, 1000 * 2 ** Math.max(0, this.serverFailures - 1))
     this.log(`server restarting in ${delay}ms`)
+    if (this.serverFailures >= 3 && !this.serverFailureNotified) {
+      this.serverFailureNotified = true
+      this.notify('Codexio 服务反复退出', '请查看日志或检查配置。点击打开日志目录。', () => {
+        void shell.openPath(dirname(this.logPath))
+      })
+    }
     await wait(delay)
     if (!this.quitting && !this.restarting) {
       this.startServer()
+      void this.notifyServerReady('服务已恢复')
     }
   }
 
@@ -256,6 +298,36 @@ class CodexioDesktop {
     throw new Error('Codexio server did not start')
   }
 
+  private async notifyServerReady(message: string): Promise<void> {
+    try {
+      const state = await this.readServerState()
+      this.serverFailureNotified = false
+      this.log(`server ready pid=${state.pid} url=http://${state.host}:${state.port}`)
+      this.notify('Codexio ' + message, `服务运行在 ${state.host}:${state.port}`)
+    } catch (error) {
+      this.log(`server ready wait failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
+      this.notify('Codexio 服务启动失败', normalizeErrorMessage(error), () => {
+        void shell.openPath(dirname(this.logPath))
+      })
+    }
+  }
+
+  private notify(title: string, body: string, onClick?: () => void): void {
+    if (!Notification.isSupported()) {
+      this.log(`notification unsupported title=${title} body=${body}`)
+      return
+    }
+    const notification = new Notification({
+      title,
+      body,
+      icon: join(this.appRoot, iconPath)
+    })
+    if (onClick) {
+      notification.on('click', onClick)
+    }
+    notification.show()
+  }
+
   private log(message: string): void {
     try {
       appendFileSync(this.logPath, `${new Date().toISOString()} ${message}\n`, 'utf8')
@@ -266,6 +338,13 @@ class CodexioDesktop {
 
 function createTrayIcon(appRoot: string): NativeImage {
   return nativeImage.createFromPath(join(appRoot, iconPath))
+}
+
+function normalizeErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message
+  }
+  return String(error)
 }
 
 void new CodexioDesktop().start().catch((error) => {
