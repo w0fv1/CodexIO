@@ -16,7 +16,17 @@ export type NfircoThreadMessageEvent = {
   text: string
 }
 
-export type NfircoThreadSocketEvent = NfircoThreadMessageEvent | {
+export type NfircoThreadCreatedEvent = {
+  type: 'thread.created'
+  eventId: string
+  threadUuid: string
+  section?: string
+  text: string
+}
+
+export type NfircoThreadInputEvent = NfircoThreadMessageEvent | NfircoThreadCreatedEvent
+
+export type NfircoThreadSocketEvent = NfircoThreadInputEvent | {
   type: string
   [key: string]: unknown
 }
@@ -58,16 +68,28 @@ export function parseNfircoThreadSocketEvent(value: unknown): NfircoThreadSocket
   if (type.length === 0) {
     return undefined
   }
-  if (type !== 'thread.message.created') {
+  if (type !== 'thread.message.created' && type !== 'thread.created') {
     return {
       type,
       ...record
     }
   }
   const threadUuid = typeof record.threadUuid === 'string' ? record.threadUuid.trim() : ''
-  const messageUuid = typeof record.messageUuid === 'string' ? record.messageUuid.trim() : ''
   const text = typeof record.text === 'string' ? record.text : ''
-  if (threadUuid.length === 0 || messageUuid.length === 0 || text.trim().length === 0) {
+  if (threadUuid.length === 0 || text.trim().length === 0) {
+    return undefined
+  }
+  if (type === 'thread.created') {
+    return {
+      type,
+      eventId: typeof record.eventId === 'string' && record.eventId.trim().length > 0 ? record.eventId.trim() : threadUuid,
+      threadUuid,
+      section: typeof record.section === 'string' && record.section.trim().length > 0 ? record.section.trim() : undefined,
+      text
+    }
+  }
+  const messageUuid = typeof record.messageUuid === 'string' ? record.messageUuid.trim() : ''
+  if (messageUuid.length === 0) {
     return undefined
   }
   return {
@@ -80,8 +102,8 @@ export function parseNfircoThreadSocketEvent(value: unknown): NfircoThreadSocket
   }
 }
 
-export function isNfircoThreadMessageEvent(event: NfircoThreadSocketEvent | undefined): event is NfircoThreadMessageEvent {
-  return event !== undefined && event.type === 'thread.message.created'
+export function isNfircoThreadInputEvent(event: NfircoThreadSocketEvent | undefined): event is NfircoThreadInputEvent {
+  return event !== undefined && (event.type === 'thread.message.created' || event.type === 'thread.created')
 }
 
 export function normalizeNfircoThreadCredentials(credentials: NfircoThreadCredentials): NfircoThreadCredentials {

@@ -55,6 +55,19 @@ describe('core', () => {
       messageUuid: 'message-1',
       text: 'hello'
     })
+    expect(parseNfircoThreadSocketEvent({
+      type: 'thread.created',
+      eventId: 'thread-2',
+      threadUuid: 'thread-2',
+      section: 'section-1',
+      text: 'thread body'
+    })).toEqual({
+      type: 'thread.created',
+      eventId: 'thread-2',
+      threadUuid: 'thread-2',
+      section: 'section-1',
+      text: 'thread body'
+    })
   })
 
   it('controls whether feishu group messages require aite', () => {

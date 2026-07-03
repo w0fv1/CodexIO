@@ -4,7 +4,7 @@ import { Configer } from '../../component/Configer.js'
 import { Logger } from '../../component/Logger.js'
 import { CodexioConfig } from '../../value/ConfigDefinition.js'
 import { Result } from '../../value/Result.js'
-import { isNfircoThreadMessageEvent, normalizeNfircoThreadCredentials, openNfircoThreadSocket, parseNfircoThreadSocketEvent } from '../../component/channel/NfircoThreadClient.js'
+import { isNfircoThreadInputEvent, normalizeNfircoThreadCredentials, openNfircoThreadSocket, parseNfircoThreadSocketEvent } from '../../component/channel/NfircoThreadClient.js'
 import { ChannelInput, ChannelInputReceiver } from './ChannelInput.js'
 
 type NfircoInputConfig = CodexioConfig['channeli']['nfirco']
@@ -136,7 +136,7 @@ export class NfircoThreadInput implements ChannelInput {
   }
 
   private async receiveEvent(event: ReturnType<typeof parseNfircoThreadSocketEvent>): Promise<void> {
-    if (!isNfircoThreadMessageEvent(event)) {
+    if (!isNfircoThreadInputEvent(event)) {
       return
     }
     if (this.handledEventIds.has(event.eventId)) {

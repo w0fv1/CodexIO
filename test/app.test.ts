@@ -258,12 +258,24 @@ describe('server', () => {
       messageUuid: 'message-1',
       text: 'hello'
     }))
-    await waitForWebSocketMessages(received, 1)
+    sockets[1].send(JSON.stringify({
+      type: 'thread.created',
+      eventId: 'thread-2',
+      threadUuid: 'thread-2',
+      section: 'section-1',
+      text: 'thread body'
+    }))
+    await waitForWebSocketMessages(received, 2)
     expect(received).toEqual([
       {
         inputType: 'nfirco',
         text: 'hello',
         platformThreadId: 'thread-1'
+      },
+      {
+        inputType: 'nfirco',
+        text: 'thread body',
+        platformThreadId: 'thread-2'
       }
     ])
     await input.stop()
