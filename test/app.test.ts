@@ -49,6 +49,39 @@ describe('server', () => {
     expect(webPageHtml).not.toContain('replaceMessages')
   })
 
+  it('returns all described config fields to the config page', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    const response = await fetch(`${baseUrl}/api/config`)
+    const result = await response.json() as {
+      isFailed: boolean
+      data: {
+        config: Record<string, unknown>
+        descriptor: Array<{
+          path: string
+        }>
+      }
+    }
+    expect(result.isFailed).toBe(false)
+    expect(Object.keys(result.data.config).sort()).toEqual([
+      'agents',
+      'channeli',
+      'channelo',
+      'proxy',
+      'server',
+      'workspace'
+    ])
+    for (const field of result.data.descriptor) {
+      const value = field.path.split('.').reduce<unknown>((current, key) => {
+        if (!current || typeof current !== 'object' || Array.isArray(current)) {
+          return undefined
+        }
+        return (current as Record<string, unknown>)[key]
+      }, result.data.config)
+      expect(value).not.toBeUndefined()
+    }
+    await closeTestServer(listener)
+  })
+
   it('shows web user input before echo output', async () => {
     const { baseUrl, listener } = await startTestServer()
     const socket = await openWebSocket(baseUrl)

@@ -215,6 +215,9 @@ export class CodexioApiController {
         response.json(Result.success({
           config: {
             server: await this.configer.get('server'),
+            agents: await this.configer.get('agents'),
+            workspace: await this.configer.get('workspace'),
+            proxy: await this.configer.get('proxy'),
             channeli: await this.configer.get('channeli'),
             channelo: await this.configer.get('channelo')
           },

@@ -21,6 +21,7 @@ import { shouldReceiveFeishuMessage, shouldReceiveFeishuSender } from '../src/va
 import { parseMarkdownAttachmentReferences, renderMarkdownHtml } from '../src/util/Markdown.js'
 import { resolveUserPath } from '../src/util/Path.js'
 import { parseNfircoThreadSocketEvent } from '../src/component/channel/NfircoThreadClient.js'
+import { applyRuntimeConfig } from '../src/CodexioApplication.js'
 
 const testMetadata = new CodexioMetadata()
 
@@ -270,6 +271,32 @@ describe('core', () => {
     expect(await configer.get('proxy.noProxy')).toBe('next.firco.cn,*.firco.cn')
     expect(await configer.get('channeli.web.enabled')).toBe(true)
     expect(await configer.get('channelo.web.enabled')).toBe(true)
+  })
+
+  it('enables auto port from runtime args', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-runtime-config-'))
+    const configPath = join(dir, 'config.yaml')
+    await writeFile(configPath, [
+      'server:',
+      '  token: test-token',
+      '  autoPort: false',
+      'channeli:',
+      '  web:',
+      '    enabled: true',
+      'channelo:',
+      '  web:',
+      '    enabled: true'
+    ].join('\n'))
+    const configer = new Configer(new CodexioMetadata({
+      rootPath: testMetadata.rootPath,
+      configPath
+    }))
+    await applyRuntimeConfig(configer, [
+      'node',
+      'CodexioApplication.js',
+      '--auto-port'
+    ])
+    expect(await configer.get('server.autoPort')).toBe(true)
   })
 
   it('passes configured no proxy hosts to the codex process', async () => {

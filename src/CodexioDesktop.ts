@@ -31,7 +31,7 @@ class CodexioDesktop {
   async start(): Promise<void> {
     await app.whenReady()
     this.appRoot = app.getAppPath()
-    this.dataRoot = app.getPath('userData')
+    this.dataRoot = app.isPackaged ? join(dirname(process.execPath), 'data') : app.getPath('userData')
     this.configPath = join(this.dataRoot, 'config.yaml')
     this.logPath = join(this.dataRoot, 'log', 'desktop.log')
     this.statePath = join(this.dataRoot, 'state', 'server.json')
@@ -48,10 +48,6 @@ class CodexioDesktop {
     app.on('second-instance', () => {
       this.log('second instance requested')
       void this.openChat()
-    })
-    app.setLoginItemSettings({
-      openAtLogin: true,
-      path: process.execPath
     })
     await mkdir(dirname(this.configPath), {
       recursive: true
@@ -123,7 +119,8 @@ class CodexioDesktop {
     this.server = spawn(process.execPath, [
       this.serverPath,
       '--config',
-      this.configPath
+      this.configPath,
+      '--auto-port'
     ], {
       cwd: dirname(process.execPath),
       env,

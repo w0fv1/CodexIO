@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import 'reflect-metadata'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import { pid } from 'node:process'
+import { fileURLToPath } from 'node:url'
 import { Container, inject, injectable } from 'inversify'
 import { ChannelInputManager } from './controller/channeli/ChannelInputManager.js'
 import { ChannelOutputManager } from './component/channelo/ChannelOutputManager.js'
@@ -35,6 +36,7 @@ export class CodexioApplication {
 
   async start(): Promise<void> {
     await this.configer.init(false)
+    await applyRuntimeConfig(this.configer, process.argv)
     await this.configer.validate()
     Logger.configure({
       logDir: this.codexioMetadata.logPath
@@ -103,6 +105,12 @@ export class CodexioApplication {
   }
 }
 
+export async function applyRuntimeConfig(configer: Configer, args: string[]): Promise<void> {
+  if (args.includes('--auto-port')) {
+    await configer.set('server.autoPort', true)
+  }
+}
+
 const container = new Container({
   autobind: true,
   defaultScope: 'Singleton'
@@ -112,7 +120,13 @@ container.bind(CodexioMetadata).toConstantValue(new CodexioMetadata({
 }))
 const application = container.get(CodexioApplication)
 
-void application.start().catch((error) => {
-  Logger.error('codexio server failed', error)
-  process.exitCode = 1
-})
+if (isEntrypoint()) {
+  void application.start().catch((error) => {
+    Logger.error('codexio server failed', error)
+    process.exitCode = 1
+  })
+}
+
+function isEntrypoint(): boolean {
+  return process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+}

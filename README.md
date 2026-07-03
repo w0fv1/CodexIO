@@ -9,7 +9,7 @@ pnpm dev
 
 开发预览启动后打开 `http://127.0.0.1:8787`。Web 页面、WebSocket 和内部 API 共用同一个 Codexio HTTP 服务。
 
-正式安装包通过 Electron 托盘运行，没有内置主窗口。启动 Codexio 后会出现在系统托盘，双击托盘图标会用默认浏览器打开对话页面。
+正式发布物是 Windows 便携 zip。解压后运行 `Codexio.exe`，Codexio 会出现在系统托盘，双击托盘图标会用默认浏览器打开对话页面。配置、运行状态和日志保存在解压目录的 `data` 文件夹。
 
 ```cmd
 pnpm package:windows
