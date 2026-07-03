@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import { setTimeout as wait } from 'node:timers/promises'
 import electron from 'electron'
 import type { NativeImage, Tray as ElectronTray } from 'electron'
-import { autoUpdater } from 'electron-updater'
+import electronUpdater from 'electron-updater'
 
 type ServerState = {
   pid: number
@@ -14,6 +14,7 @@ type ServerState = {
 }
 
 const { app, Menu, nativeImage, shell, Tray } = electron
+const { autoUpdater } = electronUpdater
 const iconPath = 'assets/icon.png'
 
 class CodexioDesktop {
