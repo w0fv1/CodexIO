@@ -2,7 +2,9 @@ import { inject, injectable } from 'inversify'
 import { WebSocket } from 'ws'
 import { Configer } from '../../component/Configer.js'
 import { Logger } from '../../component/Logger.js'
+import { FileStore } from '../../component/FileStore.js'
 import { CodexioConfig } from '../../value/ConfigDefinition.js'
+import { MessageFile } from '../../value/Message.js'
 import { Result } from '../../value/Result.js'
 import { isNfircoThreadInputEvent, normalizeNfircoThreadCredentials, openNfircoThreadSocket, parseNfircoThreadSocketEvent } from '../../component/channel/NfircoThreadClient.js'
 import { ChannelInput, ChannelInputReceiver } from './ChannelInput.js'
@@ -19,8 +21,12 @@ export class NfircoThreadInput implements ChannelInput {
   private stopped = true
   private handledEventIds = new Set<string>()
   private reconnectDelayMs = 1000
+  private receiveQueue = Promise.resolve()
 
-  constructor(@inject(Configer) private readonly configer: Configer) {}
+  constructor(
+    @inject(Configer) private readonly configer: Configer,
+    @inject(FileStore) private readonly fileStore: FileStore
+  ) {}
 
   async start(receiver: ChannelInputReceiver): Promise<boolean> {
     this.config = await this.configer.get('channeli.nfirco')
@@ -51,6 +57,7 @@ export class NfircoThreadInput implements ChannelInput {
     this.receiver = undefined
     this.config = undefined
     this.handledEventIds.clear()
+    this.receiveQueue = Promise.resolve()
     return Result.successVoid()
   }
 
@@ -92,7 +99,7 @@ export class NfircoThreadInput implements ChannelInput {
             resolve()
             return
           }
-          void this.receiveEvent(event).catch((error) => {
+          this.receiveQueue = this.receiveQueue.then(() => this.receiveEvent(event)).catch((error) => {
             Logger.warn('nfirco thread message receive crashed', {
               message: error instanceof Error ? error.message : String(error)
             })
@@ -147,6 +154,31 @@ export class NfircoThreadInput implements ChannelInput {
     if (!receiver) {
       return
     }
+    const files: MessageFile[] = []
+    for (const attachment of [...event.files, ...event.images]) {
+      try {
+        const response = await fetch(attachment.url)
+        if (!response.ok) {
+          Logger.warn('nfirco thread file download failed', {
+            url: attachment.url,
+            status: response.status
+          })
+          continue
+        }
+        const buffer = Buffer.from(await response.arrayBuffer())
+        const file = await this.fileStore.importBuffer({
+          buffer,
+          name: attachment.name,
+          mime: attachment.mime
+        })
+        files.push(file)
+      } catch (error) {
+        Logger.warn('nfirco thread file import failed', {
+          url: attachment.url,
+          message: error instanceof Error ? error.message : String(error)
+        })
+      }
+    }
     const result = await receiver.receive('nfirco', {
       platformThreadIds: [
         {
@@ -154,7 +186,8 @@ export class NfircoThreadInput implements ChannelInput {
           id: event.threadUuid
         }
       ],
-      text: event.text
+      text: event.text,
+      files
     })
     if (result.isFailed) {
       Logger.warn('nfirco thread message receive failed', {

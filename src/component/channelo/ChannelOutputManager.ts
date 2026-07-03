@@ -1,8 +1,12 @@
 import { inject, injectable } from 'inversify'
+import { basename, isAbsolute, join } from 'node:path'
 import { Result } from '../../value/Result.js'
-import { Message } from '../../value/Message.js'
+import { Message, MessageFile } from '../../value/Message.js'
 import { AppEvent, ChannelMessageSendRequestedEvent } from '../../value/Event.js'
+import { parseMarkdownAttachmentReferences } from '../../util/Markdown.js'
+import { resolveUserPath } from '../../util/Path.js'
 import { ChannelOutput, ChannelOutputContext } from './ChannelOutput.js'
+import { FileStore } from '../FileStore.js'
 import { Logger } from '../Logger.js'
 import { Configer } from '../Configer.js'
 import { EventBus } from '../EventBus.js'
@@ -30,6 +34,7 @@ export class ChannelOutputManager {
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
+    @inject(FileStore) private readonly fileStore: FileStore,
     @inject(EventBus) private readonly eventBus: EventBus,
     @inject(IoThreadIdManager) private readonly ioThreadIdManager: IoThreadIdManager,
     @inject(WebChannelOutput) web: WebChannelOutput,
@@ -91,11 +96,12 @@ export class ChannelOutputManager {
   }
 
   async sendAgent(message: Message, inputType?: ChannelOutputContext['inputType']): Promise<Result<void>> {
-    if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
+    const prepared = await this.prepareAgentMessage(message)
+    if (prepared.text.trim().length === 0 && (!prepared.files || prepared.files.length === 0)) {
       return Result.fail('text or file is required')
     }
     const stored: Message = {
-      ...message,
+      ...prepared,
       role: 'agent'
     }
     return this.broadcast(stored, {
@@ -182,6 +188,58 @@ export class ChannelOutputManager {
       this.enqueueOutput(output, message, context)
     }
     return Result.successVoid()
+  }
+
+  private async prepareAgentMessage(message: Message): Promise<Message> {
+    const parsed = parseMarkdownAttachmentReferences(message.text)
+    if (parsed.files.length === 0) {
+      return message
+    }
+    const files = new Map<string, MessageFile>()
+    for (const file of message.files ?? []) {
+      files.set(file.id, file)
+    }
+    const workspacePath = resolveUserPath(await this.configer.get('workspace.path') ?? '~')
+    for (const reference of parsed.files) {
+      try {
+        const resolved = this.fileStore.resolveUrl(reference.path)
+        if (resolved) {
+          files.set(resolved.id, resolved)
+          continue
+        }
+        if (/^https?:\/\//i.test(reference.path)) {
+          const response = await fetch(reference.path)
+          if (!response.ok) {
+            Logger.warn('agent remote file reference ignored', {
+              path: reference.path,
+              status: response.status
+            })
+            continue
+          }
+          const buffer = Buffer.from(await response.arrayBuffer())
+          const imported = await this.fileStore.importBuffer({
+            buffer,
+            name: reference.label || basename(new URL(reference.path).pathname),
+            mime: response.headers.get('content-type') ?? undefined
+          })
+          files.set(imported.id, imported)
+          continue
+        }
+        const localPath = isAbsolute(reference.path) ? reference.path : join(workspacePath, reference.path)
+        const imported = await this.fileStore.importPath(localPath)
+        files.set(imported.id, imported)
+      } catch (error) {
+        Logger.warn('agent markdown file reference ignored', {
+          path: reference.path,
+          message: error instanceof Error ? error.message : String(error)
+        })
+      }
+    }
+    return {
+      ...message,
+      text: parsed.text,
+      files: files.size > 0 ? [...files.values()] : message.files
+    }
   }
 
   private enqueueOutput(output: ChannelOutput, message: Message, context?: ChannelOutputContext): void {

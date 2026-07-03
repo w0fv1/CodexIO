@@ -78,6 +78,7 @@ type CodexClientRuntimeConfig = {
   codexHomePath?: string
   proxyUrl?: string
   noProxyHosts: string[]
+  instruction: string
   developerInstructions: string
   requestTimeoutMs: number
 }
@@ -320,7 +321,10 @@ export class CodexClient {
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
       ephemeral: false,
-      developerInstructions: config.developerInstructions
+      developerInstructions: [
+        config.instruction,
+        config.developerInstructions
+      ].filter((item) => item.trim().length > 0).join('\n\n')
     })
     if (!response || typeof response !== 'object') {
       throw new Error('codex thread response not found')
@@ -644,6 +648,7 @@ export class CodexClient {
       proxyNoProxy,
       serverHost,
       codexCommand,
+      instruction,
       developerInstructions,
       requestTimeoutSeconds
     ] = await Promise.all([
@@ -655,6 +660,7 @@ export class CodexClient {
       this.configer.get('proxy.noProxy'),
       this.configer.get('server.host'),
       this.configer.get('agents.codex.command'),
+      this.configer.get('agents.codex.instruction'),
       this.configer.get('agents.codex.developerInstructions'),
       this.configer.get('agents.codex.requestTimeoutSeconds')
     ])
@@ -689,6 +695,7 @@ export class CodexClient {
         serverHost,
         ...proxyNoProxy.split(',').map((item) => item.trim()).filter((item) => item.length > 0)
       ],
+      instruction,
       developerInstructions,
       requestTimeoutMs: requestTimeoutSeconds * 1000
     }

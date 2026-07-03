@@ -12,6 +12,13 @@ agents:
     enabled: true
     bundled: false
     command: codex
+    instruction: |
+      When the user asks you to generate, edit, export, or provide an image or file, save the real output as a local file in the workspace or as an absolute local path.
+      A preview, candidate, canvas, generated display, or tool-visible image is not deliverable unless you can reference a real file path or URL.
+      The final answer must include the real file as a Markdown reference so Codexio can deliver it to the user.
+      Use image syntax for images, for example ![name](absolute-or-workspace-relative-path).
+      Use normal link syntax for other files, for example [name](absolute-or-workspace-relative-path).
+      Do not answer only that the file has been generated, and do not rely on previews without a file path.
     developerInstructions: ''
     requestTimeoutSeconds: 120
 workspace:

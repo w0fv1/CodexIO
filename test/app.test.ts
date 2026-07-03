@@ -1,5 +1,5 @@
 import { Server as HttpServer } from 'node:http'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -176,7 +176,15 @@ describe('server', () => {
 
   it('reconnects nfirco thread input after the socket closes', async () => {
     const port = await resolveAvailableServerPort('127.0.0.1', 8787)
-    const httpServer = new HttpServer()
+    const httpServer = new HttpServer((request, response) => {
+      if (request.url === '/asset/readme.txt') {
+        response.setHeader('Content-Type', 'text/plain')
+        response.end('attachment body')
+        return
+      }
+      response.statusCode = 404
+      response.end()
+    })
     const wsServer = new WebSocketServer({
       server: httpServer,
       path: '/api/threadio/ws'
@@ -223,10 +231,11 @@ describe('server', () => {
       '  web:',
       '    enabled: true'
     ].join('\n'))
-    const input = new NfircoThreadInput(new Configer(new CodexioMetadata({
+    const metadata = new CodexioMetadata({
       rootPath: testMetadata.rootPath,
       configPath
-    })))
+    })
+    const input = new NfircoThreadInput(new Configer(metadata), new FileStore(metadata))
     ;(input as unknown as { reconnectDelayMs: number }).reconnectDelayMs = 10
     const received: Array<Record<string, unknown>> = []
     await input.start({
@@ -234,7 +243,12 @@ describe('server', () => {
         received.push({
           inputType,
           text: message.text,
-          platformThreadId: message.platformThreadIds[0]?.id
+          platformThreadId: message.platformThreadIds[0]?.id,
+          files: (message.files ?? []).map((file) => ({
+            name: file.name,
+            mime: file.mime,
+            path: file.path
+          }))
         })
         return Result.success({
           ioThreadId: 'io-thread'
@@ -256,7 +270,16 @@ describe('server', () => {
       threadUuid: 'thread-1',
       section: 'section-1',
       messageUuid: 'message-1',
-      text: 'hello'
+      text: 'hello',
+      files: [
+        {
+          id: 1,
+          originalFilename: 'readme.txt',
+          mimeType: 'text/plain',
+          size: 15,
+          url: `http://127.0.0.1:${port}/asset/readme.txt`
+        }
+      ]
     }))
     sockets[1].send(JSON.stringify({
       type: 'thread.created',
@@ -270,14 +293,24 @@ describe('server', () => {
       {
         inputType: 'nfirco',
         text: 'hello',
-        platformThreadId: 'thread-1'
+        platformThreadId: 'thread-1',
+        files: [
+          {
+            name: 'readme.txt',
+            mime: 'text/plain',
+            path: expect.any(String)
+          }
+        ]
       },
       {
         inputType: 'nfirco',
         text: 'thread body',
-        platformThreadId: 'thread-2'
+        platformThreadId: 'thread-2',
+        files: []
       }
     ])
+    const firstFiles = received[0].files as Array<{ path: string }>
+    expect(await readFile(firstFiles[0].path, 'utf8')).toBe('attachment body')
     await input.stop()
     for (const socket of sockets) {
       if (socket.readyState !== WebSocket.CLOSED) {
@@ -286,6 +319,112 @@ describe('server', () => {
     }
     await new Promise<void>((resolve) => {
       wsServer.close(() => resolve())
+    })
+    await new Promise<void>((resolve) => {
+      httpServer.close(() => resolve())
+    })
+  })
+
+  it('uploads nfirco output files before sending thread messages', async () => {
+    const port = await resolveAvailableServerPort('127.0.0.1', 8787)
+    let uploadedBody = ''
+    let messageBody: Record<string, unknown> | undefined
+    const httpServer = new HttpServer((request, response) => {
+      if (request.method === 'POST' && request.url === '/api/threadio/file/upload-url') {
+        response.setHeader('Content-Type', 'application/json')
+        response.end(JSON.stringify({
+          code: '1',
+          data: {
+            id: 66,
+            filename: 'agent.png',
+            originalFilename: 'agent.png',
+            size: 10,
+            uploadUrl: `http://127.0.0.1:${port}/upload/66`,
+            downloadUrl: `http://127.0.0.1:${port}/download/66`
+          }
+        }))
+        return
+      }
+      if (request.method === 'PUT' && request.url === '/upload/66') {
+        request.on('data', (chunk) => {
+          uploadedBody += chunk.toString()
+        })
+        request.on('end', () => {
+          response.statusCode = 200
+          response.end()
+        })
+        return
+      }
+      if (request.method === 'POST' && request.url === '/api/threadio/thread/thread-1/message') {
+        let body = ''
+        request.on('data', (chunk) => {
+          body += chunk.toString()
+        })
+        request.on('end', () => {
+          messageBody = JSON.parse(body) as Record<string, unknown>
+          response.setHeader('Content-Type', 'application/json')
+          response.end(JSON.stringify({
+            code: '1',
+            data: {}
+          }))
+        })
+        return
+      }
+      response.statusCode = 404
+      response.end()
+    })
+    httpServer.listen(port, '127.0.0.1')
+    await new Promise<void>((resolve, reject) => {
+      httpServer.once('listening', resolve)
+      httpServer.once('error', reject)
+    })
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-nfirco-output-'))
+    const configPath = join(dir, 'config.yaml')
+    await writeFile(configPath, [
+      'workspace:',
+      `  path: ${JSON.stringify(dir)}`,
+      'channelo:',
+      '  nfirco:',
+      '    enabled: true',
+      `    baseUrl: http://127.0.0.1:${port}`,
+      '    account: user',
+      '    password: pass'
+    ].join('\n'))
+    const metadata = new CodexioMetadata({
+      rootPath: testMetadata.rootPath,
+      configPath
+    })
+    const fileStore = new FileStore(metadata)
+    const file = await fileStore.importBuffer({
+      buffer: Buffer.from('image-body'),
+      name: 'agent.png',
+      mime: 'image/png'
+    })
+    const ioThreadIdManager = new IoThreadIdManager()
+    ioThreadIdManager.bind('io-thread', {
+      source: 'nfirco',
+      id: 'thread-1'
+    })
+    const output = new NfircoThreadOutput(new Configer(metadata), ioThreadIdManager)
+    expect(await output.start()).toBe(true)
+    const result = await output.send({
+      ioThreadId: 'io-thread',
+      role: 'agent',
+      text: '看图',
+      files: [
+        file
+      ]
+    }, {
+      inputType: 'nfirco'
+    })
+    expect(result.isFailed).toBe(false)
+    expect(uploadedBody).toBe('image-body')
+    expect(messageBody).toMatchObject({
+      text: '看图',
+      fileIds: [],
+      imageIds: [
+        66
+      ]
     })
     await new Promise<void>((resolve) => {
       httpServer.close(() => resolve())
@@ -347,10 +486,11 @@ async function createTestCodexioApp(configer: Configer): Promise<{
   const feishuOutput = new FeishuChannelOutput(configer, ioThreadIdManager)
   const emailInput = new EmailChannelInput(configer)
   const emailOutput = new EmailChannelOutput(configer)
-  const nfircoInput = new NfircoThreadInput(configer)
+  const nfircoInput = new NfircoThreadInput(configer, fileStore)
   const nfircoOutput = new NfircoThreadOutput(configer, ioThreadIdManager)
   const outputManager = new ChannelOutputManager(
     configer,
+    fileStore,
     eventBus,
     ioThreadIdManager,
     webOutput,

@@ -6,9 +6,18 @@ export type MarkdownFileReference = {
   path: string
 }
 
+export type MarkdownAttachmentReference = MarkdownFileReference & {
+  image: boolean
+}
+
 export type MarkdownFileReferenceParseResult = {
   text: string
   files: MarkdownFileReference[]
+}
+
+export type MarkdownAttachmentReferenceParseResult = {
+  text: string
+  files: MarkdownAttachmentReference[]
 }
 
 export function renderMarkdownHtml(markdown: string): string {
@@ -58,7 +67,18 @@ export function shouldRenderMarkdown(text: string): boolean {
 }
 
 export function parseMarkdownFileReferences(markdown: string): MarkdownFileReferenceParseResult {
-  const files: MarkdownFileReference[] = []
+  const result = parseMarkdownAttachmentReferences(markdown)
+  return {
+    text: result.text,
+    files: result.files.filter((file) => !file.image).map((file) => ({
+      label: file.label,
+      path: file.path
+    }))
+  }
+}
+
+export function parseMarkdownAttachmentReferences(markdown: string): MarkdownAttachmentReferenceParseResult {
+  const files: MarkdownAttachmentReference[] = []
   const parts: string[] = []
   let lastIndex = 0
   let index = 0
@@ -77,7 +97,8 @@ export function parseMarkdownFileReferences(markdown: string): MarkdownFileRefer
     parts.push(formatInlineCode(path))
     files.push({
       label: match.label.trim(),
-      path
+      path,
+      image: match.image
     })
     lastIndex = match.end
   }
@@ -88,11 +109,17 @@ export function parseMarkdownFileReferences(markdown: string): MarkdownFileRefer
   }
 }
 
-function readMarkdownLink(text: string, start: number): { start: number, end: number, label: string, target: string } | undefined {
-  if (text[start] !== '[' || text[start - 1] === '!') {
+function readMarkdownLink(text: string, start: number): { start: number, end: number, label: string, target: string, image: boolean } | undefined {
+  let image = false
+  let linkStart = start
+  if (text[start] === '!' && text[start + 1] === '[') {
+    image = true
+    linkStart = start + 1
+  }
+  if (text[linkStart] !== '[' || (!image && text[linkStart - 1] === '!')) {
     return undefined
   }
-  const labelEnd = text.indexOf(']', start + 1)
+  const labelEnd = text.indexOf(']', linkStart + 1)
   if (labelEnd < 0 || text[labelEnd + 1] !== '(') {
     return undefined
   }
@@ -107,8 +134,9 @@ function readMarkdownLink(text: string, start: number): { start: number, end: nu
       return {
         start,
         end: index + 1,
-        label: text.slice(start + 1, labelEnd),
-        target: text.slice(targetStart, index)
+        label: text.slice(linkStart + 1, labelEnd),
+        target: text.slice(targetStart, index),
+        image
       }
     }
     index += 1
@@ -138,10 +166,8 @@ function normalizeMarkdownLinkTarget(target: string): string {
 }
 
 function isFileReferencePath(path: string): boolean {
-  if (/^https?:\/\//i.test(path)) {
-    return false
-  }
-  return path.startsWith('/api/files/')
+  return /^https?:\/\//i.test(path)
+    || path.startsWith('/api/files/')
     || /^[A-Za-z]:[\\/]/.test(path)
     || path.startsWith('/')
     || path.startsWith('./')

@@ -7,6 +7,30 @@ export type NfircoThreadCredentials = {
   password: string
 }
 
+export type NfircoThreadAttachment = {
+  id: string
+  name: string
+  mime?: string
+  size?: number
+  url: string
+}
+
+export type NfircoThreadUploadFileUrl = {
+  id: number
+  filename?: string
+  originalFilename?: string
+  size?: number
+  uploadUrl: string
+  downloadUrl?: string
+}
+
+export type NfircoThreadCreateMessageInput = {
+  text: string
+  requestId: string
+  fileIds?: number[]
+  imageIds?: number[]
+}
+
 export type NfircoThreadMessageEvent = {
   type: 'thread.message.created'
   eventId: string
@@ -14,6 +38,8 @@ export type NfircoThreadMessageEvent = {
   section?: string
   messageUuid: string
   text: string
+  files: NfircoThreadAttachment[]
+  images: NfircoThreadAttachment[]
 }
 
 export type NfircoThreadCreatedEvent = {
@@ -22,6 +48,8 @@ export type NfircoThreadCreatedEvent = {
   threadUuid: string
   section?: string
   text: string
+  files: NfircoThreadAttachment[]
+  images: NfircoThreadAttachment[]
 }
 
 export type NfircoThreadInputEvent = NfircoThreadMessageEvent | NfircoThreadCreatedEvent
@@ -37,7 +65,7 @@ export function openNfircoThreadSocket(credentials: NfircoThreadCredentials): We
   })
 }
 
-export async function createNfircoThreadMessage(credentials: NfircoThreadCredentials, threadUuid: string, text: string, requestId: string): Promise<Result<unknown>> {
+export async function createNfircoThreadMessage(credentials: NfircoThreadCredentials, threadUuid: string, input: NfircoThreadCreateMessageInput): Promise<Result<unknown>> {
   const response = await fetch(`${toHttpBaseUrl(credentials.baseUrl)}/api/threadio/thread/${encodeURIComponent(threadUuid)}/message`, {
     method: 'POST',
     headers: {
@@ -45,8 +73,10 @@ export async function createNfircoThreadMessage(credentials: NfircoThreadCredent
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      requestId,
-      text
+      requestId: input.requestId,
+      text: input.text,
+      fileIds: input.fileIds ?? [],
+      imageIds: input.imageIds ?? []
     })
   })
   const body = await readJson(response)
@@ -57,6 +87,33 @@ export async function createNfircoThreadMessage(credentials: NfircoThreadCredent
     return Result.fail(readResponseMessage(body, 'nfirco thread message send failed'))
   }
   return Result.success(body)
+}
+
+export async function generateNfircoThreadUploadUrl(credentials: NfircoThreadCredentials, file: { mime: string, name: string, size: number }): Promise<Result<NfircoThreadUploadFileUrl>> {
+  const response = await fetch(`${toHttpBaseUrl(credentials.baseUrl)}/api/threadio/file/upload-url`, {
+    method: 'POST',
+    headers: {
+      ...credentialsHeaders(credentials),
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      mimeType: file.mime,
+      originalFilename: file.name,
+      size: file.size
+    })
+  })
+  const body = await readJson(response)
+  if (!response.ok) {
+    return Result.fail(readResponseMessage(body, `nfirco thread upload url failed: ${response.status}`))
+  }
+  if (isFailedResponse(body)) {
+    return Result.fail(readResponseMessage(body, 'nfirco thread upload url failed'))
+  }
+  const data = readResponseData(body)
+  if (!isUploadFileUrl(data)) {
+    return Result.fail('nfirco thread upload url response invalid')
+  }
+  return Result.success(data)
 }
 
 export function parseNfircoThreadSocketEvent(value: unknown): NfircoThreadSocketEvent | undefined {
@@ -76,7 +133,9 @@ export function parseNfircoThreadSocketEvent(value: unknown): NfircoThreadSocket
   }
   const threadUuid = typeof record.threadUuid === 'string' ? record.threadUuid.trim() : ''
   const text = typeof record.text === 'string' ? record.text : ''
-  if (threadUuid.length === 0 || text.trim().length === 0) {
+  const files = readAttachments(record.files)
+  const images = readAttachments(record.images)
+  if (threadUuid.length === 0 || (text.trim().length === 0 && files.length === 0 && images.length === 0)) {
     return undefined
   }
   if (type === 'thread.created') {
@@ -85,7 +144,9 @@ export function parseNfircoThreadSocketEvent(value: unknown): NfircoThreadSocket
       eventId: typeof record.eventId === 'string' && record.eventId.trim().length > 0 ? record.eventId.trim() : threadUuid,
       threadUuid,
       section: typeof record.section === 'string' && record.section.trim().length > 0 ? record.section.trim() : undefined,
-      text
+      text,
+      files,
+      images
     }
   }
   const messageUuid = typeof record.messageUuid === 'string' ? record.messageUuid.trim() : ''
@@ -98,7 +159,9 @@ export function parseNfircoThreadSocketEvent(value: unknown): NfircoThreadSocket
     threadUuid,
     section: typeof record.section === 'string' && record.section.trim().length > 0 ? record.section.trim() : undefined,
     messageUuid,
-    text
+    text,
+    files,
+    images
   }
 }
 
@@ -174,4 +237,67 @@ function readResponseMessage(value: unknown, fallback: string): string {
     return value
   }
   return fallback
+}
+
+function readResponseData(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined
+  }
+  return (value as Record<string, unknown>).data
+}
+
+function isUploadFileUrl(value: unknown): value is NfircoThreadUploadFileUrl {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false
+  }
+  const record = value as Record<string, unknown>
+  return typeof record.id === 'number'
+    && typeof record.uploadUrl === 'string'
+    && record.uploadUrl.trim().length > 0
+}
+
+function readAttachments(value: unknown): NfircoThreadAttachment[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+  return value.flatMap((item): NfircoThreadAttachment[] => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return []
+    }
+    const record = item as Record<string, unknown>
+    const url = readString(record.url)
+    if (!url) {
+      return []
+    }
+    const idValue = record.id
+    let id = url
+    if (typeof idValue === 'string' && idValue.trim().length > 0) {
+      id = idValue.trim()
+    }
+    if (typeof idValue === 'number' && Number.isFinite(idValue)) {
+      id = String(idValue)
+    }
+    const originalFilename = readString(record.originalFilename)
+    const filename = readString(record.filename)
+    const mime = readString(record.mimeType)
+    const size = typeof record.size === 'number' && Number.isFinite(record.size) ? record.size : undefined
+    return [{
+      id,
+      name: originalFilename ?? filename ?? id,
+      mime,
+      size,
+      url
+    }]
+  })
+}
+
+function readString(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined
+  }
+  const text = value.trim()
+  if (text.length === 0) {
+    return undefined
+  }
+  return text
 }

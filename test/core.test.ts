@@ -6,6 +6,7 @@ import { ChannelOutputManager } from '../src/component/channelo/ChannelOutputMan
 import { Configer } from '../src/component/Configer.js'
 import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
 import { EventBus } from '../src/component/EventBus.js'
+import { FileStore } from '../src/component/FileStore.js'
 import { IoThreadIdManager } from '../src/component/IoThreadIdManager.js'
 import { Agent } from '../src/component/agent/Agent.js'
 import { AgentManager } from '../src/component/agent/AgentManager.js'
@@ -17,7 +18,7 @@ import { ConfigSchema, createDefaultConfig, parseCodexioConfig, validateCodexioC
 import { Result } from '../src/value/Result.js'
 import type { Message } from '../src/value/Message.js'
 import { shouldReceiveFeishuMessage, shouldReceiveFeishuSender } from '../src/value/FeishuMessage.js'
-import { renderMarkdownHtml } from '../src/util/Markdown.js'
+import { parseMarkdownAttachmentReferences, renderMarkdownHtml } from '../src/util/Markdown.js'
 import { resolveUserPath } from '../src/util/Path.js'
 import { parseNfircoThreadSocketEvent } from '../src/component/channel/NfircoThreadClient.js'
 
@@ -28,6 +29,8 @@ describe('core', () => {
     const config = createDefaultConfig()
     expect(config.server.host).toBe('127.0.0.1')
     expect(config.agents.codex.bundled).toBe(true)
+    expect(config.agents.codex.instruction).toContain('Markdown reference')
+    expect(config.agents.codex.instruction).toContain('previews without a file path')
     expect(config.workspace.path).toBe('')
     expect(config.proxy.host).toBe('127.0.0.1')
     expect(config.proxy.noProxy).toBe('')
@@ -46,14 +49,50 @@ describe('core', () => {
       threadUuid: 'thread-1',
       section: 'section-1',
       messageUuid: 'message-1',
-      text: 'hello'
+      text: 'hello',
+      files: [
+        {
+          id: 11,
+          originalFilename: '需求.md',
+          mimeType: 'text/markdown',
+          size: 12,
+          url: 'http://127.0.0.1/file/11'
+        }
+      ],
+      images: [
+        {
+          id: 12,
+          originalFilename: '截图.png',
+          mimeType: 'image/png',
+          size: 13,
+          url: 'http://127.0.0.1/file/12'
+        }
+      ]
     })).toEqual({
       type: 'thread.message.created',
       eventId: 'event-1',
       threadUuid: 'thread-1',
       section: 'section-1',
       messageUuid: 'message-1',
-      text: 'hello'
+      text: 'hello',
+      files: [
+        {
+          id: '11',
+          name: '需求.md',
+          mime: 'text/markdown',
+          size: 12,
+          url: 'http://127.0.0.1/file/11'
+        }
+      ],
+      images: [
+        {
+          id: '12',
+          name: '截图.png',
+          mime: 'image/png',
+          size: 13,
+          url: 'http://127.0.0.1/file/12'
+        }
+      ]
     })
     expect(parseNfircoThreadSocketEvent({
       type: 'thread.created',
@@ -66,7 +105,43 @@ describe('core', () => {
       eventId: 'thread-2',
       threadUuid: 'thread-2',
       section: 'section-1',
-      text: 'thread body'
+      text: 'thread body',
+      files: [],
+      images: []
+    })
+  })
+
+  it('parses nfirco thread file-only message events', () => {
+    expect(parseNfircoThreadSocketEvent({
+      type: 'thread.message.created',
+      eventId: 'event-file',
+      threadUuid: 'thread-file',
+      messageUuid: 'message-file',
+      text: '',
+      files: [
+        {
+          id: 21,
+          filename: 'file.bin',
+          url: 'http://127.0.0.1/file/21'
+        }
+      ]
+    })).toEqual({
+      type: 'thread.message.created',
+      eventId: 'event-file',
+      threadUuid: 'thread-file',
+      section: undefined,
+      messageUuid: 'message-file',
+      text: '',
+      files: [
+        {
+          id: '21',
+          name: 'file.bin',
+          mime: undefined,
+          size: undefined,
+          url: 'http://127.0.0.1/file/21'
+        }
+      ],
+      images: []
     })
   })
 
@@ -207,6 +282,7 @@ describe('core', () => {
       ['proxy.noProxy', 'next.firco.cn, *.firco.cn ,'],
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codex'],
+      ['agents.codex.instruction', ''],
       ['agents.codex.developerInstructions', ''],
       ['agents.codex.requestTimeoutSeconds', 120]
     ])
@@ -222,6 +298,41 @@ describe('core', () => {
       'next.firco.cn',
       '*.firco.cn'
     ])
+  })
+
+  it('adds Codexio file delivery instructions to new codex threads', async () => {
+    const values = new Map<string, unknown>([
+      ['agents.codex.bundled', false],
+      ['workspace.path', '~'],
+      ['proxy.enabled', false],
+      ['proxy.host', '127.0.0.1'],
+      ['proxy.port', 7890],
+      ['proxy.noProxy', ''],
+      ['server.host', '127.0.0.1'],
+      ['agents.codex.command', 'codex'],
+      ['agents.codex.instruction', 'File rule with Markdown reference'],
+      ['agents.codex.developerInstructions', 'Project rule'],
+      ['agents.codex.requestTimeoutSeconds', 120]
+    ])
+    const client = new CodexClient({
+      get: async (path: string) => values.get(path)
+    } as unknown as Configer, testMetadata)
+    let threadStartParams: Record<string, unknown> | undefined
+    client['request'] = async (method: string, params?: unknown) => {
+      if (method === 'thread/start') {
+        threadStartParams = params as Record<string, unknown>
+        return {
+          thread: {
+            id: 'thread-1',
+            name: 'thread'
+          }
+        }
+      }
+      throw new Error(method)
+    }
+    await client['startThread']()
+    expect(String(threadStartParams?.developerInstructions)).toContain('Markdown reference')
+    expect(String(threadStartParams?.developerInstructions)).toContain('Project rule')
   })
 
   it('resolves tilde workspace paths to the user home directory', async () => {
@@ -243,6 +354,7 @@ describe('core', () => {
       ['proxy.noProxy', ''],
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codex'],
+      ['agents.codex.instruction', ''],
       ['agents.codex.developerInstructions', ''],
       ['agents.codex.requestTimeoutSeconds', 120]
     ])
@@ -255,6 +367,24 @@ describe('core', () => {
 
   it('removes the final newline from rendered markdown html', () => {
     expect(renderMarkdownHtml('你好。')).toBe('<p>你好。</p>')
+  })
+
+  it('parses markdown attachment references', () => {
+    expect(parseMarkdownAttachmentReferences('图片 ![图](https://example.com/a.png) 文件 [说明](./docs/readme.md)')).toEqual({
+      text: '图片 `https://example.com/a.png` 文件 `./docs/readme.md`',
+      files: [
+        {
+          label: '图',
+          path: 'https://example.com/a.png',
+          image: true
+        },
+        {
+          label: '说明',
+          path: './docs/readme.md',
+          image: false
+        }
+      ]
+    })
   })
 
   it('binds platform thread identities to one io thread', () => {
@@ -430,6 +560,28 @@ describe('core', () => {
       'feishu',
       'feishuWebhook'
     ])
+  })
+
+  it('turns agent markdown file references into message files before output', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-output-file-'))
+    const imagePath = join(dir, 'agent.png')
+    await writeFile(imagePath, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=', 'base64'))
+    const sent: Message[] = []
+    const manager = await createRecordingChannelOutputManager(sent, new IoThreadIdManager(), [
+      'web'
+    ])
+    await manager.sendAgent({
+      ioThreadId: 'io-thread',
+      role: 'agent',
+      text: `已生成：![agent](${imagePath.replaceAll('\\', '/')})`
+    })
+    await manager.stop()
+    expect(sent).toHaveLength(1)
+    expect(sent[0].files?.[0]).toMatchObject({
+      name: 'agent.png',
+      mime: 'image/png'
+    })
+    expect(sent[0].text).toContain('`')
   })
 
   it('routes channel messages to echo by default and codex when enabled', async () => {
@@ -641,8 +793,10 @@ async function createRecordingChannelOutputManager(
   enabledTypes = ['web']
 ): Promise<ChannelOutputManager> {
   const configer = {
-    subscribe: () => {}
+    subscribe: () => {},
+    get: async (path: string) => path === 'workspace.path' ? '~' : undefined
   } as unknown as Configer
+  const fileStore = new FileStore(testMetadata)
   const output = (type: string) => ({
     type,
     start: async () => enabledTypes.includes(type),
@@ -661,6 +815,7 @@ async function createRecordingChannelOutputManager(
   })
   const manager = new ChannelOutputManager(
     configer,
+    fileStore,
     new EventBus(),
     ioThreadIdManager,
     output('web') as never,

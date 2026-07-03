@@ -13,6 +13,7 @@ export type CodexioConfig = {
       enabled: boolean
       bundled: boolean
       command: string
+      instruction: string
       developerInstructions: string
       requestTimeoutSeconds: number
     }
@@ -117,6 +118,14 @@ type ConfigObject = Record<string, unknown>
 
 const positiveInt = z.number().int().positive()
 const workspacePath = z.preprocess((value) => value === null ? '~' : value, z.string())
+const defaultCodexInstruction = [
+  'When the user asks you to generate, edit, export, or provide an image or file, save the real output as a local file in the workspace or as an absolute local path.',
+  'A preview, candidate, canvas, generated display, or tool-visible image is not deliverable unless you can reference a real file path or URL.',
+  'The final answer must include the real file as a Markdown reference so Codexio can deliver it to the user.',
+  'Use image syntax for images, for example ![name](absolute-or-workspace-relative-path).',
+  'Use normal link syntax for other files, for example [name](absolute-or-workspace-relative-path).',
+  'Do not answer only that the file has been generated, and do not rely on previews without a file path.'
+].join('\n')
 
 const configFields: ConfigField[] = [
   field('server.host', 'Server', 'Host', 'string', '重启 Codexio', z.string(), '127.0.0.1'),
@@ -126,6 +135,7 @@ const configFields: ConfigField[] = [
   field('agents.codex.enabled', 'Codex Agent', 'Enabled', 'boolean', '重启 Codex Agent', z.boolean(), false),
   field('agents.codex.bundled', 'Codex Agent', 'Bundled', 'boolean', '重启 Codex Agent', z.boolean(), true),
   field('agents.codex.command', 'Codex Agent', 'Command', 'string', '重启 Codex Agent', z.string(), 'codex'),
+  field('agents.codex.instruction', 'Codex Agent', 'Instruction', 'string', '重启 Codex Agent', z.string(), defaultCodexInstruction),
   field('agents.codex.developerInstructions', 'Codex Agent', 'Developer Instructions', 'string', '重启 Codex Agent', z.string(), ''),
   field('agents.codex.requestTimeoutSeconds', 'Codex Agent', 'Request Timeout Seconds', 'number', '重启 Codex Agent', positiveInt, 120),
   field('workspace.path', 'Workspace', 'Path', 'string', '重启 Codex Agent', workspacePath, ''),
