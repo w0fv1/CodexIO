@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import { setTimeout as wait } from 'node:timers/promises'
 import electron from 'electron'
 import type { NativeImage, Tray as ElectronTray } from 'electron'
-import electronUpdater from 'electron-updater'
+import { CodexioUpdater } from './CodexioUpdater.js'
 
 type ServerState = {
   pid: number
@@ -14,13 +14,12 @@ type ServerState = {
 }
 
 const { app, Menu, nativeImage, shell, Tray, Notification } = electron
-const { autoUpdater } = electronUpdater
 const iconPath = 'assets/icon.png'
-type UpdateCheckSource = 'automatic' | 'manual'
 
 class CodexioDesktop {
   private tray?: ElectronTray
   private server?: ChildProcess
+  private updater?: CodexioUpdater
   private quitting = false
   private restarting = false
   private serverStartedAt = 0
@@ -31,9 +30,6 @@ class CodexioDesktop {
   private logPath = ''
   private statePath = ''
   private serverPath = ''
-  private checkingUpdate = false
-  private updateCheckSource: UpdateCheckSource = 'automatic'
-  private updateDownloadStarted = false
   private serverFailureNotified = false
 
   async start(): Promise<void> {
@@ -45,6 +41,22 @@ class CodexioDesktop {
     this.logPath = join(this.dataRoot, 'log', 'desktop.log')
     this.statePath = join(this.dataRoot, 'state', 'server.json')
     this.serverPath = join(this.appRoot, 'dist', 'CodexioApplication.js')
+    this.updater = new CodexioUpdater({
+      isPackaged: app.isPackaged,
+      currentVersion: app.getVersion(),
+      log: (message) => {
+        this.log(message)
+      },
+      notify: (title, body, onClick) => {
+        this.notify(title, body, onClick)
+      },
+      refreshMenu: () => {
+        this.updateMenu()
+      },
+      prepareInstall: () => {
+        this.quitting = true
+      }
+    })
     await mkdir(dirname(this.logPath), {
       recursive: true
     })
@@ -65,10 +77,11 @@ class CodexioDesktop {
       force: true
     })
     this.createTray()
+    this.updater.notifyUpdatedLaunch()
     this.startServer()
     void this.notifyServerReady('启动成功')
-    this.configureUpdater()
-    void this.checkForUpdates()
+    this.updater.configure()
+    void this.updater.checkForUpdates()
     if (process.argv.includes('--open')) {
       void this.openChat()
     }
@@ -108,9 +121,9 @@ class CodexioDesktop {
         }
       },
       {
-        label: '更新',
+        label: this.updater?.getMenuLabel() ?? '更新',
         click: () => {
-          void this.checkForUpdates('manual')
+          this.updater?.handleUserAction()
         }
       },
       {
@@ -125,66 +138,6 @@ class CodexioDesktop {
         }
       }
     ]))
-  }
-
-  private configureUpdater(): void {
-    autoUpdater.autoDownload = true
-    autoUpdater.autoInstallOnAppQuit = true
-    autoUpdater.on('checking-for-update', () => {
-      this.log('updater checking')
-      if (this.updateCheckSource === 'manual') {
-        this.notify('Codexio 更新', '正在检查更新...')
-      }
-    })
-    autoUpdater.on('update-available', (info) => {
-      this.log(`updater available version=${info.version}`)
-      this.updateDownloadStarted = true
-      this.notify('Codexio 更新', `发现新版本 ${info.version}，正在下载。`)
-    })
-    autoUpdater.on('update-not-available', (info) => {
-      this.log(`updater not available version=${info.version}`)
-      if (this.updateCheckSource === 'manual') {
-        this.notify('Codexio 更新', '当前已是最新版本。')
-      }
-    })
-    autoUpdater.on('download-progress', (progress) => {
-      this.log(`updater download progress=${Math.round(progress.percent)} transferred=${progress.transferred} total=${progress.total}`)
-    })
-    autoUpdater.on('update-downloaded', (info) => {
-      this.log(`updater downloaded version=${info.version}`)
-      this.notify('Codexio 更新已下载', `版本 ${info.version} 已准备好，退出后会自动安装。点击立即重启安装。`, () => {
-        autoUpdater.quitAndInstall()
-      })
-      this.updateDownloadStarted = false
-    })
-    autoUpdater.on('error', (error) => {
-      this.log(`updater error: ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
-      if (this.updateCheckSource === 'manual' || this.updateDownloadStarted) {
-        this.notify('Codexio 更新失败', normalizeErrorMessage(error))
-      }
-      this.updateDownloadStarted = false
-    })
-  }
-
-  private async checkForUpdates(source: UpdateCheckSource = 'automatic'): Promise<void> {
-    if (!app.isPackaged || this.checkingUpdate) {
-      if (source === 'manual') {
-        this.notify('Codexio 更新', app.isPackaged ? '正在检查更新...' : '开发模式不检查更新。')
-      }
-      return
-    }
-    this.checkingUpdate = true
-    this.updateCheckSource = source
-    try {
-      await autoUpdater.checkForUpdates()
-    } catch (error) {
-      this.log(`updater check failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
-      if (source === 'manual') {
-        this.notify('Codexio 更新失败', normalizeErrorMessage(error))
-      }
-    } finally {
-      this.checkingUpdate = false
-    }
   }
 
   private startServer(): void {
