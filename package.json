@@ -1,7 +1,7 @@
 {
   "name": "codexio",
   "private": true,
-  "version": "0.9.2",
+  "version": "0.9.4",
   "description": "Thin Electron tray wrapper for the Codexio local channel bridge.",
   "author": "w0fv1",
   "type": "module",
@@ -51,7 +51,8 @@
     "nsis": {
       "oneClick": false,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "include": "scripts/installer.nsh"
     },
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "publish": [

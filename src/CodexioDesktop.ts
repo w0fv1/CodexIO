@@ -57,8 +57,11 @@ class CodexioDesktop {
       refreshMenu: () => {
         this.updateMenu()
       },
-      prepareInstall: () => {
+      openInstaller: async (file) => shell.openPath(file),
+      quit: () => {
         this.quitting = true
+        this.stopServer()
+        app.quit()
       }
     })
     if (!app.requestSingleInstanceLock()) {

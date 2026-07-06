@@ -20,7 +20,8 @@ type CodexioUpdaterOptions = {
   log: (message: string) => void
   notify: (title: string, body: string, onClick?: () => void) => void
   refreshMenu: () => void
-  prepareInstall: () => void
+  openInstaller: (file: string) => Promise<string>
+  quit: () => void
 }
 
 export class CodexioUpdater {
@@ -84,7 +85,7 @@ export class CodexioUpdater {
       case 'ready':
         return `更新已下载 ${this.state.version}`
       case 'installing':
-        return `正在安装 ${this.state.version}`
+        return `打开安装包 ${this.state.version}`
       default:
         return '更新'
     }
@@ -105,7 +106,7 @@ export class CodexioUpdater {
         this.options.notify('Codexio 更新', `正在下载 ${this.state.version}，进度 ${Math.round(this.state.percent)}%。`)
         return
       case 'installing':
-        this.options.notify('Codexio 更新', `正在安装 ${this.state.version}，应用将自动重启。`)
+        this.options.notify('Codexio 更新', `正在打开 ${this.state.version} 安装包。`)
         return
       default:
         void this.checkForUpdates('manual')
@@ -190,8 +191,8 @@ export class CodexioUpdater {
   }
 
   private notifyReadyUpdate(state: Extract<UpdateState, { kind: 'ready' }>): void {
-    this.options.notify('Codexio 更新已下载', `${state.version} 已下载完成，点击安装并重启。`, () => {
-      this.installReadyUpdate()
+    this.options.notify('Codexio 更新已下载', `${state.version} 已下载完成，点击打开安装包。`, () => {
+      void this.openReadyInstaller()
     })
   }
 
@@ -218,18 +219,26 @@ export class CodexioUpdater {
     }
   }
 
-  private installReadyUpdate(): void {
+  private async openReadyInstaller(): Promise<void> {
     if (this.state.kind !== 'ready') {
       this.handleUserAction()
       return
     }
     const version = this.state.version
-    this.options.log(`updater install requested version=${version} file=${this.state.downloadedFile}`)
+    const downloadedFile = this.state.downloadedFile
+    this.options.log(`updater installer open requested version=${version} file=${downloadedFile}`)
     this.state = { kind: 'installing', version }
     this.options.refreshMenu()
-    this.options.notify('Codexio 正在更新', `正在安装 ${version}，安装完成后会自动重启。`)
-    this.options.prepareInstall()
-    autoUpdater.quitAndInstall(true, true)
+    this.options.notify('Codexio 正在更新', `正在打开 ${version} 安装包，请按安装器提示完成更新。`)
+    try {
+      const message = await this.options.openInstaller(downloadedFile)
+      if (message.trim().length > 0) {
+        throw new Error(message)
+      }
+      this.options.quit()
+    } catch (error) {
+      this.handleError(error)
+    }
   }
 
   private handleError(error: unknown): void {
