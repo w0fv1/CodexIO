@@ -106,7 +106,7 @@ export class CommandExecutor {
       })
     }
     if (parsed.name === 'help' || parsed.name === '?') {
-      const sent = await this.sendSystem(commandHelpText, input.source, input.message.ioThreadId)
+      const sent = await this.sendSystem(commandHelpText, input.source, input.message.ioThreadId, input.input.sourceMessageId)
       if (sent.isFailed) {
         return Result.fail(sent.message)
       }
@@ -120,7 +120,7 @@ export class CommandExecutor {
       source: input.source,
       command: name
     })
-    const sent = await this.sendSystem(`unknown command: ${name}`, input.source, input.message.ioThreadId)
+    const sent = await this.sendSystem(`unknown command: ${name}`, input.source, input.message.ioThreadId, input.input.sourceMessageId)
     if (sent.isFailed) {
       return Result.fail(sent.message)
     }
@@ -130,9 +130,10 @@ export class CommandExecutor {
     })
   }
 
-  private async sendSystem(text: string, source: ChannelType, ioThreadId: string): Promise<Result<void>> {
+  private async sendSystem(text: string, source: ChannelType, ioThreadId: string, sourceMessageId?: string): Promise<Result<void>> {
     const results = await this.eventBus.emitAsync(AppEvent.ChannelMessageDisplayRequested, {
       source,
+      sourceMessageId,
       message: {
         ioThreadId,
         role: 'system',

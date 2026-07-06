@@ -11,6 +11,7 @@ export enum AppEvent {
 export type ChannelMessageReceivedEvent = {
   source: keyof CodexioConfig['channeli']
   message: Message
+  sourceMessageId?: string
 }
 
 export type ChannelInputReceiveResult = {
@@ -21,6 +22,7 @@ export type ChannelInputReceiveResult = {
 export type ChannelMessageDisplayRequestedEvent = {
   source?: keyof CodexioConfig['channeli']
   message: Message
+  sourceMessageId?: string
 }
 
 export type AppEventMap = {

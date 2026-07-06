@@ -19,7 +19,10 @@ import { WebChannelOutput } from './WebChannelOutput.js'
 
 @injectable()
 export class ChannelOutputManager {
-  private readonly listener = (event: ChannelMessageDisplayRequestedEvent) => this.send(event.message, event.source)
+  private readonly listener = (event: ChannelMessageDisplayRequestedEvent) => this.send(event.message, {
+    source: event.source,
+    sourceMessageId: event.sourceMessageId
+  })
   private readonly availableOutputs: ChannelOutput[]
   private readonly outputs = new Map<string, ChannelOutput>()
   private readonly outputQueues = new Map<string, Promise<void>>()
@@ -60,22 +63,28 @@ export class ChannelOutputManager {
     await this.applyConfig()
   }
 
-  async send(message: Message, source?: ChannelOutputContext['source']): Promise<Result<void>> {
+  async send(message: Message, context?: ChannelOutputContext): Promise<Result<void>>
+  async send(message: Message, source?: ChannelOutputContext['source']): Promise<Result<void>>
+  async send(message: Message, contextOrSource?: ChannelOutputContext | ChannelOutputContext['source']): Promise<Result<void>> {
+    const context = typeof contextOrSource === 'string' ? { source: contextOrSource } : contextOrSource
     if (message.role === 'user') {
-      return this.sendUser(message, source)
+      return this.sendUser(message, context)
     }
     if (message.role === 'agent') {
-      return this.sendAgent(message, source)
+      return this.sendAgent(message, context)
     }
     return this.sendSystem(message.text, message.ioThreadId)
   }
 
-  async sendUser(message: Message, source?: ChannelOutputContext['source']): Promise<Result<void>> {
+  async sendUser(message: Message, context?: ChannelOutputContext): Promise<Result<void>>
+  async sendUser(message: Message, source?: ChannelOutputContext['source']): Promise<Result<void>>
+  async sendUser(message: Message, contextOrSource?: ChannelOutputContext | ChannelOutputContext['source']): Promise<Result<void>> {
+    const context = typeof contextOrSource === 'string' ? { source: contextOrSource } : contextOrSource
     if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
       return Result.fail('text or file is required')
     }
     Logger.info('user message received', {
-      source: source ?? null,
+      source: context?.source ?? null,
       ioThreadId: message.ioThreadId,
       text: message.text,
       files: message.files?.length ?? 0
@@ -85,11 +94,15 @@ export class ChannelOutputManager {
       role: 'user'
     }
     return this.broadcast(stored, {
-      source
+      source: context?.source,
+      sourceMessageId: context?.sourceMessageId
     })
   }
 
-  async sendAgent(message: Message, source?: ChannelOutputContext['source']): Promise<Result<void>> {
+  async sendAgent(message: Message, context?: ChannelOutputContext): Promise<Result<void>>
+  async sendAgent(message: Message, source?: ChannelOutputContext['source']): Promise<Result<void>>
+  async sendAgent(message: Message, contextOrSource?: ChannelOutputContext | ChannelOutputContext['source']): Promise<Result<void>> {
+    const context = typeof contextOrSource === 'string' ? { source: contextOrSource } : contextOrSource
     const prepared = await this.prepareAgentMessage(message)
     if (prepared.text.trim().length === 0 && (!prepared.files || prepared.files.length === 0)) {
       return Result.fail('text or file is required')
@@ -99,7 +112,8 @@ export class ChannelOutputManager {
       role: 'agent'
     }
     return this.broadcast(stored, {
-      source
+      source: context?.source,
+      sourceMessageId: context?.sourceMessageId
     })
   }
 

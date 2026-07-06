@@ -30,6 +30,7 @@ export class EchoAgent implements Agent {
     })
     const resultList = await this.eventBus.emitAsync(AppEvent.ChannelMessageDisplayRequested, {
       source: event.source,
+      sourceMessageId: event.sourceMessageId,
       message: {
         ioThreadId: event.message.ioThreadId,
         role: 'agent',

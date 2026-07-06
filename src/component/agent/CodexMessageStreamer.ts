@@ -8,6 +8,7 @@ export type CodexStreamThread = {
   ioThreadId: string
   agentThreadId: string
   source?: ChannelMessageDisplayRequestedEvent['source']
+  sourceMessageId?: string
 }
 
 export type CodexStreamMessage = {
@@ -161,6 +162,7 @@ export class CodexMessageStreamer {
     }
     const results = await this.eventBus.emitAsync(AppEvent.ChannelMessageDisplayRequested, {
       source: thread.source,
+      sourceMessageId: thread.sourceMessageId,
       message: {
         ioThreadId: thread.ioThreadId,
         role: 'agent',

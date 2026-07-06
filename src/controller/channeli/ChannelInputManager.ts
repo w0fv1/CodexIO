@@ -56,7 +56,8 @@ export class ChannelInputManager implements ChannelInputReceiver {
     }
     const sendResultList = await this.eventBus.emitAsync(AppEvent.ChannelMessageDisplayRequested, {
       source,
-      message
+      message,
+      sourceMessageId: input.sourceMessageId
     })
     const sendFailures = sendResultList.filter((item) => item.isFailed)
     if (sendFailures.length > 0) {
@@ -72,7 +73,8 @@ export class ChannelInputManager implements ChannelInputReceiver {
     }
     const resultList = await this.eventBus.emitAsync(AppEvent.ChannelMessageReceived, {
       source,
-      message
+      message,
+      sourceMessageId: input.sourceMessageId
     })
     const failures = resultList.filter((item) => item.isFailed)
     if (failures.length > 0) {

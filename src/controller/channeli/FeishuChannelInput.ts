@@ -17,6 +17,7 @@ type FeishuMessageEvent = {
     }
   }
   message: {
+    message_id?: unknown
     chat_id: string
     chat_type?: string
     message_type: string
@@ -117,9 +118,16 @@ export class FeishuChannelInput implements ChannelInput {
     const chatId = typeof data.message.chat_id === 'string' && data.message.chat_id.trim().length > 0 ? data.message.chat_id.trim() : 'unknown'
     const feishuMessage = data.message as { thread_id?: unknown }
     const feishuThreadId = typeof feishuMessage.thread_id === 'string' && feishuMessage.thread_id.trim().length > 0 ? feishuMessage.thread_id.trim() : ''
+    const messageId = typeof data.message.message_id === 'string' && data.message.message_id.trim().length > 0 ? data.message.message_id.trim() : ''
     const sender = readFeishuSender(data)
     if (feishuThreadId.length === 0) {
       Logger.warn('feishu topic identity missing', {
+        chatId
+      })
+      return
+    }
+    if (messageId.length === 0) {
+      Logger.warn('feishu message identity missing', {
         chatId
       })
       return
@@ -180,6 +188,7 @@ export class FeishuChannelInput implements ChannelInput {
       }
       void receiver.receive('feishu', {
         channelThreadId,
+        sourceMessageId: messageId,
         text: parsedText.text,
         mentioned: Boolean(data.message.mentions?.some((mention) => mention.key.trim().length > 0)),
         sender

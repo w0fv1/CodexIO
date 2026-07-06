@@ -14,7 +14,7 @@ import { ChannelOutput, ChannelOutputContext } from './ChannelOutput.js'
 type FeishuChannelOutputConfig = CodexioConfig['channelo']['feishu']
 type FeishuCreateMessagePayload = {
   params: {
-    receive_id_type: 'open_id' | 'user_id' | 'union_id' | 'email' | 'chat_id' | 'thread_id'
+    receive_id_type: 'open_id' | 'user_id' | 'union_id' | 'email' | 'chat_id'
   }
   data: {
     receive_id: string
@@ -28,6 +28,22 @@ type FeishuCreateMessageClient = {
       message: {
         create: (payload: FeishuCreateMessagePayload) => Promise<{
           data?: {
+            message_id?: string
+            thread_id?: string
+          }
+        }>
+        reply: (payload: {
+          path: {
+            message_id: string
+          }
+          data: {
+            msg_type: string
+            content: string
+            reply_in_thread: true
+          }
+        }) => Promise<{
+          data?: {
+            message_id?: string
             thread_id?: string
           }
         }>
@@ -42,6 +58,7 @@ export class FeishuChannelOutput implements ChannelOutput {
   private config?: FeishuChannelOutputConfig
   private client?: Lark.Client
   private chatId = ''
+  private readonly replyMessageIdByIoThreadId = new Map<string, string>()
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
@@ -178,25 +195,53 @@ export class FeishuChannelOutput implements ChannelOutput {
           })
         })
       }
-      let feishuThreadId = this.feishuThreadId(message.ioThreadId)
+      let replyMessageId = context?.sourceMessageId?.trim() || this.replyMessageIdByIoThreadId.get(message.ioThreadId)
       const messageClient = this.client as unknown as FeishuCreateMessageClient
       for (const outgoingMessage of outgoingMessages) {
+        if (replyMessageId) {
+          const replied = await messageClient.im.v1.message.reply({
+            path: {
+              message_id: replyMessageId
+            },
+            data: {
+              msg_type: outgoingMessage.msgType,
+              content: outgoingMessage.content,
+              reply_in_thread: true
+            }
+          })
+          const createdMessageId = replied.data?.message_id?.trim()
+          if (createdMessageId) {
+            this.replyMessageIdByIoThreadId.set(message.ioThreadId, createdMessageId)
+          }
+          const repliedThreadId = replied.data?.thread_id?.trim()
+          if (repliedThreadId && !this.feishuThreadId(message.ioThreadId)) {
+            this.ioThreadIdManager.bind(message.ioThreadId, {
+              source: 'feishu',
+              id: `${this.chatId}:thread:${repliedThreadId}`
+            })
+          }
+          continue
+        }
         const created = await messageClient.im.v1.message.create({
           params: {
-            receive_id_type: feishuThreadId ? 'thread_id' : 'chat_id'
+            receive_id_type: 'chat_id'
           },
           data: {
-            receive_id: feishuThreadId ?? this.chatId,
+            receive_id: this.chatId,
             msg_type: outgoingMessage.msgType,
             content: outgoingMessage.content
           }
         })
-        if (!feishuThreadId) {
+        const createdMessageId = created.data?.message_id?.trim()
+        if (createdMessageId) {
+          replyMessageId = createdMessageId
+          this.replyMessageIdByIoThreadId.set(message.ioThreadId, createdMessageId)
+        }
+        if (!this.feishuThreadId(message.ioThreadId)) {
           const createdThreadId = created?.data?.thread_id?.trim()
           if (!createdThreadId) {
             throw new Error('feishu thread_id missing')
           }
-          feishuThreadId = createdThreadId
           this.ioThreadIdManager.bind(message.ioThreadId, {
             source: 'feishu',
             id: `${this.chatId}:thread:${createdThreadId}`
@@ -234,6 +279,7 @@ export class FeishuChannelOutput implements ChannelOutput {
 
   async stop(): Promise<Result<void>> {
     this.client = undefined
+    this.replyMessageIdByIoThreadId.clear()
     return Result.successVoid()
   }
 

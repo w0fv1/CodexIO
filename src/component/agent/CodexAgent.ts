@@ -18,6 +18,7 @@ export class CodexAgent implements Agent {
   private readonly threadIdByIoThreadId = new Map<string, string>()
   private readonly ioThreadIdByThreadId = new Map<string, string>()
   private readonly sourceByIoThreadId = new Map<string, ChannelMessageReceivedEvent['source']>()
+  private readonly sourceMessageIdByIoThreadId = new Map<string, string>()
   private readonly emittedErrors = new Set<string>()
   private readonly disposers: Array<() => void> = []
 
@@ -66,6 +67,7 @@ export class CodexAgent implements Agent {
     }
     this.loginIoThreadId = event.message.ioThreadId
     this.sourceByIoThreadId.set(event.message.ioThreadId, event.source)
+    this.bindSourceMessageId(event.message.ioThreadId, event.sourceMessageId)
     const loggedIn = await this.client.login()
     if (loggedIn.isFailed) {
       return Result.fail(loggedIn.message)
@@ -103,6 +105,7 @@ export class CodexAgent implements Agent {
     this.threadIdByIoThreadId.clear()
     this.ioThreadIdByThreadId.clear()
     this.sourceByIoThreadId.clear()
+    this.sourceMessageIdByIoThreadId.clear()
     this.messageStreamer.clear()
     this.emittedErrors.clear()
     return this.client.stop()
@@ -114,6 +117,7 @@ export class CodexAgent implements Agent {
       return
     }
     const source = this.sourceByIoThreadId.get(ioThreadId)
+    const sourceMessageId = this.sourceMessageIdByIoThreadId.get(ioThreadId)
     await this.sendAgent({
       ioThreadId,
       role: 'agent',
@@ -124,7 +128,7 @@ export class CodexAgent implements Agent {
             `打开：${login.verificationUrl}`,
             `验证码：${login.userCode}`
           ].join('\n')
-    }, source)
+    }, source, sourceMessageId)
   }
 
   private async receiveCodexMessage(message: CodexClientMessage): Promise<void> {
@@ -140,27 +144,32 @@ export class CodexAgent implements Agent {
         return
       }
       const source = this.sourceByIoThreadId.get(ioThreadId)
+      const sourceMessageId = this.sourceMessageIdByIoThreadId.get(ioThreadId)
       await this.messageStreamer.append({
         ioThreadId,
         agentThreadId: message.threadId,
-        source
+        source,
+        sourceMessageId
       }, message.itemId, message.text)
       return
     }
     if (message.status === 'completed') {
       const source = this.sourceByIoThreadId.get(ioThreadId)
+      const sourceMessageId = this.sourceMessageIdByIoThreadId.get(ioThreadId)
       if (message.itemId && message.messages.length <= 1) {
         await this.messageStreamer.completeItem({
           ioThreadId,
           agentThreadId: message.threadId,
-          source
+          source,
+          sourceMessageId
         }, message.itemId, message.messages[0]?.text)
         return
       }
       await this.messageStreamer.complete({
         ioThreadId,
         agentThreadId: message.threadId,
-        source
+        source,
+        sourceMessageId
       }, message.messages.map((completed) => {
         return {
           itemId: completed.itemId,
@@ -175,7 +184,7 @@ export class CodexAgent implements Agent {
         ioThreadId,
         role: 'agent',
         text: message.text
-      }, this.sourceByIoThreadId.get(ioThreadId))
+      }, this.sourceByIoThreadId.get(ioThreadId), this.sourceMessageIdByIoThreadId.get(ioThreadId))
     }
   }
 
@@ -194,7 +203,7 @@ export class CodexAgent implements Agent {
       ioThreadId,
       role: 'agent',
       text
-    }, this.sourceByIoThreadId.get(ioThreadId))
+    }, this.sourceByIoThreadId.get(ioThreadId), this.sourceMessageIdByIoThreadId.get(ioThreadId))
   }
 
   private async formatClientError(error: Error): Promise<string> {
@@ -218,9 +227,17 @@ export class CodexAgent implements Agent {
     this.ioThreadIdByThreadId.set(threadId, ioThreadId)
   }
 
-  private async sendAgent(message: Message, source?: ChannelMessageReceivedEvent['source']): Promise<void> {
+  private bindSourceMessageId(ioThreadId: string, sourceMessageId?: string): void {
+    const normalized = sourceMessageId?.trim()
+    if (normalized) {
+      this.sourceMessageIdByIoThreadId.set(ioThreadId, normalized)
+    }
+  }
+
+  private async sendAgent(message: Message, source?: ChannelMessageReceivedEvent['source'], sourceMessageId?: string): Promise<void> {
     const results = await this.eventBus.emitAsync(AppEvent.ChannelMessageDisplayRequested, {
       source,
+      sourceMessageId,
       message
     })
     for (const result of results) {

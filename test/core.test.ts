@@ -227,11 +227,12 @@ describe('core', () => {
 
   it('publishes input messages to display and agent manager events', async () => {
     const eventBus = new EventBus()
-    const events: Array<{ type: string, source: string | undefined, text: string }> = []
+    const events: Array<{ type: string, source: string | undefined, sourceMessageId?: string, text: string }> = []
     eventBus.on(AppEvent.ChannelMessageDisplayRequested, async (event) => {
       events.push({
         type: 'display',
         source: event.source,
+        sourceMessageId: event.sourceMessageId,
         text: event.message.text
       })
       return Result.successVoid()
@@ -240,6 +241,7 @@ describe('core', () => {
       events.push({
         type: 'agent',
         source: event.source,
+        sourceMessageId: event.sourceMessageId,
         text: event.message.text
       })
       return Result.successVoid()
@@ -259,6 +261,7 @@ describe('core', () => {
         source: 'feishu',
         id: 'chat:thread:omt_1'
       },
+      sourceMessageId: 'om_1',
       text: 'hello'
     })
     expect(result.isFailed).toBe(false)
@@ -266,11 +269,13 @@ describe('core', () => {
       {
         type: 'display',
         source: 'feishu',
+        sourceMessageId: 'om_1',
         text: 'hello'
       },
       {
         type: 'agent',
         source: 'feishu',
+        sourceMessageId: 'om_1',
         text: 'hello'
       }
     ])
@@ -748,7 +753,7 @@ describe('core', () => {
     })
   })
 
-  it('binds one platform thread identity to one io thread', () => {
+  it('binds one channel thread identity to one io thread', () => {
     const manager = createIoThreadIdManager()
     const ioThreadId = 'io-thread'
     expect(manager.getLastActiveIoThreadId()).toBeUndefined()
@@ -1005,7 +1010,7 @@ describe('core', () => {
     ])
   })
 
-  it('binds feishu output to the returned topic thread id only', async () => {
+  it('replies to feishu source messages in the topic thread', async () => {
     const ioThreadIdManager = createIoThreadIdManager()
     const calls: unknown[] = []
     const output = new FeishuChannelOutput({
@@ -1030,6 +1035,16 @@ describe('core', () => {
               calls.push(payload)
               return {
                 data: {
+                  message_id: 'om_created',
+                  thread_id: 'omt_1'
+                }
+              }
+            },
+            reply: async (payload: unknown) => {
+              calls.push(payload)
+              return {
+                data: {
+                  message_id: 'om_reply',
                   thread_id: 'omt_1'
                 }
               }
@@ -1042,6 +1057,9 @@ describe('core', () => {
       ioThreadId: 'io-thread',
       role: 'agent',
       text: 'hello'
+    }, {
+      source: 'feishu',
+      sourceMessageId: 'om_user'
     })
     expect(first.isFailed).toBe(false)
     expect(ioThreadIdManager.getChannelThreadIds('io-thread')).toEqual([
@@ -1054,6 +1072,94 @@ describe('core', () => {
       ioThreadId: 'io-thread',
       role: 'agent',
       text: 'again'
+    }, {
+      source: 'feishu',
+      sourceMessageId: 'om_user'
+    })
+    expect(second.isFailed).toBe(false)
+    expect(calls).toMatchObject([
+      {
+        path: {
+          message_id: 'om_user'
+        },
+        data: {
+          reply_in_thread: true
+        }
+      },
+      {
+        path: {
+          message_id: 'om_user'
+        },
+        data: {
+          reply_in_thread: true
+        }
+      }
+    ])
+  })
+
+  it('creates a feishu topic for non-feishu output and continues with reply', async () => {
+    const ioThreadIdManager = createIoThreadIdManager()
+    const calls: unknown[] = []
+    const output = new FeishuChannelOutput({
+      get: async (path: string) => {
+        if (path === 'channelo.feishu') {
+          return {
+            enabled: true,
+            appId: 'app-id',
+            appSecret: 'app-secret',
+            chatId: 'chat-1'
+          }
+        }
+        return undefined
+      }
+    } as unknown as Configer, ioThreadIdManager)
+    await output.start()
+    Reflect.set(output, 'client', {
+      im: {
+        v1: {
+          message: {
+            create: async (payload: unknown) => {
+              calls.push(payload)
+              return {
+                data: {
+                  message_id: 'om_created',
+                  thread_id: 'omt_1'
+                }
+              }
+            },
+            reply: async (payload: unknown) => {
+              calls.push(payload)
+              return {
+                data: {
+                  message_id: 'om_reply',
+                  thread_id: 'omt_1'
+                }
+              }
+            }
+          }
+        }
+      }
+    })
+    const first = await output.send({
+      ioThreadId: 'io-thread',
+      role: 'agent',
+      text: 'hello'
+    }, {
+      source: 'web'
+    })
+    expect(first.isFailed).toBe(false)
+    expect(ioThreadIdManager.getChannelThreadIds('io-thread')).toEqual([
+      {
+        source: 'feishu',
+        id: 'chat-1:thread:omt_1'
+      }
+    ])
+    const second = await output.send({
+      ioThreadId: 'io-thread',
+      role: 'agent',
+      text: 'again'
+    }, {
+      source: 'web'
     })
     expect(second.isFailed).toBe(false)
     expect(calls).toMatchObject([
@@ -1066,11 +1172,11 @@ describe('core', () => {
         }
       },
       {
-        params: {
-          receive_id_type: 'thread_id'
+        path: {
+          message_id: 'om_created'
         },
         data: {
-          receive_id: 'omt_1'
+          reply_in_thread: true
         }
       }
     ])
@@ -1281,12 +1387,13 @@ describe('core', () => {
     ])
   })
 
-  it('keeps the source channel on codex stream output', async () => {
-    const sent: Array<{ source: string | undefined, message: Message }> = []
+  it('keeps the source channel and message id on codex stream output', async () => {
+    const sent: Array<{ source: string | undefined, sourceMessageId?: string, message: Message }> = []
     const eventBus = new EventBus()
     eventBus.on(AppEvent.ChannelMessageDisplayRequested, async (event) => {
       sent.push({
         source: event.source,
+        sourceMessageId: event.sourceMessageId,
         message: event.message
       })
       return Result.successVoid()
@@ -1295,7 +1402,8 @@ describe('core', () => {
     await streamer.complete({
       ioThreadId: 'io-thread',
       agentThreadId: 'codex-thread',
-      source: 'feishu'
+      source: 'feishu',
+      sourceMessageId: 'om_1'
     }, [
       {
         itemId: 'item',
@@ -1305,6 +1413,7 @@ describe('core', () => {
     expect(sent).toEqual([
       {
         source: 'feishu',
+        sourceMessageId: 'om_1',
         message: {
           ioThreadId: 'io-thread',
           role: 'agent',
