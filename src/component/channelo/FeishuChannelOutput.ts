@@ -12,6 +12,29 @@ import { IoThreadIdManager } from '../IoThreadIdManager.js'
 import { ChannelOutput, ChannelOutputContext } from './ChannelOutput.js'
 
 type FeishuChannelOutputConfig = CodexioConfig['channelo']['feishu']
+type FeishuCreateMessagePayload = {
+  params: {
+    receive_id_type: 'open_id' | 'user_id' | 'union_id' | 'email' | 'chat_id' | 'thread_id'
+  }
+  data: {
+    receive_id: string
+    msg_type: string
+    content: string
+  }
+}
+type FeishuCreateMessageClient = {
+  im: {
+    v1: {
+      message: {
+        create: (payload: FeishuCreateMessagePayload) => Promise<{
+          data?: {
+            thread_id?: string
+          }
+        }>
+      }
+    }
+  }
+}
 
 @injectable()
 export class FeishuChannelOutput implements ChannelOutput {
@@ -45,7 +68,7 @@ export class FeishuChannelOutput implements ChannelOutput {
   }
 
   async send(message: Message, context?: ChannelOutputContext): Promise<Result<void>> {
-    if (message.role === 'user' && context?.inputType === 'feishu') {
+    if (message.role === 'user' && context?.source === 'feishu') {
       return Result.successVoid()
     }
     if (!this.client) {
@@ -155,38 +178,28 @@ export class FeishuChannelOutput implements ChannelOutput {
           })
         })
       }
-      let replyMessageId = this.feishuMessageId(message.ioThreadId)
+      let feishuThreadId = this.feishuThreadId(message.ioThreadId)
+      const messageClient = this.client as unknown as FeishuCreateMessageClient
       for (const outgoingMessage of outgoingMessages) {
-        if (replyMessageId) {
-          await this.client.im.v1.message.reply({
-            path: {
-              message_id: replyMessageId
-            },
-            data: {
-              msg_type: outgoingMessage.msgType,
-              content: outgoingMessage.content,
-              reply_in_thread: true
-            }
-          })
-        } else {
-          const created = await this.client.im.v1.message.create({
-            params: {
-              receive_id_type: 'chat_id'
-            },
-            data: {
-              receive_id: this.chatId,
-              msg_type: outgoingMessage.msgType,
-              content: outgoingMessage.content
-            }
-          })
-          const createdMessageId = created?.data?.message_id?.trim()
-          if (!createdMessageId) {
-            throw new Error('feishu message_id missing')
+        const created = await messageClient.im.v1.message.create({
+          params: {
+            receive_id_type: feishuThreadId ? 'thread_id' : 'chat_id'
+          },
+          data: {
+            receive_id: feishuThreadId ?? this.chatId,
+            msg_type: outgoingMessage.msgType,
+            content: outgoingMessage.content
           }
-          replyMessageId = createdMessageId
+        })
+        if (!feishuThreadId) {
+          const createdThreadId = created?.data?.thread_id?.trim()
+          if (!createdThreadId) {
+            throw new Error('feishu thread_id missing')
+          }
+          feishuThreadId = createdThreadId
           this.ioThreadIdManager.bind(message.ioThreadId, {
             source: 'feishu',
-            id: `${this.chatId}:message:${createdMessageId}`
+            id: `${this.chatId}:thread:${createdThreadId}`
           })
         }
       }
@@ -224,9 +237,9 @@ export class FeishuChannelOutput implements ChannelOutput {
     return Result.successVoid()
   }
 
-  private feishuMessageId(ioThreadId: string): string | undefined {
-    const platformThreadId = this.ioThreadIdManager.getPlatformThreadId(ioThreadId)
-      .find((item) => item.source === 'feishu' && item.id.includes(':message:'))
-    return platformThreadId?.id.split(':message:').at(1)?.trim()
+  private feishuThreadId(ioThreadId: string): string | undefined {
+    const channelThreadId = this.ioThreadIdManager.getChannelThreadIds(ioThreadId)
+      .find((item) => item.source === 'feishu' && item.id.includes(':thread:'))
+    return channelThreadId?.id.split(':thread:').at(1)?.trim()
   }
 }

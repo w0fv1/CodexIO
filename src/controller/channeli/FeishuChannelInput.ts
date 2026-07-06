@@ -25,8 +25,6 @@ type FeishuMessageEvent = {
       key: string
     }>
   } & {
-    message_id?: unknown
-    root_id?: unknown
     thread_id?: unknown
   }
 }
@@ -117,30 +115,19 @@ export class FeishuChannelInput implements ChannelInput {
 
   private async receive(data: FeishuMessageEvent): Promise<void> {
     const chatId = typeof data.message.chat_id === 'string' && data.message.chat_id.trim().length > 0 ? data.message.chat_id.trim() : 'unknown'
-    const feishuMessage = data.message as {
-      message_id?: unknown
-      root_id?: unknown
-      thread_id?: unknown
-    }
+    const feishuMessage = data.message as { thread_id?: unknown }
     const feishuThreadId = typeof feishuMessage.thread_id === 'string' && feishuMessage.thread_id.trim().length > 0 ? feishuMessage.thread_id.trim() : ''
-    const feishuMessageId = typeof feishuMessage.message_id === 'string' && feishuMessage.message_id.trim().length > 0 ? feishuMessage.message_id.trim() : ''
-    const feishuRootId = typeof feishuMessage.root_id === 'string' && feishuMessage.root_id.trim().length > 0 ? feishuMessage.root_id.trim() : ''
     const sender = readFeishuSender(data)
-    const feishuEntities = [
-      feishuThreadId.length > 0 ? `${chatId}:thread:${feishuThreadId}` : '',
-      feishuRootId.length > 0 ? `${chatId}:message:${feishuRootId}` : '',
-      feishuMessageId.length > 0 ? `${chatId}:message:${feishuMessageId}` : ''
-    ].filter((value) => value.length > 0)
-    if (feishuEntities.length === 0) {
-      Logger.warn('feishu message identity missing', {
+    if (feishuThreadId.length === 0) {
+      Logger.warn('feishu topic identity missing', {
         chatId
       })
       return
     }
-    const feishuThreadIds = feishuEntities.map((id) => ({
+    const channelThreadId = {
       source: 'feishu' as const,
-      id
-    }))
+      id: `${chatId}:thread:${feishuThreadId}`
+    }
     try {
       if (this.chatId.length === 0) {
         this.chatId = data.message.chat_id
@@ -192,7 +179,7 @@ export class FeishuChannelInput implements ChannelInput {
         return
       }
       void receiver.receive('feishu', {
-        platformThreadIds: feishuThreadIds as [typeof feishuThreadIds[number], ...typeof feishuThreadIds[number][]],
+        channelThreadId,
         text: parsedText.text,
         mentioned: Boolean(data.message.mentions?.some((mention) => mention.key.trim().length > 0)),
         sender

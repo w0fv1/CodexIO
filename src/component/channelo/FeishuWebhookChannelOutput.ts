@@ -41,7 +41,7 @@ export class FeishuWebhookChannelOutput implements ChannelOutput {
     try {
       Logger.info('feishu webhook send started', {
         role: message.role,
-        inputType: context?.inputType ?? null,
+        source: context?.source ?? null,
         length: text.length
       })
       const response = await fetch(this.config.url, {

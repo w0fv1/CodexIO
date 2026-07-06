@@ -102,7 +102,7 @@ export class AgentManager {
     const agent = await this.getActiveAgent()
     Logger.info('agent receive started', {
       agent: agent.type,
-      inputType: event.inputType,
+      source: event.source,
       ioThreadId: event.message.ioThreadId,
       text: event.message.text,
       files: event.message.files?.length ?? 0

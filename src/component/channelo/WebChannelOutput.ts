@@ -5,7 +5,10 @@ import { Logger } from '../Logger.js'
 import { Message } from '../../value/Message.js'
 import { Result } from '../../value/Result.js'
 import { ChannelOutput } from './ChannelOutput.js'
-import { IoThreadIdManager } from '../IoThreadIdManager.js'
+
+type WebChannelSender = {
+  send(message: Message): Result<void>
+}
 
 @injectable()
 export class WebChannelOutput implements ChannelOutput {
@@ -13,8 +16,7 @@ export class WebChannelOutput implements ChannelOutput {
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
-    @inject(WebChannelHub) private readonly hub: WebChannelHub,
-    @inject(IoThreadIdManager) private readonly ioThreadIdManager: IoThreadIdManager
+    @inject(WebChannelHub) private readonly hub: WebChannelSender
   ) {}
 
   async start(): Promise<boolean> {
@@ -36,12 +38,7 @@ export class WebChannelOutput implements ChannelOutput {
     if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
       return Result.fail('text or file is required')
     }
-    const webThreadId = this.ioThreadIdManager.getPlatformThreadId(message.ioThreadId)
-      .find((item) => item.source === 'web')
-    if (!webThreadId) {
-      return Result.successVoid()
-    }
-    return this.hub.send(message, webThreadId.id)
+    return this.hub.send(message)
   }
 
   async stop(): Promise<Result<void>> {

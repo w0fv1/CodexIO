@@ -166,12 +166,10 @@ export class WebChannelHub {
         return
       }
       const result = await receiver.receive('web', {
-        platformThreadIds: [
-          {
-            source: 'web',
-            id: webThreadId
-          }
-        ],
+        channelThreadId: {
+          source: 'web',
+          id: webThreadId
+        },
         text,
         files
       })
@@ -195,11 +193,7 @@ export class WebChannelHub {
   }
 
   send(message: Message, webThreadId?: string): Result<void> {
-    const normalizedWebThreadId = webThreadId?.trim() ?? ''
-    if (normalizedWebThreadId.length === 0) {
-      return Result.successVoid()
-    }
-    const data = this.webThreadManager.appendMessage(message, normalizedWebThreadId)
+    const data = this.webThreadManager.appendMessage(message, webThreadId)
     this.broadcast(data)
     return Result.successVoid()
   }

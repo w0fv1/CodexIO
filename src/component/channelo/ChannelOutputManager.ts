@@ -2,7 +2,7 @@ import { inject, injectable } from 'inversify'
 import { basename, isAbsolute, join } from 'node:path'
 import { Result } from '../../value/Result.js'
 import { Message, MessageFile } from '../../value/Message.js'
-import { AppEvent, ChannelMessageSendRequestedEvent } from '../../value/Event.js'
+import { AppEvent, ChannelMessageDisplayRequestedEvent } from '../../value/Event.js'
 import { parseMarkdownAttachmentReferences } from '../../util/Markdown.js'
 import { ChannelOutput, ChannelOutputContext } from './ChannelOutput.js'
 import { FileStore } from '../FileStore.js'
@@ -17,16 +17,9 @@ import { FeishuWebhookChannelOutput } from './FeishuWebhookChannelOutput.js'
 import { NfircoThreadOutput } from './NfircoThreadOutput.js'
 import { WebChannelOutput } from './WebChannelOutput.js'
 
-const inputOutputTypes = new Set<string>([
-  'web',
-  'feishu',
-  'email',
-  'nfirco'
-])
-
 @injectable()
 export class ChannelOutputManager {
-  private readonly listener = (event: ChannelMessageSendRequestedEvent) => this.send(event.message, event.inputType)
+  private readonly listener = (event: ChannelMessageDisplayRequestedEvent) => this.send(event.message, event.source)
   private readonly availableOutputs: ChannelOutput[]
   private readonly outputs = new Map<string, ChannelOutput>()
   private readonly outputQueues = new Map<string, Promise<void>>()
@@ -37,11 +30,11 @@ export class ChannelOutputManager {
     @inject(FileStore) private readonly fileStore: FileStore,
     @inject(EventBus) private readonly eventBus: EventBus,
     @inject(IoThreadIdManager) private readonly ioThreadIdManager: IoThreadIdManager,
-    @inject(WebChannelOutput) web: WebChannelOutput,
-    @inject(FeishuChannelOutput) feishu: FeishuChannelOutput,
-    @inject(FeishuWebhookChannelOutput) feishuWebhook: FeishuWebhookChannelOutput,
-    @inject(EmailChannelOutput) email: EmailChannelOutput,
-    @inject(NfircoThreadOutput) nfirco: NfircoThreadOutput,
+    @inject(WebChannelOutput) web: ChannelOutput,
+    @inject(FeishuChannelOutput) feishu: ChannelOutput,
+    @inject(FeishuWebhookChannelOutput) feishuWebhook: ChannelOutput,
+    @inject(EmailChannelOutput) email: ChannelOutput,
+    @inject(NfircoThreadOutput) nfirco: ChannelOutput,
     @inject(ThreadWorkspaceResolver) private readonly workspaceResolver: ThreadWorkspaceResolver
   ) {
     this.availableOutputs = [
@@ -56,7 +49,7 @@ export class ChannelOutputManager {
   async start(): Promise<void> {
     if (!this.started) {
       this.started = true
-      this.eventBus.on(AppEvent.ChannelMessageSendRequested, this.listener)
+      this.eventBus.on(AppEvent.ChannelMessageDisplayRequested, this.listener)
     }
     this.configer.subscribe('channelo', async () => {
       const applied = await this.applyConfig()
@@ -67,22 +60,22 @@ export class ChannelOutputManager {
     await this.applyConfig()
   }
 
-  async send(message: Message, inputType?: ChannelOutputContext['inputType']): Promise<Result<void>> {
+  async send(message: Message, source?: ChannelOutputContext['source']): Promise<Result<void>> {
     if (message.role === 'user') {
-      return this.sendUser(message, inputType)
+      return this.sendUser(message, source)
     }
     if (message.role === 'agent') {
-      return this.sendAgent(message, inputType)
+      return this.sendAgent(message, source)
     }
     return this.sendSystem(message.text, message.ioThreadId)
   }
 
-  async sendUser(message: Message, inputType?: ChannelOutputContext['inputType']): Promise<Result<void>> {
+  async sendUser(message: Message, source?: ChannelOutputContext['source']): Promise<Result<void>> {
     if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
       return Result.fail('text or file is required')
     }
     Logger.info('user message received', {
-      inputType: inputType ?? null,
+      source: source ?? null,
       ioThreadId: message.ioThreadId,
       text: message.text,
       files: message.files?.length ?? 0
@@ -92,11 +85,11 @@ export class ChannelOutputManager {
       role: 'user'
     }
     return this.broadcast(stored, {
-      inputType
+      source
     })
   }
 
-  async sendAgent(message: Message, inputType?: ChannelOutputContext['inputType']): Promise<Result<void>> {
+  async sendAgent(message: Message, source?: ChannelOutputContext['source']): Promise<Result<void>> {
     const prepared = await this.prepareAgentMessage(message)
     if (prepared.text.trim().length === 0 && (!prepared.files || prepared.files.length === 0)) {
       return Result.fail('text or file is required')
@@ -106,7 +99,7 @@ export class ChannelOutputManager {
       role: 'agent'
     }
     return this.broadcast(stored, {
-      inputType
+      source
     })
   }
 
@@ -130,7 +123,7 @@ export class ChannelOutputManager {
     const failures: string[] = []
     if (this.started) {
       this.started = false
-      this.eventBus.off(AppEvent.ChannelMessageSendRequested, this.listener)
+      this.eventBus.off(AppEvent.ChannelMessageDisplayRequested, this.listener)
     }
     await this.flushOutputs()
     for (const output of this.outputs.values()) {
@@ -176,12 +169,7 @@ export class ChannelOutputManager {
     if (this.outputs.size === 0) {
       return Result.fail('channel output not found')
     }
-    const outputs = [...this.outputs.values()].filter((output) => {
-      if (!context?.inputType) {
-        return true
-      }
-      return output.type === 'web' || output.type === context.inputType || !inputOutputTypes.has(output.type)
-    })
+    const outputs = [...this.outputs.values()]
     if (outputs.length === 0) {
       return Result.fail('channel output not found')
     }

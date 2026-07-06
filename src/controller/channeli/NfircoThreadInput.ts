@@ -180,12 +180,10 @@ export class NfircoThreadInput implements ChannelInput {
       }
     }
     const result = await receiver.receive('nfirco', {
-      platformThreadIds: [
-        {
-          source: 'nfirco',
-          id: event.threadUuid
-        }
-      ],
+      channelThreadId: {
+        source: 'nfirco',
+        id: event.threadUuid
+      },
       text: event.text,
       files
     })

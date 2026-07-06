@@ -36,7 +36,7 @@ export class NfircoThreadOutput implements ChannelOutput {
   }
 
   async send(message: Message, context?: ChannelOutputContext): Promise<Result<void>> {
-    if (context?.inputType === 'nfirco' && message.role === 'user') {
+    if (context?.source === 'nfirco' && message.role === 'user') {
       return Result.successVoid()
     }
     if (!this.config?.enabled) {
@@ -86,7 +86,7 @@ export class NfircoThreadOutput implements ChannelOutput {
   }
 
   private findThreadUuid(ioThreadId: string): string | undefined {
-    const threads = this.ioThreadIdManager.getPlatformThreadId(ioThreadId)
+    const threads = this.ioThreadIdManager.getChannelThreadIds(ioThreadId)
     return threads.find((thread) => thread.source === 'nfirco')?.id
   }
 

@@ -11,7 +11,6 @@ import { CodexioMetadata } from '../CodexioMetadata.js'
 import { Logger } from '../Logger.js'
 import { ThreadWorkspaceResolver } from '../ThreadWorkspaceResolver.js'
 import { createProcessEnv } from '../../util/ProcessEnvironment.js'
-import { CodexThread } from '../../value/CodexThread.js'
 import { MessageFile } from '../../value/Message.js'
 import { Result } from '../../value/Result.js'
 
@@ -29,7 +28,12 @@ type RpcMessage = {
   }
 }
 
-export type CodexClientThread = CodexThread
+export type CodexClientThread = {
+  id: string
+  title: string
+  isWorking: boolean
+  deleted?: boolean
+}
 
 export type CodexClientInput = {
   ioThreadId: string

@@ -179,8 +179,7 @@ export function normalizeNfircoThreadCredentials(credentials: NfircoThreadCreden
 
 function credentialsHeaders(credentials: NfircoThreadCredentials): Record<string, string> {
   return {
-    'Threadio-Account': credentials.account.trim(),
-    'Threadio-Password': credentials.password
+    Authorization: `Basic ${Buffer.from(`${credentials.account.trim()}:${credentials.password}`, 'utf8').toString('base64')}`
   }
 }
 

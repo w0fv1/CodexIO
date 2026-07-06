@@ -18,7 +18,7 @@ type ParsedInput =
   }
 
 export type CommandExecutorInput = {
-  inputType: ChannelType
+  source: ChannelType
   message: Message
   input: ChannelInputMessage
 }
@@ -75,15 +75,15 @@ export class CommandExecutor {
       })
     }
     Logger.info('command executor received command', {
-      inputType: input.inputType,
+      source: input.source,
       ioThreadId: input.message.ioThreadId,
       command: parsed.name,
       args: parsed.args
     })
     if (parsed.name === 'test') {
-      if (input.inputType === 'feishu' && !input.input.mentioned) {
+      if (input.source === 'feishu' && !input.input.mentioned) {
         Logger.info('command executor test ignored', {
-          inputType: input.inputType,
+          source: input.source,
           ioThreadId: input.message.ioThreadId,
           reason: 'aite required'
         })
@@ -93,7 +93,7 @@ export class CommandExecutor {
         })
       }
       Logger.info('command executor test', {
-        inputType: input.inputType,
+        source: input.source,
         ioThreadId: input.message.ioThreadId,
         mentioned: Boolean(input.input.mentioned),
         openId: input.input.sender?.openId ?? '',
@@ -106,7 +106,7 @@ export class CommandExecutor {
       })
     }
     if (parsed.name === 'help' || parsed.name === '?') {
-      const sent = await this.sendSystem(commandHelpText, input.inputType, input.message.ioThreadId)
+      const sent = await this.sendSystem(commandHelpText, input.source, input.message.ioThreadId)
       if (sent.isFailed) {
         return Result.fail(sent.message)
       }
@@ -117,10 +117,10 @@ export class CommandExecutor {
     }
     const name = parsed.name.length > 0 ? parsed.name : '(empty)'
     Logger.warn('command executor unknown command', {
-      inputType: input.inputType,
+      source: input.source,
       command: name
     })
-    const sent = await this.sendSystem(`unknown command: ${name}`, input.inputType, input.message.ioThreadId)
+    const sent = await this.sendSystem(`unknown command: ${name}`, input.source, input.message.ioThreadId)
     if (sent.isFailed) {
       return Result.fail(sent.message)
     }
@@ -130,9 +130,9 @@ export class CommandExecutor {
     })
   }
 
-  private async sendSystem(text: string, inputType: ChannelType, ioThreadId: string): Promise<Result<void>> {
-    const results = await this.eventBus.emitAsync(AppEvent.ChannelMessageSendRequested, {
-      inputType,
+  private async sendSystem(text: string, source: ChannelType, ioThreadId: string): Promise<Result<void>> {
+    const results = await this.eventBus.emitAsync(AppEvent.ChannelMessageDisplayRequested, {
+      source,
       message: {
         ioThreadId,
         role: 'system',

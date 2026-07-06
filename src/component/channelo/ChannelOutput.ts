@@ -5,7 +5,7 @@ import { Result } from '../../value/Result.js'
 export type ChannelType = keyof CodexioConfig['channelo']
 
 export type ChannelOutputContext = {
-  inputType?: keyof CodexioConfig['channeli']
+  source?: keyof CodexioConfig['channeli']
 }
 
 export interface ChannelOutput {

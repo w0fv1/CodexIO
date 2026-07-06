@@ -109,16 +109,15 @@ export class EmailChannelInput implements ChannelInput {
         ] : []
         const root = references.find((item) => item.trim().length > 0) ?? parsed.inReplyTo ?? parsed.messageId ?? ''
         const mailbox = this.inputConfig?.account?.imap?.user ?? this.inputConfig?.user ?? 'mailbox'
-        const emailKeys = [
-          root.trim().length > 0 ? `${mailbox}:root:${root.trim()}` : '',
-          parsed.messageId?.trim() ? `${mailbox}:message:${parsed.messageId.trim()}` : ''
-        ].filter((value) => value.length > 0)
-        const emailThreadIds = (emailKeys.length > 0 ? emailKeys : [
-          `${mailbox}:mailbox`
-        ]).map((id) => ({
+        const emailThreadId = root.trim().length > 0
+          ? `${mailbox}:root:${root.trim()}`
+          : parsed.messageId?.trim()
+            ? `${mailbox}:message:${parsed.messageId.trim()}`
+            : `${mailbox}:mailbox`
+        const channelThreadId = {
           source: 'email' as const,
-          id
-        }))
+          id: emailThreadId
+        }
         const senderList = parsed.from?.value.map((address) => address.address).filter((address): address is string => Boolean(address)) ?? []
         const allowedSender = this.inputConfig?.user?.trim().toLowerCase()
         if (!allowedSender || !senderList.some((item) => item.trim().toLowerCase() === allowedSender)) {
@@ -149,7 +148,7 @@ export class EmailChannelInput implements ChannelInput {
             continue
           }
           const result = await receiver.receive('email', {
-            platformThreadIds: emailThreadIds as [typeof emailThreadIds[number], ...typeof emailThreadIds[number][]],
+            channelThreadId,
             text
           })
           if (result.isFailed) {

@@ -6,7 +6,6 @@ import { setTimeout as wait } from 'node:timers/promises'
 import electron from 'electron'
 import type { NativeImage, Tray as ElectronTray } from 'electron'
 import { CodexioUpdater } from './CodexioUpdater.js'
-import { migrateLegacyDataRoot } from './component/DataRootMigration.js'
 
 type ServerState = {
   pid: number
@@ -46,9 +45,6 @@ class CodexioDesktop {
       recursive: true
     })
     this.log('desktop starting')
-    if (app.isPackaged) {
-      await migrateLegacyDataRoot(join(dirname(process.execPath), 'data'), this.dataRoot, (message) => this.log(message))
-    }
     this.updater = new CodexioUpdater({
       isPackaged: app.isPackaged,
       currentVersion: app.getVersion(),

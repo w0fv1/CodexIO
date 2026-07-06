@@ -7,13 +7,12 @@ import { CodexioMetadata } from './CodexioMetadata.js'
 import { Logger } from './Logger.js'
 
 export type IoThreadSource = 'web' | 'feishu' | 'email' | 'nfirco'
-export type ChannelThreadIdValue = {
+export type ChannelThreadId = {
   source: IoThreadSource
   id: string
 }
-export type PlatformThreadId = ChannelThreadIdValue
 
-const PlatformThreadIdSchema = z.object({
+const ChannelThreadIdSchema = z.object({
   source: z.enum([
     'web',
     'feishu',
@@ -24,11 +23,11 @@ const PlatformThreadIdSchema = z.object({
 })
 
 const IoThreadStateSchema = z.object({
-  version: z.literal(1),
+  version: z.literal(2),
   lastActiveIoThreadId: z.string().trim().min(1).optional(),
   threads: z.array(z.object({
     ioThreadId: z.string().trim().min(1),
-    platformThreadIds: z.array(PlatformThreadIdSchema),
+    channelThreadIds: z.array(ChannelThreadIdSchema),
     createdAt: z.number().int().positive(),
     updatedAt: z.number().int().positive()
   }))
@@ -36,8 +35,8 @@ const IoThreadStateSchema = z.object({
 
 type IoThreadState = z.infer<typeof IoThreadStateSchema>
 
-class ChannelThreadId {
-  private readonly bindings = new Map<IoThreadSource, Set<string>>()
+class IoThreadBinding {
+  private readonly bindings = new Map<IoThreadSource, string>()
   createdAt: number
   updatedAt: number
 
@@ -46,47 +45,42 @@ class ChannelThreadId {
     this.updatedAt = updatedAt
   }
 
-  bind(value: ChannelThreadIdValue): boolean {
+  bind(value: ChannelThreadId): boolean {
     const id = value.id.trim()
     if (id.length === 0) {
       throw new Error('ioThread key is required')
     }
-    let sourceKeys = this.bindings.get(value.source)
-    if (!sourceKeys) {
-      sourceKeys = new Set<string>()
-      this.bindings.set(value.source, sourceKeys)
-    }
-    if (sourceKeys.has(id)) {
+    const existing = this.bindings.get(value.source)
+    if (existing === id) {
       return false
     }
-    sourceKeys.add(id)
+    if (existing) {
+      throw new Error('ioThread source already bound')
+    }
+    this.bindings.set(value.source, id)
     this.updatedAt = Date.now()
     return true
   }
 
-  has(value: ChannelThreadIdValue): boolean {
+  has(value: ChannelThreadId): boolean {
     const id = value.id.trim()
     if (id.length === 0) {
       return false
     }
-    const sourceKeys = this.bindings.get(value.source)
-    if (!sourceKeys) {
-      return false
-    }
-    return sourceKeys.has(id)
+    return this.bindings.get(value.source) === id
   }
 
-  values(): PlatformThreadId[] {
-    return [...this.bindings.entries()].flatMap(([source, ids]) => [...ids].map((id) => ({
+  values(): ChannelThreadId[] {
+    return [...this.bindings.entries()].map(([source, id]) => ({
       source,
       id
-    })))
+    }))
   }
 }
 
 @injectable()
 export class IoThreadIdManager {
-  private readonly threads = new Map<string, ChannelThreadId>()
+  private readonly threads = new Map<string, IoThreadBinding>()
   private readonly statePath: string
   private lastActiveIoThreadId?: string
   private persistQueue = Promise.resolve()
@@ -107,21 +101,21 @@ export class IoThreadIdManager {
       throw error
     }
     const state = IoThreadStateSchema.parse(JSON.parse(text))
-    const restored = new Map<string, ChannelThreadId>()
-    const ioThreadIdByPlatformThreadId = new Map<string, string>()
+    const restored = new Map<string, IoThreadBinding>()
+    const ioThreadIdByChannelThreadId = new Map<string, string>()
     for (const item of state.threads) {
       if (restored.has(item.ioThreadId)) {
         throw new Error(`ioThreadId duplicated in state: ${item.ioThreadId}`)
       }
-      const thread = new ChannelThreadId(item.createdAt, item.updatedAt)
-      for (const platformThreadId of item.platformThreadIds) {
-        const key = this.platformThreadKey(platformThreadId)
-        const existingIoThreadId = ioThreadIdByPlatformThreadId.get(key)
+      const thread = new IoThreadBinding(item.createdAt, item.updatedAt)
+      for (const channelThreadId of item.channelThreadIds) {
+        const key = this.channelThreadKey(channelThreadId)
+        const existingIoThreadId = ioThreadIdByChannelThreadId.get(key)
         if (existingIoThreadId && existingIoThreadId !== item.ioThreadId) {
-          throw new Error(`ioThread key already bound in state: ${platformThreadId.source}:${platformThreadId.id}`)
+          throw new Error(`ioThread key already bound in state: ${channelThreadId.source}:${channelThreadId.id}`)
         }
-        ioThreadIdByPlatformThreadId.set(key, item.ioThreadId)
-        thread.bind(platformThreadId)
+        ioThreadIdByChannelThreadId.set(key, item.ioThreadId)
+        thread.bind(channelThreadId)
       }
       thread.createdAt = item.createdAt
       thread.updatedAt = item.updatedAt
@@ -137,18 +131,18 @@ export class IoThreadIdManager {
     this.lastActiveIoThreadId = state.lastActiveIoThreadId
   }
 
-  getIoThreadId(platformThreadId: PlatformThreadId): string {
-    const existingIoThreadId = this.find(platformThreadId)
+  getIoThreadId(channelThreadId: ChannelThreadId): string {
+    const existingIoThreadId = this.find(channelThreadId)
     if (existingIoThreadId) {
       this.touch(existingIoThreadId)
       return existingIoThreadId
     }
     const ioThreadId = randomUUID()
-    this.bind(ioThreadId, platformThreadId)
+    this.bind(ioThreadId, channelThreadId)
     return ioThreadId
   }
 
-  getPlatformThreadId(ioThreadId: string): PlatformThreadId[] {
+  getChannelThreadIds(ioThreadId: string): ChannelThreadId[] {
     const normalizedIoThreadId = ioThreadId.trim()
     const thread = this.threads.get(normalizedIoThreadId)
     if (!thread) {
@@ -162,19 +156,19 @@ export class IoThreadIdManager {
     return this.lastActiveIoThreadId
   }
 
-  bind(ioThreadId: string, platformThreadId: PlatformThreadId): void {
+  bind(ioThreadId: string, channelThreadId: ChannelThreadId): void {
     const normalizedIoThreadId = ioThreadId.trim()
     if (normalizedIoThreadId.length === 0) {
       throw new Error('ioThreadId is required')
     }
-    if (platformThreadId.id.trim().length === 0) {
+    if (channelThreadId.id.trim().length === 0) {
       throw new Error('ioThread key is required')
     }
-    const existingIoThreadId = this.find(platformThreadId)
+    const existingIoThreadId = this.find(channelThreadId)
     if (existingIoThreadId && existingIoThreadId !== normalizedIoThreadId) {
       throw new Error('ioThread key already bound')
     }
-    const changed = this.ensureThread(normalizedIoThreadId).bind(platformThreadId)
+    const changed = this.ensureThread(normalizedIoThreadId).bind(channelThreadId)
     this.touch(normalizedIoThreadId, changed)
   }
 
@@ -185,7 +179,7 @@ export class IoThreadIdManager {
     }
   }
 
-  private find(channelThreadId: ChannelThreadIdValue): string | undefined {
+  private find(channelThreadId: ChannelThreadId): string | undefined {
     for (const [ioThreadId, thread] of this.threads.entries()) {
       if (thread.has(channelThreadId)) {
         return ioThreadId
@@ -194,7 +188,7 @@ export class IoThreadIdManager {
     return undefined
   }
 
-  private ensureThread(ioThreadId: string): ChannelThreadId {
+  private ensureThread(ioThreadId: string): IoThreadBinding {
     const normalizedIoThreadId = ioThreadId.trim()
     if (normalizedIoThreadId.length === 0) {
       throw new Error('ioThreadId is required')
@@ -203,7 +197,7 @@ export class IoThreadIdManager {
     if (existing) {
       return existing
     }
-    const thread = new ChannelThreadId()
+    const thread = new IoThreadBinding()
     this.threads.set(normalizedIoThreadId, thread)
     return thread
   }
@@ -243,18 +237,18 @@ export class IoThreadIdManager {
 
   private toState(): IoThreadState {
     return {
-      version: 1,
+      version: 2,
       lastActiveIoThreadId: this.lastActiveIoThreadId,
       threads: [...this.threads.entries()].map(([ioThreadId, thread]) => ({
         ioThreadId,
-        platformThreadIds: thread.values(),
+        channelThreadIds: thread.values(),
         createdAt: thread.createdAt,
         updatedAt: thread.updatedAt
       }))
     }
   }
 
-  private platformThreadKey(platformThreadId: PlatformThreadId): string {
-    return `${platformThreadId.source}\u0000${platformThreadId.id.trim()}`
+  private channelThreadKey(channelThreadId: ChannelThreadId): string {
+    return `${channelThreadId.source}\u0000${channelThreadId.id.trim()}`
   }
 }

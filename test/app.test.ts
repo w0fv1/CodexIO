@@ -1,4 +1,4 @@
-import { Server as HttpServer } from 'node:http'
+import { IncomingHttpHeaders, Server as HttpServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -39,6 +39,7 @@ import { CommandExecutor } from '../src/controller/CommandExecutor.js'
 const testToken = 'test-message-token'
 const testMetadata = new CodexioMetadata()
 const testServerStops = new WeakMap<HttpServer, () => Promise<Result<void>>>()
+const nfircoAuthorization = `Basic ${Buffer.from('用户+Book:pass+密码', 'utf8').toString('base64')}`
 
 describe('server', () => {
   it('serves the Codexio web chat page', () => {
@@ -259,9 +260,11 @@ describe('server', () => {
       path: '/api/threadio/ws'
     })
     const sockets: WebSocket[] = []
+    const connectionHeaders: IncomingHttpHeaders[] = []
     let connectionCount = 0
-    wsServer.on('connection', (socket) => {
+    wsServer.on('connection', (socket, request) => {
       sockets.push(socket)
+      connectionHeaders.push(request.headers)
       connectionCount += 1
       const currentConnection = connectionCount
       socket.on('message', (data) => {
@@ -293,8 +296,8 @@ describe('server', () => {
       '  nfirco:',
       '    enabled: true',
       `    baseUrl: http://127.0.0.1:${port}`,
-      '    account: user',
-      '    password: pass',
+      '    account: 用户+Book',
+      '    password: pass+密码',
       '    section: section-1',
       'channelo:',
       '  web:',
@@ -308,11 +311,11 @@ describe('server', () => {
     ;(input as unknown as { reconnectDelayMs: number }).reconnectDelayMs = 10
     const received: Array<Record<string, unknown>> = []
     await input.start({
-      receive: async (inputType, message) => {
+      receive: async (source, message) => {
         received.push({
-          inputType,
+          source,
           text: message.text,
-          platformThreadId: message.platformThreadIds[0]?.id,
+          channelThreadId: message.channelThreadId.id,
           files: (message.files ?? []).map((file) => ({
             name: file.name,
             mime: file.mime,
@@ -333,6 +336,7 @@ describe('server', () => {
         setTimeout(resolve, 5)
       })
     }
+    expect(connectionHeaders[0].authorization).toBe(nfircoAuthorization)
     sockets[1].send(JSON.stringify({
       type: 'thread.message.created',
       eventId: 'event-1',
@@ -360,9 +364,9 @@ describe('server', () => {
     await waitForWebSocketMessages(received, 2)
     expect(received).toEqual([
       {
-        inputType: 'nfirco',
+        source: 'nfirco',
         text: 'hello',
-        platformThreadId: 'thread-1',
+        channelThreadId: 'thread-1',
         files: [
           {
             name: 'readme.txt',
@@ -372,9 +376,9 @@ describe('server', () => {
         ]
       },
       {
-        inputType: 'nfirco',
+        source: 'nfirco',
         text: 'thread body',
-        platformThreadId: 'thread-2',
+        channelThreadId: 'thread-2',
         files: []
       }
     ])
@@ -398,8 +402,11 @@ describe('server', () => {
     const port = await resolveAvailableServerPort('127.0.0.1', 8787)
     let uploadedBody = ''
     let messageBody: Record<string, unknown> | undefined
+    let uploadHeaders: IncomingHttpHeaders | undefined
+    let messageHeaders: IncomingHttpHeaders | undefined
     const httpServer = new HttpServer((request, response) => {
       if (request.method === 'POST' && request.url === '/api/threadio/file/upload-url') {
+        uploadHeaders = request.headers
         response.setHeader('Content-Type', 'application/json')
         response.end(JSON.stringify({
           code: '1',
@@ -425,6 +432,7 @@ describe('server', () => {
         return
       }
       if (request.method === 'POST' && request.url === '/api/threadio/thread/thread-1/message') {
+        messageHeaders = request.headers
         let body = ''
         request.on('data', (chunk) => {
           body += chunk.toString()
@@ -456,8 +464,8 @@ describe('server', () => {
       '  nfirco:',
       '    enabled: true',
       `    baseUrl: http://127.0.0.1:${port}`,
-      '    account: user',
-      '    password: pass'
+      '    account: 用户+Book',
+      '    password: pass+密码'
     ].join('\n'))
     const metadata = new CodexioMetadata({
       rootPath: testMetadata.rootPath,
@@ -484,10 +492,12 @@ describe('server', () => {
         file
       ]
     }, {
-      inputType: 'nfirco'
+      source: 'nfirco'
     })
     expect(result.isFailed).toBe(false)
     expect(uploadedBody).toBe('image-body')
+    expect(uploadHeaders?.authorization).toBe(nfircoAuthorization)
+    expect(messageHeaders?.authorization).toBe(nfircoAuthorization)
     expect(messageBody).toMatchObject({
       text: '看图',
       fileIds: [],
@@ -550,10 +560,10 @@ async function createTestCodexioApp(configer: Configer): Promise<{
   const ioThreadIdManager = createIoThreadIdManager()
   const workspaceResolver = new ThreadWorkspaceResolver(configer, metadata)
   const codexClient = new CodexClient(configer, metadata, workspaceResolver)
-  const webThreadManager = new WebThreadManager(ioThreadIdManager, eventBus)
+  const webThreadManager = new WebThreadManager(ioThreadIdManager)
   const webHub = new WebChannelHub(fileStore, webThreadManager)
   const webInput = new WebChannelInput(configer, webHub)
-  const webOutput = new WebChannelOutput(configer, webHub, ioThreadIdManager)
+  const webOutput = new WebChannelOutput(configer, webHub)
   const feishuInput = new FeishuChannelInput(configer)
   const feishuOutput = new FeishuChannelOutput(configer, ioThreadIdManager)
   const emailInput = new EmailChannelInput(configer)

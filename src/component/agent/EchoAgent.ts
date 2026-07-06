@@ -23,13 +23,13 @@ export class EchoAgent implements Agent {
 
   async receive(event: ChannelMessageReceivedEvent): Promise<Result<void>> {
     Logger.info('echo agent received channel message', {
-      inputType: event.inputType,
+      source: event.source,
       ioThreadId: event.message.ioThreadId,
       text: event.message.text,
       files: event.message.files?.length ?? 0
     })
-    const resultList = await this.eventBus.emitAsync(AppEvent.ChannelMessageSendRequested, {
-      inputType: event.inputType,
+    const resultList = await this.eventBus.emitAsync(AppEvent.ChannelMessageDisplayRequested, {
+      source: event.source,
       message: {
         ioThreadId: event.message.ioThreadId,
         role: 'agent',

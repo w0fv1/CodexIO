@@ -1,5 +1,5 @@
 import { inject, injectable } from 'inversify'
-import { AppEvent, ChannelMessageSendRequestedEvent } from '../../value/Event.js'
+import { AppEvent, ChannelMessageDisplayRequestedEvent } from '../../value/Event.js'
 import { Result } from '../../value/Result.js'
 import { EventBus } from '../EventBus.js'
 import { Logger } from '../Logger.js'
@@ -7,7 +7,7 @@ import { Logger } from '../Logger.js'
 export type CodexStreamThread = {
   ioThreadId: string
   agentThreadId: string
-  inputType?: ChannelMessageSendRequestedEvent['inputType']
+  source?: ChannelMessageDisplayRequestedEvent['source']
 }
 
 export type CodexStreamMessage = {
@@ -159,8 +159,8 @@ export class CodexMessageStreamer {
     if (segment.length === 0) {
       return
     }
-    const results = await this.eventBus.emitAsync(AppEvent.ChannelMessageSendRequested, {
-      inputType: thread.inputType,
+    const results = await this.eventBus.emitAsync(AppEvent.ChannelMessageDisplayRequested, {
+      source: thread.source,
       message: {
         ioThreadId: thread.ioThreadId,
         role: 'agent',

@@ -23,10 +23,10 @@ export class ChannelInputManager implements ChannelInputReceiver {
     @inject(EventBus) private readonly eventBus: EventBus,
     @inject(IoThreadIdManager) private readonly ioThreadIdManager: IoThreadIdManager,
     @inject(CommandExecutor) private readonly commandExecutor: CommandExecutor,
-    @inject(WebChannelInput) web: WebChannelInput,
-    @inject(FeishuChannelInput) feishu: FeishuChannelInput,
-    @inject(EmailChannelInput) email: EmailChannelInput,
-    @inject(NfircoThreadInput) nfirco: NfircoThreadInput
+    @inject(WebChannelInput) web: ChannelInput,
+    @inject(FeishuChannelInput) feishu: ChannelInput,
+    @inject(EmailChannelInput) email: ChannelInput,
+    @inject(NfircoThreadInput) nfirco: ChannelInput
   ) {
     this.availableInputs = [
       web,
@@ -46,20 +46,16 @@ export class ChannelInputManager implements ChannelInputReceiver {
     await this.applyConfig()
   }
 
-  async receive(inputType: ChannelType, input: ChannelInputMessage): Promise<Result<ChannelInputReceiveResult>> {
-    const [primaryPlatformThreadId, ...secondaryPlatformThreadIds] = input.platformThreadIds
-    const ioThreadId = this.ioThreadIdManager.getIoThreadId(primaryPlatformThreadId)
-    for (const platformThreadId of secondaryPlatformThreadIds) {
-      this.ioThreadIdManager.bind(ioThreadId, platformThreadId)
-    }
+  async receive(source: ChannelType, input: ChannelInputMessage): Promise<Result<ChannelInputReceiveResult>> {
+    const ioThreadId = this.ioThreadIdManager.getIoThreadId(input.channelThreadId)
     const message: Message = {
       ioThreadId,
       role: 'user',
       text: input.text,
       files: input.files
     }
-    const sendResultList = await this.eventBus.emitAsync(AppEvent.ChannelMessageSendRequested, {
-      inputType,
+    const sendResultList = await this.eventBus.emitAsync(AppEvent.ChannelMessageDisplayRequested, {
+      source,
       message
     })
     const sendFailures = sendResultList.filter((item) => item.isFailed)
@@ -67,7 +63,7 @@ export class ChannelInputManager implements ChannelInputReceiver {
       return Result.fail(sendFailures.map((item) => item.message).join('\n'))
     }
     const command = await this.commandExecutor.receive({
-      inputType,
+      source,
       message,
       input
     })
@@ -75,7 +71,7 @@ export class ChannelInputManager implements ChannelInputReceiver {
       return command
     }
     const resultList = await this.eventBus.emitAsync(AppEvent.ChannelMessageReceived, {
-      inputType,
+      source,
       message
     })
     const failures = resultList.filter((item) => item.isFailed)

@@ -4,6 +4,8 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ChannelOutputManager } from '../src/component/channelo/ChannelOutputManager.js'
+import { ChannelOutput } from '../src/component/channelo/ChannelOutput.js'
+import { FeishuChannelOutput } from '../src/component/channelo/FeishuChannelOutput.js'
 import { WebChannelOutput } from '../src/component/channelo/WebChannelOutput.js'
 import { Configer } from '../src/component/Configer.js'
 import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
@@ -11,12 +13,13 @@ import { EventBus } from '../src/component/EventBus.js'
 import { FileStore } from '../src/component/FileStore.js'
 import { IoThreadIdManager } from '../src/component/IoThreadIdManager.js'
 import { ThreadWorkspaceResolver } from '../src/component/ThreadWorkspaceResolver.js'
-import { migrateLegacyDataRoot } from '../src/component/DataRootMigration.js'
 import { Agent } from '../src/component/agent/Agent.js'
 import { AgentManager } from '../src/component/agent/AgentManager.js'
 import { CodexClient, CodexClientThread } from '../src/component/agent/CodexClient.js'
 import { CodexMessageStreamer } from '../src/component/agent/CodexMessageStreamer.js'
 import { CommandExecutor, parseCommandInput } from '../src/controller/CommandExecutor.js'
+import { ChannelInput } from '../src/controller/channeli/ChannelInput.js'
+import { ChannelInputManager } from '../src/controller/channeli/ChannelInputManager.js'
 import { AppEvent, ChannelMessageReceivedEvent } from '../src/value/Event.js'
 import { ConfigSchema, createDefaultConfig, parseCodexioConfig, validateCodexioConfig } from '../src/value/ConfigDefinition.js'
 import { Result } from '../src/value/Result.js'
@@ -201,19 +204,17 @@ describe('core', () => {
     const eventBus = new EventBus()
     const executor = new CommandExecutor(eventBus)
     const result = await executor.receive({
-      inputType: 'feishu',
+      source: 'feishu',
       message: {
         ioThreadId: 'io-thread',
         role: 'user',
         text: '$test'
       },
       input: {
-        platformThreadIds: [
-          {
-            source: 'feishu',
-            id: 'chat:message:om_1'
-          }
-        ],
+        channelThreadId: {
+          source: 'feishu',
+          id: 'chat:thread:omt_1'
+        },
         text: '$test',
         mentioned: true,
         sender: {
@@ -222,6 +223,57 @@ describe('core', () => {
       }
     })
     expect(result.data?.consumed).toBe(true)
+  })
+
+  it('publishes input messages to display and agent manager events', async () => {
+    const eventBus = new EventBus()
+    const events: Array<{ type: string, source: string | undefined, text: string }> = []
+    eventBus.on(AppEvent.ChannelMessageDisplayRequested, async (event) => {
+      events.push({
+        type: 'display',
+        source: event.source,
+        text: event.message.text
+      })
+      return Result.successVoid()
+    })
+    eventBus.on(AppEvent.ChannelMessageReceived, async (event) => {
+      events.push({
+        type: 'agent',
+        source: event.source,
+        text: event.message.text
+      })
+      return Result.successVoid()
+    })
+    const manager = new ChannelInputManager(
+      {} as Configer,
+      eventBus,
+      createIoThreadIdManager(),
+      new CommandExecutor(eventBus),
+      disabledInput('web'),
+      disabledInput('feishu'),
+      disabledInput('email'),
+      disabledInput('nfirco')
+    )
+    const result = await manager.receive('feishu', {
+      channelThreadId: {
+        source: 'feishu',
+        id: 'chat:thread:omt_1'
+      },
+      text: 'hello'
+    })
+    expect(result.isFailed).toBe(false)
+    expect(events).toEqual([
+      {
+        type: 'display',
+        source: 'feishu',
+        text: 'hello'
+      },
+      {
+        type: 'agent',
+        source: 'feishu',
+        text: 'hello'
+      }
+    ])
   })
 
   it('rejects configs without enabled channel input and output', () => {
@@ -326,27 +378,6 @@ describe('core', () => {
     }))
     await configer.init(false)
     expect(await readFile(configPath, 'utf8')).toBe(text)
-  })
-
-  it('migrates legacy packaged data without overwriting current config', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'codexio-data-migration-'))
-    const legacyRoot = join(dir, 'install-data')
-    const currentRoot = join(dir, 'user-data')
-    await mkdir(join(legacyRoot, 'state'), {
-      recursive: true
-    })
-    await writeFile(join(legacyRoot, 'config.yaml'), 'server:\n  token: legacy\n', 'utf8')
-    await writeFile(join(legacyRoot, 'state', 'io-thread.json'), '{"version":1,"threads":[]}', 'utf8')
-    const logs: string[] = []
-    await expect(migrateLegacyDataRoot(legacyRoot, currentRoot, (message) => logs.push(message))).resolves.toBe(true)
-    expect(await readFile(join(currentRoot, 'config.yaml'), 'utf8')).toContain('legacy')
-    expect(await readFile(join(currentRoot, 'state', 'io-thread.json'), 'utf8')).toContain('"version":1')
-    expect(logs[0]).toContain('migrated legacy data root')
-
-    await writeFile(join(currentRoot, 'config.yaml'), 'server:\n  token: current\n', 'utf8')
-    await writeFile(join(legacyRoot, 'config.yaml'), 'server:\n  token: changed-legacy\n', 'utf8')
-    await expect(migrateLegacyDataRoot(legacyRoot, currentRoot)).resolves.toBe(false)
-    expect(await readFile(join(currentRoot, 'config.yaml'), 'utf8')).toContain('current')
   })
 
   it('enables auto port from runtime args', async () => {
@@ -591,7 +622,7 @@ describe('core', () => {
     ])
   })
 
-  it('does not send non-web channel messages to the web thread history', async () => {
+  it('sends non-web channel messages to the web thread history', async () => {
     const sent: Message[] = []
     const output = new WebChannelOutput({
       get: async (path: string) => {
@@ -613,7 +644,7 @@ describe('core', () => {
         sent.push(message)
         return Result.successVoid()
       }
-    } as never, createIoThreadIdManager())
+    })
     expect(await output.start()).toBe(true)
     const result = await output.send({
       ioThreadId: 'external-io-thread',
@@ -621,42 +652,48 @@ describe('core', () => {
       text: 'external'
     })
     expect(result.isFailed).toBe(false)
-    expect(sent).toEqual([])
+    expect(sent).toEqual([
+      {
+        ioThreadId: 'external-io-thread',
+        role: 'agent',
+        text: 'external'
+      }
+    ])
   })
 
-  it('merges codex agent thread events into the bound web thread', () => {
-    const eventBus = new EventBus()
-    const ioThreadIdManager = createIoThreadIdManager()
-    const manager = new WebThreadManager(ioThreadIdManager, eventBus)
-    ioThreadIdManager.bind('io-thread-web', {
-      source: 'web',
-      id: 'web-thread'
+  it('stores non-web channel messages in an io thread web view', () => {
+    const manager = new WebThreadManager(createIoThreadIdManager())
+    manager.appendMessage({
+      ioThreadId: 'external-io-thread',
+      role: 'user',
+      text: 'hello'
     })
-    eventBus.emit(AppEvent.CodexThreadChanged, {
+    manager.appendMessage({
+      ioThreadId: 'external-io-thread',
+      role: 'agent',
+      text: 'world'
+    })
+    expect(manager.snapshot()).toMatchObject({
       threads: [
         {
-          id: 'codex-thread',
-          title: 'Codex title',
-          isWorking: true
+          id: 'io:external-io-thread',
+          ioThreadId: 'external-io-thread',
+          title: 'hello'
+        }
+      ],
+      messages: [
+        {
+          role: 'user',
+          webThreadId: 'io:external-io-thread',
+          text: 'hello'
+        },
+        {
+          role: 'agent',
+          webThreadId: 'io:external-io-thread',
+          text: 'world'
         }
       ]
     })
-    expect(manager.snapshot().threads.map((thread) => thread.id)).toEqual([
-      'codex:codex-thread'
-    ])
-    eventBus.emit(AppEvent.CodexThreadBound, {
-      ioThreadId: 'io-thread-web',
-      threadId: 'codex-thread'
-    })
-    expect(manager.snapshot().threads).toEqual([
-      expect.objectContaining({
-        id: 'web-thread',
-        ioThreadId: 'io-thread-web',
-        agentThreadId: 'codex-thread',
-        title: 'Codex title',
-        isWorking: true
-      })
-    ])
   })
 
   it('resolves tilde workspace paths to the user home directory', async () => {
@@ -711,7 +748,7 @@ describe('core', () => {
     })
   })
 
-  it('binds platform thread identities to one io thread', () => {
+  it('binds one platform thread identity to one io thread', () => {
     const manager = createIoThreadIdManager()
     const ioThreadId = 'io-thread'
     expect(manager.getLastActiveIoThreadId()).toBeUndefined()
@@ -720,18 +757,14 @@ describe('core', () => {
       id: ' chat:thread:omt_1 '
     })
     expect(manager.getLastActiveIoThreadId()).toBe(ioThreadId)
-    manager.bind(ioThreadId, {
-      source: 'feishu',
-      id: 'chat:message:om_1'
-    })
     expect(manager.getIoThreadId({
       source: 'feishu',
-      id: 'chat:message:om_1'
+      id: 'chat:thread:omt_1'
     })).toBe(ioThreadId)
     expect(manager.getLastActiveIoThreadId()).toBe(ioThreadId)
     expect(manager.getIoThreadId({
       source: 'email',
-      id: 'chat:message:om_1'
+      id: 'chat:thread:omt_1'
     })).not.toBe(ioThreadId)
   })
 
@@ -750,7 +783,7 @@ describe('core', () => {
       source: 'email',
       id: 'mailbox:root:message-1'
     })).toBe(ioThreadId)
-    expect(manager.getPlatformThreadId(ioThreadId)).toEqual([
+    expect(manager.getChannelThreadIds(ioThreadId)).toEqual([
       {
         source: 'feishu',
         id: 'chat:thread:omt_1'
@@ -828,27 +861,23 @@ describe('core', () => {
     })).toBe('io-thread-email')
   })
 
-  it('binds more than one id of the same channel to one io thread', () => {
+  it('rejects more than one id of the same channel on one io thread', () => {
     const manager = createIoThreadIdManager()
     manager.bind('io-thread', {
       source: 'feishu',
       id: 'chat:thread:omt_1'
     })
-    manager.bind('io-thread', {
+    expect(() => manager.bind('io-thread', {
       source: 'feishu',
-      id: 'chat:message:om_1'
-    })
+      id: 'chat:thread:omt_2'
+    })).toThrow('ioThread source already bound')
     expect(manager.getIoThreadId({
       source: 'feishu',
       id: 'chat:thread:omt_1'
     })).toBe('io-thread')
-    expect(manager.getIoThreadId({
-      source: 'feishu',
-      id: 'chat:message:om_1'
-    })).toBe('io-thread')
   })
 
-  it('restores feishu io thread identities from disk', async () => {
+  it('restores io thread identities from disk', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'codexio-io-thread-'))
     const metadata = new CodexioMetadata({
       rootPath: testMetadata.rootPath,
@@ -860,8 +889,8 @@ describe('core', () => {
       id: 'chat-1:thread:omt_1'
     })
     manager.bind(ioThreadId, {
-      source: 'feishu',
-      id: 'chat-1:message:om_1'
+      source: 'web',
+      id: 'web-thread'
     })
     await manager.flush()
     const persisted = JSON.parse(await readFile(metadata.ioThreadStatePath, 'utf8')) as {
@@ -875,8 +904,8 @@ describe('core', () => {
       id: 'chat-1:thread:omt_1'
     })).toBe(ioThreadId)
     expect(restored.getIoThreadId({
-      source: 'feishu',
-      id: 'chat-1:message:om_1'
+      source: 'web',
+      id: 'web-thread'
     })).toBe(ioThreadId)
     expect(restored.getLastActiveIoThreadId()).toBe(ioThreadId)
   })
@@ -891,14 +920,14 @@ describe('core', () => {
       recursive: true
     })
     await writeFile(metadata.ioThreadStatePath, JSON.stringify({
-      version: 1,
+      version: 2,
       threads: [
         {
           ioThreadId: 'io-thread',
-          platformThreadIds: [
+          channelThreadIds: [
             {
               source: 'feishu',
-              id: 'chat-1:message:om_1'
+              id: 'chat-1:thread:omt_1'
             }
           ],
           createdAt: 1,
@@ -906,10 +935,10 @@ describe('core', () => {
         },
         {
           ioThreadId: 'io-thread',
-          platformThreadIds: [
+          channelThreadIds: [
             {
               source: 'feishu',
-              id: 'chat-1:message:om_2'
+              id: 'chat-1:thread:omt_2'
             }
           ],
           createdAt: 1,
@@ -932,7 +961,7 @@ describe('core', () => {
     const manager = new IoThreadIdManager(metadata)
     manager.getIoThreadId({
       source: 'feishu',
-      id: 'chat-1:message:om_1'
+      id: 'chat-1:thread:omt_1'
     })
     await expect(manager.flush()).rejects.toThrow()
   })
@@ -954,7 +983,7 @@ describe('core', () => {
     ])
   })
 
-  it('routes channel output to web, the originating channel, and output-only channels', async () => {
+  it('routes channel output to every enabled channel', async () => {
     const sent: Array<{ type: string, message: Message }> = []
     const manager = await createRecordingChannelOutputManager(sent, createIoThreadIdManager(), [
       'web',
@@ -971,7 +1000,79 @@ describe('core', () => {
     expect(sent.map((item) => item.type)).toEqual([
       'web',
       'feishu',
-      'feishuWebhook'
+      'feishuWebhook',
+      'email'
+    ])
+  })
+
+  it('binds feishu output to the returned topic thread id only', async () => {
+    const ioThreadIdManager = createIoThreadIdManager()
+    const calls: unknown[] = []
+    const output = new FeishuChannelOutput({
+      get: async (path: string) => {
+        if (path === 'channelo.feishu') {
+          return {
+            enabled: true,
+            appId: 'app-id',
+            appSecret: 'app-secret',
+            chatId: 'chat-1'
+          }
+        }
+        return undefined
+      }
+    } as unknown as Configer, ioThreadIdManager)
+    await output.start()
+    Reflect.set(output, 'client', {
+      im: {
+        v1: {
+          message: {
+            create: async (payload: unknown) => {
+              calls.push(payload)
+              return {
+                data: {
+                  thread_id: 'omt_1'
+                }
+              }
+            }
+          }
+        }
+      }
+    })
+    const first = await output.send({
+      ioThreadId: 'io-thread',
+      role: 'agent',
+      text: 'hello'
+    })
+    expect(first.isFailed).toBe(false)
+    expect(ioThreadIdManager.getChannelThreadIds('io-thread')).toEqual([
+      {
+        source: 'feishu',
+        id: 'chat-1:thread:omt_1'
+      }
+    ])
+    const second = await output.send({
+      ioThreadId: 'io-thread',
+      role: 'agent',
+      text: 'again'
+    })
+    expect(second.isFailed).toBe(false)
+    expect(calls).toMatchObject([
+      {
+        params: {
+          receive_id_type: 'chat_id'
+        },
+        data: {
+          receive_id: 'chat-1'
+        }
+      },
+      {
+        params: {
+          receive_id_type: 'thread_id'
+        },
+        data: {
+          receive_id: 'omt_1'
+        }
+      }
     ])
   })
 
@@ -1067,7 +1168,7 @@ describe('core', () => {
   it('buffers codex deltas until completion', async () => {
     const sent: Message[] = []
     const eventBus = new EventBus()
-    eventBus.on(AppEvent.ChannelMessageSendRequested, async (event) => {
+    eventBus.on(AppEvent.ChannelMessageDisplayRequested, async (event) => {
       sent.push(event.message)
       return Result.successVoid()
     })
@@ -1098,7 +1199,7 @@ describe('core', () => {
   it('does not flush codex deltas at a double newline after a colon', async () => {
     const sent: Message[] = []
     const eventBus = new EventBus()
-    eventBus.on(AppEvent.ChannelMessageSendRequested, async (event) => {
+    eventBus.on(AppEvent.ChannelMessageDisplayRequested, async (event) => {
       sent.push(event.message)
       return Result.successVoid()
     })
@@ -1124,7 +1225,7 @@ describe('core', () => {
   it('flushes codex deltas at a double newline after a sentence end', async () => {
     const sent: Message[] = []
     const eventBus = new EventBus()
-    eventBus.on(AppEvent.ChannelMessageSendRequested, async (event) => {
+    eventBus.on(AppEvent.ChannelMessageDisplayRequested, async (event) => {
       sent.push(event.message)
       return Result.successVoid()
     })
@@ -1159,7 +1260,7 @@ describe('core', () => {
   it('flushes the remaining codex buffer on completion without sentence end punctuation', async () => {
     const sent: Message[] = []
     const eventBus = new EventBus()
-    eventBus.on(AppEvent.ChannelMessageSendRequested, async (event) => {
+    eventBus.on(AppEvent.ChannelMessageDisplayRequested, async (event) => {
       sent.push(event.message)
       return Result.successVoid()
     })
@@ -1180,12 +1281,12 @@ describe('core', () => {
     ])
   })
 
-  it('keeps the originating channel on codex stream output', async () => {
-    const sent: Array<{ inputType: string | undefined, message: Message }> = []
+  it('keeps the source channel on codex stream output', async () => {
+    const sent: Array<{ source: string | undefined, message: Message }> = []
     const eventBus = new EventBus()
-    eventBus.on(AppEvent.ChannelMessageSendRequested, async (event) => {
+    eventBus.on(AppEvent.ChannelMessageDisplayRequested, async (event) => {
       sent.push({
-        inputType: event.inputType,
+        source: event.source,
         message: event.message
       })
       return Result.successVoid()
@@ -1194,7 +1295,7 @@ describe('core', () => {
     await streamer.complete({
       ioThreadId: 'io-thread',
       agentThreadId: 'codex-thread',
-      inputType: 'feishu'
+      source: 'feishu'
     }, [
       {
         itemId: 'item',
@@ -1203,7 +1304,7 @@ describe('core', () => {
     ])
     expect(sent).toEqual([
       {
-        inputType: 'feishu',
+        source: 'feishu',
         message: {
           ioThreadId: 'io-thread',
           role: 'agent',
@@ -1216,7 +1317,7 @@ describe('core', () => {
   it('does not resend codex item text when the turn completes', async () => {
     const sent: Message[] = []
     const eventBus = new EventBus()
-    eventBus.on(AppEvent.ChannelMessageSendRequested, async (event) => {
+    eventBus.on(AppEvent.ChannelMessageDisplayRequested, async (event) => {
       sent.push(event.message)
       return Result.successVoid()
     })
@@ -1253,7 +1354,7 @@ async function createRecordingChannelOutputManager(
   } as unknown as Configer
 ): Promise<ChannelOutputManager> {
   const fileStore = new FileStore(testMetadata)
-  const output = (type: string) => ({
+  const output = (type: ChannelOutput['type']): ChannelOutput => ({
     type,
     start: async () => enabledTypes.includes(type),
     send: async (message: Message) => {
@@ -1274,11 +1375,11 @@ async function createRecordingChannelOutputManager(
     fileStore,
     new EventBus(),
     ioThreadIdManager,
-    output('web') as never,
-    output('feishu') as never,
-    output('feishuWebhook') as never,
-    output('email') as never,
-    output('nfirco') as never,
+    output('web'),
+    output('feishu'),
+    output('feishuWebhook'),
+    output('email'),
+    output('nfirco'),
     new ThreadWorkspaceResolver(configer, testMetadata)
   )
   await manager.start()
@@ -1290,6 +1391,14 @@ function createIoThreadIdManager(): IoThreadIdManager {
     rootPath: testMetadata.rootPath,
     dataPath: join(tmpdir(), `codexio-io-thread-${randomUUID()}`)
   }))
+}
+
+function disabledInput(type: ChannelInput['type']): ChannelInput {
+  return {
+    type,
+    start: async () => false,
+    stop: async () => Result.successVoid()
+  }
 }
 
 function createRecordingAgent(type: string): Agent & { messages: Message[] } {
@@ -1308,7 +1417,7 @@ function createRecordingAgent(type: string): Agent & { messages: Message[] } {
 
 function channelMessage(text: string): ChannelMessageReceivedEvent {
   return {
-    inputType: 'web',
+    source: 'web',
     message: {
       ioThreadId: 'io-thread',
       role: 'user',

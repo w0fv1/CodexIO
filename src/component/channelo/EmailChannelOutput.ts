@@ -45,7 +45,7 @@ export class EmailChannelOutput implements ChannelOutput {
   }
 
   async send(message: Message, context?: ChannelOutputContext): Promise<Result<void>> {
-    if (message.role === 'user' && context?.inputType === 'email') {
+    if (message.role === 'user' && context?.source === 'email') {
       return Result.successVoid()
     }
     if (!this.smtp) {
