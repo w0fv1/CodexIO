@@ -14,6 +14,13 @@ export const webPageHtml = `<!doctype html>
     .thin-scrollbar::-webkit-scrollbar-track{background:transparent}
     .thin-scrollbar::-webkit-scrollbar-thumb{background:rgba(148,163,184,.58);border:2px solid transparent;border-radius:999px;background-clip:content-box}
     .thin-scrollbar::-webkit-scrollbar-thumb:hover{background:rgba(100,116,139,.76);border:2px solid transparent;background-clip:content-box}
+    .message-bubble{max-width:100%;overflow:hidden}
+    .message-content{min-width:0;max-width:100%;overflow-wrap:anywhere;word-break:break-word}
+    .message-content :where(p,ul,ol,blockquote,pre,table){max-width:100%}
+    .message-content :where(pre,code){white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+    .message-content pre{overflow-x:auto}
+    .message-content table{display:block;overflow-x:auto}
+    .message-content img{max-width:100%;height:auto}
     @media (hover:none){.message-actions{opacity:1}}
   </style>
 </head>
@@ -163,8 +170,8 @@ export const webPageHtml = `<!doctype html>
                     <svg x-cloak x-show="copiedId === message.id" xmlns="http://www.w3.org/2000/svg" class="size-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
                   </button>
                 </div>
-                <div class="min-w-0 rounded-2xl rounded-br-md bg-blue-600 px-4 py-2.5 text-sm leading-6 text-white shadow-sm">
-                  <div x-show="message.text" class="whitespace-pre-wrap break-words" x-text="message.text"></div>
+                <div class="message-bubble min-w-0 rounded-2xl rounded-br-md bg-blue-600 px-4 py-2.5 text-sm leading-6 text-white shadow-sm">
+                  <div x-show="message.text" class="message-content whitespace-pre-wrap" x-text="message.text"></div>
                   <div x-show="message.files && message.files.length" class="mt-2 grid gap-2">
                     <template x-for="file in message.files || []" :key="file.id">
                       <div>
@@ -188,9 +195,9 @@ export const webPageHtml = `<!doctype html>
             </template>
             <template x-if="message.type === 'agent'">
               <div class="flex max-w-[88%] min-w-0 items-start gap-2 sm:max-w-[78%]">
-                <div class="min-w-0 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm leading-6 shadow-sm" :class="theme === 'dark' ? 'bg-slate-900 text-slate-100' : 'bg-white text-slate-950'">
-                  <div x-show="message.html" class="whitespace-pre-wrap break-words" x-html="message.html"></div>
-                  <div x-show="!message.html && message.text" class="whitespace-pre-wrap break-words" x-text="message.text"></div>
+                <div class="message-bubble min-w-0 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm leading-6 shadow-sm" :class="theme === 'dark' ? 'bg-slate-900 text-slate-100' : 'bg-white text-slate-950'">
+                  <div x-show="message.html" class="message-content" x-html="message.html"></div>
+                  <div x-show="!message.html && message.text" class="message-content whitespace-pre-wrap" x-text="message.text"></div>
                   <div x-show="message.files && message.files.length" class="mt-2 grid gap-2">
                     <template x-for="file in message.files || []" :key="file.id">
                       <div>
