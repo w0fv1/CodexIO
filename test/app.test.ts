@@ -49,6 +49,8 @@ describe('server', () => {
     expect(webPageHtml).toContain("message.type === 'agent'")
     expect(webPageHtml).toContain('replaceHistory')
     expect(webPageHtml).toContain('replaceThreads')
+    expect(webPageHtml).toContain("fetch('/version')")
+    expect(webPageHtml).toContain("'v' + version")
   })
 
   it('returns all described config fields to the config page', async () => {

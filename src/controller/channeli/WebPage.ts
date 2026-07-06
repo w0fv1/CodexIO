@@ -52,6 +52,7 @@ export const webPageHtml = `<!doctype html>
         <div class="flex min-w-0 items-center gap-2">
           <span class="grid size-8 shrink-0 place-items-center rounded-lg text-sm font-black" :class="theme === 'dark' ? 'bg-slate-50 text-slate-950' : 'bg-slate-950 text-white'">C</span>
           <span class="truncate text-sm font-semibold tracking-normal" :class="theme === 'dark' ? 'text-slate-50' : 'text-slate-950'">Codexio</span>
+          <span x-show="version" class="shrink-0 text-[11px] font-medium leading-5" :class="theme === 'dark' ? 'text-slate-500' : 'text-slate-400'" x-text="'v' + version"></span>
         </div>
         <button
           type="button"
@@ -318,6 +319,7 @@ export const webPageHtml = `<!doctype html>
         draftFiles: [],
         connected: false,
         connecting: false,
+        version: '',
         uploading: false,
         dragActive: false,
         reconnectTimer: null,
@@ -328,10 +330,23 @@ export const webPageHtml = `<!doctype html>
         init() {
           this.theme = this.getInitialTheme()
           this.messages = []
+          this.loadVersion()
           this.connect()
           this.$nextTick(() => {
             this.resizeInput()
           })
+        },
+        async loadVersion() {
+          try {
+            const response = await fetch('/version')
+            const result = await response.json()
+            const version = result && result.data && result.data.version
+            if (typeof version === 'string' && version.trim()) {
+              this.version = version.trim()
+            }
+          } catch {
+            this.version = ''
+          }
         },
         createThread(activate) {
           const thread = {
