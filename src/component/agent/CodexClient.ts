@@ -1,6 +1,5 @@
 import { EventEmitter } from 'node:events'
 import { existsSync, readdirSync, statSync } from 'node:fs'
-import { mkdir } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { createInterface } from 'node:readline'
 import { delimiter } from 'node:path'
@@ -10,8 +9,8 @@ import { execa } from 'execa'
 import { Configer } from '../Configer.js'
 import { CodexioMetadata } from '../CodexioMetadata.js'
 import { Logger } from '../Logger.js'
+import { ThreadWorkspaceResolver } from '../ThreadWorkspaceResolver.js'
 import { createProcessEnv } from '../../util/ProcessEnvironment.js'
-import { resolveUserPath } from '../../util/Path.js'
 import { CodexThread } from '../../value/CodexThread.js'
 import { MessageFile } from '../../value/Message.js'
 import { Result } from '../../value/Result.js'
@@ -33,6 +32,7 @@ type RpcMessage = {
 export type CodexClientThread = CodexThread
 
 export type CodexClientInput = {
+  ioThreadId: string
   threadId?: string
   text: string
   files?: MessageFile[]
@@ -76,7 +76,7 @@ type CodexClientRuntimeConfig = {
   bundled: boolean
   command: string
   args: string[]
-  cwd: string
+  processCwd: string
   codexHomePath?: string
   proxyUrl?: string
   noProxyHosts: string[]
@@ -101,6 +101,7 @@ export class CodexClient {
   private readonly events = new EventEmitter()
   private readonly threads = new Map<string, CodexClientThread>()
   private readonly turnIdByThreadId = new Map<string, string>()
+  private readonly workspaceResolver: ThreadWorkspaceResolver
   private child?: ReturnType<typeof execa>
   private nextRequestId = 1
   private started = false
@@ -114,8 +115,11 @@ export class CodexClient {
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
-    @inject(CodexioMetadata) private readonly metadata: CodexioMetadata
-  ) {}
+    @inject(CodexioMetadata) private readonly metadata: CodexioMetadata,
+    @inject(ThreadWorkspaceResolver) workspaceResolver: ThreadWorkspaceResolver
+  ) {
+    this.workspaceResolver = workspaceResolver
+  }
 
   on<K extends keyof CodexClientEventMap>(event: K, listener: CodexClientEventMap[K]): () => void {
     this.events.on(event, listener)
@@ -130,9 +134,7 @@ export class CodexClient {
     }
     try {
       const config = await this.readRuntimeConfig()
-      await mkdir(config.cwd, {
-        recursive: true
-      })
+      await this.workspaceResolver.ensureBase()
       const env = createProcessEnv(
         config.codexHomePath,
         config.codexHomePath ? `${config.codexHomePath}/config.toml` : undefined,
@@ -140,13 +142,13 @@ export class CodexClient {
         config.noProxyHosts
       )
       Logger.info('codex client starting', {
-        cwd: config.cwd,
+        cwd: config.processCwd,
         bundled: config.bundled,
         command: config.command,
         args: config.args
       })
       const child = execa(config.command, config.args, {
-        cwd: config.cwd,
+        cwd: config.processCwd,
         env,
         stdin: 'pipe',
         stdout: 'pipe',
@@ -280,7 +282,7 @@ export class CodexClient {
     try {
       const threadId = normalizedThreadId.length > 0 && this.threads.has(normalizedThreadId)
         ? normalizedThreadId
-        : (await this.startThread()).id
+        : (await this.startThread(input.ioThreadId)).id
       const turnInput = this.toTurnInput(input)
       const activeTurnId = this.turnIdByThreadId.get(threadId)
       if (activeTurnId) {
@@ -324,10 +326,11 @@ export class CodexClient {
     }
   }
 
-  private async startThread(): Promise<CodexClientThread> {
+  private async startThread(ioThreadId: string): Promise<CodexClientThread> {
     const config = await this.readRuntimeConfig()
+    const cwd = await this.workspaceResolver.ensure(ioThreadId)
     const response = await this.request('thread/start', {
-      cwd: config.cwd,
+      cwd,
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
       ephemeral: false,
@@ -662,7 +665,6 @@ export class CodexClient {
   private async readRuntimeConfig(): Promise<CodexClientRuntimeConfig> {
     const [
       bundled,
-      workspacePath,
       proxyEnabled,
       proxyHost,
       proxyPort,
@@ -674,7 +676,6 @@ export class CodexClient {
       requestTimeoutSeconds
     ] = await Promise.all([
       this.configer.get('agents.codex.bundled'),
-      this.configer.get('workspace.path'),
       this.configer.get('proxy.enabled'),
       this.configer.get('proxy.host'),
       this.configer.get('proxy.port'),
@@ -688,12 +689,12 @@ export class CodexClient {
     const command = bundled
       ? bundledCodexCommand()
       : externalCodexCommand(codexCommand)
-    const cwd = resolveUserPath(workspacePath)
+    const cwd = await this.workspaceResolver.resolveBase()
     return {
       bundled,
       command: command.command,
       args: command.args,
-      cwd: cwd.length > 0 ? cwd : join(this.metadata.dataPath, 'workspace'),
+      processCwd: cwd.length > 0 ? cwd : join(this.metadata.dataPath, 'workspace'),
       codexHomePath: bundled ? this.metadata.codexHomePath : undefined,
       proxyUrl: proxyEnabled ? `http://${proxyHost}:${proxyPort}` : undefined,
       noProxyHosts: [

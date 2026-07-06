@@ -77,6 +77,7 @@ export class CodexAgent implements Agent {
       return Result.successVoid()
     }
     const sent = await this.client.send({
+      ioThreadId: event.message.ioThreadId,
       threadId: this.threadIdByIoThreadId.get(event.message.ioThreadId),
       text: event.message.text,
       files: event.message.files

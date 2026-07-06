@@ -10,6 +10,8 @@ import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
 import { EventBus } from '../src/component/EventBus.js'
 import { FileStore } from '../src/component/FileStore.js'
 import { IoThreadIdManager } from '../src/component/IoThreadIdManager.js'
+import { ThreadWorkspaceResolver } from '../src/component/ThreadWorkspaceResolver.js'
+import { migrateLegacyDataRoot } from '../src/component/DataRootMigration.js'
 import { Agent } from '../src/component/agent/Agent.js'
 import { AgentManager } from '../src/component/agent/AgentManager.js'
 import { CodexClient, CodexClientThread } from '../src/component/agent/CodexClient.js'
@@ -27,6 +29,10 @@ import { WebThreadManager } from '../src/component/channel/WebThreadManager.js'
 import { applyRuntimeConfig } from '../src/CodexioApplication.js'
 
 const testMetadata = new CodexioMetadata()
+
+function createTestCodexClient(configer: Configer, metadata = testMetadata): CodexClient {
+  return new CodexClient(configer, metadata, new ThreadWorkspaceResolver(configer, metadata))
+}
 
 describe('core', () => {
   it('creates channel-only default config', () => {
@@ -296,6 +302,53 @@ describe('core', () => {
     expect(await configer.get('channelo.web.enabled')).toBe(true)
   })
 
+  it('does not rewrite an existing config during init', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-config-preserve-'))
+    const configPath = join(dir, 'config.yaml')
+    const text = [
+      '# keep this comment',
+      'server:',
+      '  token: keep-token',
+      'agents:',
+      '  echo:',
+      '    enabled: true',
+      'channeli:',
+      '  web:',
+      '    enabled: true',
+      'channelo:',
+      '  web:',
+      '    enabled: true'
+    ].join('\n')
+    await writeFile(configPath, text, 'utf8')
+    const configer = new Configer(new CodexioMetadata({
+      rootPath: testMetadata.rootPath,
+      configPath
+    }))
+    await configer.init(false)
+    expect(await readFile(configPath, 'utf8')).toBe(text)
+  })
+
+  it('migrates legacy packaged data without overwriting current config', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-data-migration-'))
+    const legacyRoot = join(dir, 'install-data')
+    const currentRoot = join(dir, 'user-data')
+    await mkdir(join(legacyRoot, 'state'), {
+      recursive: true
+    })
+    await writeFile(join(legacyRoot, 'config.yaml'), 'server:\n  token: legacy\n', 'utf8')
+    await writeFile(join(legacyRoot, 'state', 'io-thread.json'), '{"version":1,"threads":[]}', 'utf8')
+    const logs: string[] = []
+    await expect(migrateLegacyDataRoot(legacyRoot, currentRoot, (message) => logs.push(message))).resolves.toBe(true)
+    expect(await readFile(join(currentRoot, 'config.yaml'), 'utf8')).toContain('legacy')
+    expect(await readFile(join(currentRoot, 'state', 'io-thread.json'), 'utf8')).toContain('"version":1')
+    expect(logs[0]).toContain('migrated legacy data root')
+
+    await writeFile(join(currentRoot, 'config.yaml'), 'server:\n  token: current\n', 'utf8')
+    await writeFile(join(legacyRoot, 'config.yaml'), 'server:\n  token: changed-legacy\n', 'utf8')
+    await expect(migrateLegacyDataRoot(legacyRoot, currentRoot)).resolves.toBe(false)
+    expect(await readFile(join(currentRoot, 'config.yaml'), 'utf8')).toContain('current')
+  })
+
   it('enables auto port from runtime args', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'codexio-runtime-config-'))
     const configPath = join(dir, 'config.yaml')
@@ -336,9 +389,9 @@ describe('core', () => {
       ['agents.codex.developerInstructions', ''],
       ['agents.codex.requestTimeoutSeconds', 120]
     ])
-    const client = new CodexClient({
+    const client = createTestCodexClient({
       get: async (path: string) => values.get(path)
-    } as unknown as Configer, testMetadata)
+    } as unknown as Configer)
     const runtimeConfig = await client['readRuntimeConfig']()
     expect(runtimeConfig.noProxyHosts).toEqual([
       'localhost',
@@ -369,11 +422,11 @@ describe('core', () => {
       rootPath: testMetadata.rootPath,
       dataPath: dir
     })
-    const client = new CodexClient({
+    const client = createTestCodexClient({
       get: async (path: string) => values.get(path)
     } as unknown as Configer, metadata)
     const runtimeConfig = await client['readRuntimeConfig']()
-    expect(runtimeConfig.cwd).toBe(join(dir, 'workspace'))
+    expect(runtimeConfig.processCwd).toBe(join(dir, 'workspace'))
     expect(runtimeConfig.command).not.toContain('app.asar')
   })
 
@@ -414,7 +467,7 @@ describe('core', () => {
         rootPath: testMetadata.rootPath,
         dataPath: await mkdtemp(join(tmpdir(), 'codexio-command-resolution-'))
       })
-      const client = new CodexClient({
+      const client = createTestCodexClient({
         get: async (path: string) => values.get(path)
       } as unknown as Configer, metadata)
       const runtimeConfig = await client['readRuntimeConfig']()
@@ -452,9 +505,9 @@ describe('core', () => {
       ['agents.codex.developerInstructions', 'Project rule'],
       ['agents.codex.requestTimeoutSeconds', 120]
     ])
-    const client = new CodexClient({
+    const client = createTestCodexClient({
       get: async (path: string) => values.get(path)
-    } as unknown as Configer, testMetadata)
+    } as unknown as Configer)
     let threadStartParams: Record<string, unknown> | undefined
     client['request'] = async (method: string, params?: unknown) => {
       if (method === 'thread/start') {
@@ -473,10 +526,46 @@ describe('core', () => {
     expect(String(threadStartParams?.developerInstructions)).toContain('Project rule')
   })
 
+  it('starts new codex threads inside the io thread workspace when enabled', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-thread-workspace-'))
+    const values = new Map<string, unknown>([
+      ['agents.codex.bundled', false],
+      ['workspace.path', dir],
+      ['workspace.perIoThread', true],
+      ['proxy.enabled', false],
+      ['proxy.host', '127.0.0.1'],
+      ['proxy.port', 7890],
+      ['proxy.noProxy', ''],
+      ['server.host', '127.0.0.1'],
+      ['agents.codex.command', 'codex'],
+      ['agents.instruction', ''],
+      ['agents.codex.developerInstructions', ''],
+      ['agents.codex.requestTimeoutSeconds', 120]
+    ])
+    const client = createTestCodexClient({
+      get: async (path: string) => values.get(path)
+    } as unknown as Configer)
+    let threadStartParams: Record<string, unknown> | undefined
+    client['request'] = async (method: string, params?: unknown) => {
+      if (method === 'thread/start') {
+        threadStartParams = params as Record<string, unknown>
+        return {
+          thread: {
+            id: 'thread-1',
+            name: 'thread'
+          }
+        }
+      }
+      throw new Error(method)
+    }
+    await client['startThread']('io-thread')
+    expect(threadStartParams?.cwd).toBe(join(dir, 'io-thread'))
+  })
+
   it('emits codex client thread callbacks as single threads', () => {
-    const client = new CodexClient({
+    const client = createTestCodexClient({
       get: async () => undefined
-    } as unknown as Configer, testMetadata)
+    } as unknown as Configer)
     const threads: CodexClientThread[] = []
     client.on('thread', (thread) => {
       threads.push(thread)
@@ -593,11 +682,11 @@ describe('core', () => {
       ['agents.codex.developerInstructions', ''],
       ['agents.codex.requestTimeoutSeconds', 120]
     ])
-    const client = new CodexClient({
+    const client = createTestCodexClient({
       get: async (path: string) => values.get(path)
-    } as unknown as Configer, testMetadata)
+    } as unknown as Configer)
     const runtimeConfig = await client['readRuntimeConfig']()
-    expect(runtimeConfig.cwd).toBe(homedir())
+    expect(runtimeConfig.processCwd).toBe(homedir())
   })
 
   it('removes the final newline from rendered markdown html', () => {
@@ -908,12 +997,46 @@ describe('core', () => {
     expect(sent[0].text).toContain('`')
   })
 
+  it('resolves relative agent file references from the io thread workspace', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-output-thread-file-'))
+    const threadDir = join(dir, 'io-thread')
+    await mkdir(threadDir, {
+      recursive: true
+    })
+    await writeFile(join(threadDir, 'agent.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=', 'base64'))
+    const sent: Message[] = []
+    const manager = await createRecordingChannelOutputManager(sent, createIoThreadIdManager(), [
+      'web'
+    ], {
+      subscribe: () => {},
+      get: async (path: string) => {
+        if (path === 'workspace.path') {
+          return dir
+        }
+        if (path === 'workspace.perIoThread') {
+          return true
+        }
+        return undefined
+      }
+    } as unknown as Configer)
+    await manager.sendAgent({
+      ioThreadId: 'io-thread',
+      role: 'agent',
+      text: '已生成：![agent](./agent.png)'
+    })
+    await manager.stop()
+    expect(sent[0].files?.[0]).toMatchObject({
+      name: 'agent.png',
+      mime: 'image/png'
+    })
+  })
+
   it('routes channel messages to echo by default and codex when enabled', async () => {
     let codexEnabled = false
     const eventBus = new EventBus()
     const echo = createRecordingAgent('echo')
     const codex = createRecordingAgent('codex')
-    const manager = new AgentManager({
+    const configer = {
       get: async (path: string) => {
         if (path === 'agents.codex.enabled') {
           return codexEnabled
@@ -924,7 +1047,8 @@ describe('core', () => {
         return undefined
       },
       subscribe: () => {}
-    } as unknown as Configer, eventBus, codex, echo)
+    } as unknown as Configer
+    const manager = new AgentManager(configer, eventBus, codex, echo, new ThreadWorkspaceResolver(configer, testMetadata))
     await manager.start()
     await eventBus.emitAsync(AppEvent.ChannelMessageReceived, channelMessage('first'))
     expect(echo.messages.map((message) => message.text)).toEqual([
@@ -1122,12 +1246,12 @@ describe('core', () => {
 async function createRecordingChannelOutputManager(
   sent: Message[] | Array<{ type: string, message: Message }>,
   ioThreadIdManager = createIoThreadIdManager(),
-  enabledTypes = ['web']
-): Promise<ChannelOutputManager> {
-  const configer = {
+  enabledTypes = ['web'],
+  configer = {
     subscribe: () => {},
     get: async (path: string) => path === 'workspace.path' ? '~' : undefined
   } as unknown as Configer
+): Promise<ChannelOutputManager> {
   const fileStore = new FileStore(testMetadata)
   const output = (type: string) => ({
     type,
@@ -1154,7 +1278,8 @@ async function createRecordingChannelOutputManager(
     output('feishu') as never,
     output('feishuWebhook') as never,
     output('email') as never,
-    output('nfirco') as never
+    output('nfirco') as never,
+    new ThreadWorkspaceResolver(configer, testMetadata)
   )
   await manager.start()
   return manager

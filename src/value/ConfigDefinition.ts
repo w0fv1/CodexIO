@@ -23,6 +23,7 @@ export type CodexioConfig = {
   }
   workspace: {
     path: string
+    perIoThread: boolean
   }
   proxy: {
     enabled: boolean
@@ -143,6 +144,7 @@ const configFields: ConfigField[] = [
   field('agents.codex.developerInstructions', 'Codex Agent', 'Developer Instructions', 'string', '重启 Codex Agent', z.string(), ''),
   field('agents.codex.requestTimeoutSeconds', 'Codex Agent', 'Request Timeout Seconds', 'number', '重启 Codex Agent', positiveInt, 120),
   field('workspace.path', 'Workspace', 'Path', 'string', '重启 Codex Agent', workspacePath, ''),
+  field('workspace.perIoThread', 'Workspace', 'Per IoThread', 'boolean', '重启 Codex Agent', z.boolean(), false),
   field('proxy.enabled', 'Proxy', 'Enabled', 'boolean', '重启 Codexio', z.boolean(), false),
   field('proxy.host', 'Proxy', 'Host', 'string', '重启 Codexio', z.string(), '127.0.0.1'),
   field('proxy.port', 'Proxy', 'Port', 'number', '重启 Codexio', positiveInt, 7890),

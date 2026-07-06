@@ -26,6 +26,7 @@ agents:
     requestTimeoutSeconds: 120
 workspace:
   path: workspace
+  perIoThread: false
 channeli:
   web:
     enabled: true

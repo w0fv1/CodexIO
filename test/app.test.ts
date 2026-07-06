@@ -28,6 +28,7 @@ import { NfircoThreadOutput } from '../src/component/channelo/NfircoThreadOutput
 import { EventBus } from '../src/component/EventBus.js'
 import { AppEvent } from '../src/value/Event.js'
 import { IoThreadIdManager } from '../src/component/IoThreadIdManager.js'
+import { ThreadWorkspaceResolver } from '../src/component/ThreadWorkspaceResolver.js'
 import { EchoAgent } from '../src/component/agent/EchoAgent.js'
 import { AgentManager } from '../src/component/agent/AgentManager.js'
 import { CodexAgent } from '../src/component/agent/CodexAgent.js'
@@ -547,7 +548,8 @@ async function createTestCodexioApp(configer: Configer): Promise<{
   const eventBus = new EventBus()
   const fileStore = new FileStore(metadata)
   const ioThreadIdManager = createIoThreadIdManager()
-  const codexClient = new CodexClient(configer, metadata)
+  const workspaceResolver = new ThreadWorkspaceResolver(configer, metadata)
+  const codexClient = new CodexClient(configer, metadata, workspaceResolver)
   const webThreadManager = new WebThreadManager(ioThreadIdManager, eventBus)
   const webHub = new WebChannelHub(fileStore, webThreadManager)
   const webInput = new WebChannelInput(configer, webHub)
@@ -567,11 +569,12 @@ async function createTestCodexioApp(configer: Configer): Promise<{
     feishuOutput,
     new FeishuWebhookChannelOutput(configer),
     emailOutput,
-    nfircoOutput
+    nfircoOutput,
+    workspaceResolver
   )
   const codexAgent = new CodexAgent(configer, eventBus, ioThreadIdManager, codexClient, new CodexMessageStreamer(eventBus))
   const echoAgent = new EchoAgent(eventBus)
-  const agentManager = new AgentManager(configer, eventBus, codexAgent, echoAgent)
+  const agentManager = new AgentManager(configer, eventBus, codexAgent, echoAgent, workspaceResolver)
   const inputManager = new ChannelInputManager(configer, eventBus, ioThreadIdManager, new CommandExecutor(eventBus), webInput, feishuInput, emailInput, nfircoInput)
   const apiController = new CodexioApiController(configer, outputManager, fileStore, webHub, eventBus, metadata)
   await outputManager.start()

@@ -80,7 +80,6 @@ export class Configer {
     if (!force) {
       try {
         const config = await this.load()
-        await this.write(config)
         return config
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {

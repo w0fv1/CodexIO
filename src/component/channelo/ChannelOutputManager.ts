@@ -4,13 +4,13 @@ import { Result } from '../../value/Result.js'
 import { Message, MessageFile } from '../../value/Message.js'
 import { AppEvent, ChannelMessageSendRequestedEvent } from '../../value/Event.js'
 import { parseMarkdownAttachmentReferences } from '../../util/Markdown.js'
-import { resolveUserPath } from '../../util/Path.js'
 import { ChannelOutput, ChannelOutputContext } from './ChannelOutput.js'
 import { FileStore } from '../FileStore.js'
 import { Logger } from '../Logger.js'
 import { Configer } from '../Configer.js'
 import { EventBus } from '../EventBus.js'
 import { IoThreadIdManager } from '../IoThreadIdManager.js'
+import { ThreadWorkspaceResolver } from '../ThreadWorkspaceResolver.js'
 import { EmailChannelOutput } from './EmailChannelOutput.js'
 import { FeishuChannelOutput } from './FeishuChannelOutput.js'
 import { FeishuWebhookChannelOutput } from './FeishuWebhookChannelOutput.js'
@@ -41,7 +41,8 @@ export class ChannelOutputManager {
     @inject(FeishuChannelOutput) feishu: FeishuChannelOutput,
     @inject(FeishuWebhookChannelOutput) feishuWebhook: FeishuWebhookChannelOutput,
     @inject(EmailChannelOutput) email: EmailChannelOutput,
-    @inject(NfircoThreadOutput) nfirco: NfircoThreadOutput
+    @inject(NfircoThreadOutput) nfirco: NfircoThreadOutput,
+    @inject(ThreadWorkspaceResolver) private readonly workspaceResolver: ThreadWorkspaceResolver
   ) {
     this.availableOutputs = [
       web,
@@ -199,7 +200,7 @@ export class ChannelOutputManager {
     for (const file of message.files ?? []) {
       files.set(file.id, file)
     }
-    const workspacePath = resolveUserPath(await this.configer.get('workspace.path') ?? '~')
+    const workspacePath = await this.workspaceResolver.resolve(message.ioThreadId)
     for (const reference of parsed.files) {
       try {
         const resolved = this.fileStore.resolveUrl(reference.path)

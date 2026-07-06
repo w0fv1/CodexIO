@@ -6,6 +6,7 @@ import { setTimeout as wait } from 'node:timers/promises'
 import electron from 'electron'
 import type { NativeImage, Tray as ElectronTray } from 'electron'
 import { CodexioUpdater } from './CodexioUpdater.js'
+import { migrateLegacyDataRoot } from './component/DataRootMigration.js'
 
 type ServerState = {
   pid: number
@@ -36,11 +37,18 @@ class CodexioDesktop {
     await app.whenReady()
     this.appRoot = app.getAppPath()
     app.setAppUserModelId('dev.w0fv1.codexio')
-    this.dataRoot = app.isPackaged ? join(dirname(process.execPath), 'data') : app.getPath('userData')
+    this.dataRoot = app.getPath('userData')
     this.configPath = join(this.dataRoot, 'config.yaml')
     this.logPath = join(this.dataRoot, 'log', 'desktop.log')
     this.statePath = join(this.dataRoot, 'state', 'server.json')
     this.serverPath = join(this.appRoot, 'dist', 'CodexioApplication.js')
+    await mkdir(dirname(this.logPath), {
+      recursive: true
+    })
+    this.log('desktop starting')
+    if (app.isPackaged) {
+      await migrateLegacyDataRoot(join(dirname(process.execPath), 'data'), this.dataRoot, (message) => this.log(message))
+    }
     this.updater = new CodexioUpdater({
       isPackaged: app.isPackaged,
       currentVersion: app.getVersion(),
@@ -57,10 +65,6 @@ class CodexioDesktop {
         this.quitting = true
       }
     })
-    await mkdir(dirname(this.logPath), {
-      recursive: true
-    })
-    this.log('desktop starting')
     if (!app.requestSingleInstanceLock()) {
       this.log('single instance lock rejected')
       app.quit()
