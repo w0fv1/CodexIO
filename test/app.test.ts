@@ -82,6 +82,26 @@ describe('server', () => {
     await closeTestServer(listener)
   })
 
+  it('returns the runtime version', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    const response = await fetch(`${baseUrl}/version`)
+    const result = await response.json() as {
+      isFailed: boolean
+      data: {
+        name: string
+        version: string
+        pid: number
+      }
+    }
+    expect(result.isFailed).toBe(false)
+    expect(result.data).toEqual({
+      name: 'codexio',
+      version: testMetadata.readVersion(),
+      pid: expect.any(Number)
+    })
+    await closeTestServer(listener)
+  })
+
   it('shows web user input before echo output', async () => {
     const { baseUrl, listener } = await startTestServer()
     const socket = await openWebSocket(baseUrl)

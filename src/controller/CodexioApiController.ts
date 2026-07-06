@@ -299,6 +299,14 @@ export class CodexioApiController {
         pid
       }))
     })
+
+    this.web.get('/version', (_request, response) => {
+      response.json(Result.success({
+        name: 'codexio',
+        version: this.metadata.readVersion(),
+        pid
+      }))
+    })
   }
 
   private waitForListening(listener: HttpServer): Promise<void> {

@@ -8,6 +8,7 @@ type UpdateCheckSource = 'automatic' | 'manual'
 type UpdateState =
   | { kind: 'idle' }
   | { kind: 'checking'; source: UpdateCheckSource }
+  | { kind: 'available'; version: string }
   | { kind: 'downloading'; version: string; percent: number }
   | { kind: 'ready'; version: string; downloadedFile: string }
   | { kind: 'installing'; version: string }
@@ -36,7 +37,7 @@ export class CodexioUpdater {
       return
     }
     this.configured = true
-    autoUpdater.autoDownload = true
+    autoUpdater.autoDownload = false
     autoUpdater.autoInstallOnAppQuit = false
     autoUpdater.on('checking-for-update', () => {
       this.options.log('updater checking')
@@ -76,6 +77,8 @@ export class CodexioUpdater {
     switch (this.state.kind) {
       case 'checking':
         return '检查更新中'
+      case 'available':
+        return `下载更新 ${this.state.version}`
       case 'downloading':
         return `下载更新 ${Math.round(this.state.percent)}%`
       case 'ready':
@@ -94,6 +97,9 @@ export class CodexioUpdater {
         return
       case 'checking':
         this.options.notify('Codexio 更新', '正在检查更新。')
+        return
+      case 'available':
+        void this.downloadAvailableUpdate()
         return
       case 'downloading':
         this.options.notify('Codexio 更新', `正在下载 ${this.state.version}，进度 ${Math.round(this.state.percent)}%。`)
@@ -115,6 +121,10 @@ export class CodexioUpdater {
     }
     if (this.state.kind === 'checking' || this.state.kind === 'downloading' || this.state.kind === 'installing') {
       this.handleUserAction()
+      return
+    }
+    if (this.state.kind === 'available') {
+      this.notifyAvailableUpdate(this.state)
       return
     }
     if (this.state.kind === 'ready') {
@@ -142,8 +152,9 @@ export class CodexioUpdater {
 
   private handleUpdateAvailable(info: UpdateInfo): void {
     this.options.log(`updater available version=${info.version}`)
-    this.state = { kind: 'downloading', version: info.version, percent: 0 }
-    this.options.notify('Codexio 更新', `发现新版本 ${info.version}，开始下载。`)
+    const state = { kind: 'available' as const, version: info.version }
+    this.state = state
+    this.notifyAvailableUpdate(state)
     this.options.refreshMenu()
   }
 
@@ -182,6 +193,29 @@ export class CodexioUpdater {
     this.options.notify('Codexio 更新已下载', `${state.version} 已下载完成，点击安装并重启。`, () => {
       this.installReadyUpdate()
     })
+  }
+
+  private notifyAvailableUpdate(state: Extract<UpdateState, { kind: 'available' }>): void {
+    this.options.notify('Codexio 发现新版本', `${state.version} 可下载，点击开始下载。`, () => {
+      void this.downloadAvailableUpdate()
+    })
+  }
+
+  private async downloadAvailableUpdate(): Promise<void> {
+    if (this.state.kind !== 'available') {
+      this.handleUserAction()
+      return
+    }
+    const version = this.state.version
+    this.options.log(`updater download requested version=${version}`)
+    this.state = { kind: 'downloading', version, percent: 0 }
+    this.options.refreshMenu()
+    this.options.notify('Codexio 更新', `开始下载 ${version}。`)
+    try {
+      await autoUpdater.downloadUpdate()
+    } catch (error) {
+      this.handleError(error)
+    }
   }
 
   private installReadyUpdate(): void {
