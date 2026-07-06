@@ -406,36 +406,45 @@ export const webPageHtml = `<!doctype html>
           }
           return thread
         },
-        updateThreadTitle(thread, message) {
-          if (thread.title || message.type !== 'user') {
+        replaceHistory(threads, messages) {
+          this.replaceThreads(threads || [])
+          for (const thread of this.threads) {
+            thread.messages = []
+            thread.unread = 0
+          }
+          for (const message of messages || []) {
+            this.appendMessage(message, true)
+          }
+          if (!this.activeThreadId && this.threads.length > 0) {
+            this.switchThread(this.threads[0].id)
             return
           }
-          const text = (message.text || '').replace(/\s+/g, ' ').trim()
-          if (text.length > 0) {
-            thread.title = text.slice(0, 32)
+          if (this.activeThreadId) {
+            const active = this.threads.find((thread) => thread.id === this.activeThreadId)
+            this.messages = active ? active.messages : []
           }
         },
-        upsertThread(input) {
-          if (!input || !input.id) {
-            return
-          }
-          const thread = this.ensureThread(input.id)
-          thread.title = typeof input.title === 'string' && input.title.length > 0 ? input.title : thread.title
-          thread.isWorking = Boolean(input.isWorking)
-          if (thread.id === this.activeThreadId) {
-            this.messages = thread.messages
-          }
-        },
-        removeThread(id) {
-          const index = this.threads.findIndex((item) => item.id === id)
-          if (index < 0) {
-            return
-          }
-          this.threads.splice(index, 1)
-          if (this.activeThreadId === id) {
+        replaceThreads(inputs) {
+          const existing = new Map(this.threads.map((thread) => [thread.id, thread]))
+          this.threads = (inputs || []).map((input) => {
+            const current = existing.get(input.id)
+            return {
+              id: input.id,
+              title: typeof input.title === 'string' ? input.title : '',
+              messages: current ? current.messages : [],
+              unread: current ? current.unread : 0,
+              isWorking: Boolean(input.isWorking),
+              updatedAt: Number.isFinite(Number(input.updatedAt)) ? Number(input.updatedAt) : Date.now()
+            }
+          })
+          if (this.activeThreadId && !this.threads.some((thread) => thread.id === this.activeThreadId)) {
             const next = this.threads[0]
             this.activeThreadId = next ? next.id : ''
             this.messages = next ? next.messages : []
+          }
+          if (!this.activeThreadId && this.threads.length > 0) {
+            this.activeThreadId = this.threads[0].id
+            this.messages = this.threads[0].messages
           }
         },
         getInitialTheme() {
@@ -515,6 +524,14 @@ export const webPageHtml = `<!doctype html>
           if (message.event === 'ready') {
             return
           }
+          if (message.event === 'history') {
+            this.replaceHistory(message.threads || [], message.messages || [])
+            return
+          }
+          if (message.event === 'threads') {
+            this.replaceThreads(message.threads || [])
+            return
+          }
           if (message.event === 'error') {
             this.append(message.webThreadId || message.ioThreadId, 'error', message.message || 'Request failed')
             return
@@ -522,17 +539,7 @@ export const webPageHtml = `<!doctype html>
           if (message.event !== 'message') {
             return
           }
-          if (message.role === 'user') {
-            this.append(message.webThreadId || message.ioThreadId, 'user', message.text || '', null, message.files || [])
-            return
-          }
-          if (message.role === 'system') {
-            this.append(message.webThreadId || message.ioThreadId, 'system', message.text || '')
-            return
-          }
-          if (message.role === 'agent') {
-            this.append(message.webThreadId || message.ioThreadId, 'agent', message.text || '', message.html || null, message.files || [])
-          }
+          this.appendMessage(message, false)
         },
         send() {
           const value = this.draft.trim()
@@ -575,7 +582,6 @@ export const webPageHtml = `<!doctype html>
           const thread = this.ensureThread(threadId)
           thread.messages.push(message)
           thread.updatedAt = Date.now()
-          this.updateThreadTitle(thread, message)
           if (thread.id !== this.activeThreadId) {
             thread.unread += 1
             return
@@ -585,6 +591,34 @@ export const webPageHtml = `<!doctype html>
             this.$nextTick(() => {
               this.scrollToBottom(false)
             })
+          }
+        },
+        appendMessage(input, historical) {
+          const threadId = input.webThreadId || input.threadId || input.ioThreadId
+          if (!threadId) {
+            return
+          }
+          const message = {
+            id: input.id || this.nextId++,
+            type: input.role,
+            text: input.text || '',
+            html: input.html || null,
+            files: input.files || []
+          }
+          const thread = this.ensureThread(threadId)
+          thread.messages.push(message)
+          thread.updatedAt = Number.isFinite(Number(input.createdAt)) ? Number(input.createdAt) : Date.now()
+          if (!historical && thread.id !== this.activeThreadId) {
+            thread.unread += 1
+            return
+          }
+          if (thread.id === this.activeThreadId) {
+            this.messages = thread.messages
+            if (!historical && this.autoScroll) {
+              this.$nextTick(() => {
+                this.scrollToBottom(false)
+              })
+            }
           }
         },
         async copyMessage(message) {

@@ -12,6 +12,7 @@ import { CodexioMetadata } from '../CodexioMetadata.js'
 import { Logger } from '../Logger.js'
 import { createProcessEnv } from '../../util/ProcessEnvironment.js'
 import { resolveUserPath } from '../../util/Path.js'
+import { CodexThread } from '../../value/CodexThread.js'
 import { MessageFile } from '../../value/Message.js'
 import { Result } from '../../value/Result.js'
 
@@ -29,11 +30,7 @@ type RpcMessage = {
   }
 }
 
-export type CodexClientThread = {
-  id: string
-  title: string
-  isWorking: boolean
-}
+export type CodexClientThread = CodexThread
 
 export type CodexClientInput = {
   threadId?: string
@@ -517,7 +514,7 @@ export class CodexClient {
       case 'thread/closed': {
         const threadId = readString(data, 'threadId')
         if (threadId) {
-          this.threads.delete(threadId)
+          this.removeThread(threadId)
         }
         return
       }
@@ -632,6 +629,17 @@ export class CodexClient {
     }
     this.threads.set(thread.id, thread)
     this.events.emit('thread', thread)
+  }
+
+  private removeThread(threadId: string): void {
+    const existing = this.threads.get(threadId)
+    this.threads.delete(threadId)
+    this.events.emit('thread', {
+      id: threadId,
+      title: existing?.title ?? '',
+      isWorking: false,
+      deleted: true
+    })
   }
 
   private isActiveStatus(value: unknown): boolean {

@@ -15,6 +15,7 @@ import { CodexioApiController } from './controller/CodexioApiController.js'
 import { EventBus } from './component/EventBus.js'
 import { AppEvent } from './value/Event.js'
 import { AgentManager } from './component/agent/AgentManager.js'
+import { IoThreadIdManager } from './component/IoThreadIdManager.js'
 
 @injectable()
 export class CodexioApplication {
@@ -27,7 +28,8 @@ export class CodexioApplication {
     @inject(ChannelOutputManager) private readonly outputManager: ChannelOutputManager,
     @inject(CodexioApiController) private readonly apiController: CodexioApiController,
     @inject(EventBus) private readonly eventBus: EventBus,
-    @inject(AgentManager) private readonly agentManager: AgentManager
+    @inject(AgentManager) private readonly agentManager: AgentManager,
+    @inject(IoThreadIdManager) private readonly ioThreadIdManager: IoThreadIdManager
   ) {
     this.eventBus.on(AppEvent.StopRequested, () => {
       void this.stop()
@@ -46,6 +48,7 @@ export class CodexioApplication {
       Logger.info('old log files cleaned', cleanedLogs)
     }
     try {
+      await this.ioThreadIdManager.init()
       await this.apiController.start()
       await this.outputManager.start()
       const agentStarted = await this.agentManager.start()
@@ -94,6 +97,9 @@ export class CodexioApplication {
     if (outputStopped.isFailed) {
       Logger.error('channel output stop failed', new Error(outputStopped.message))
     }
+    await this.ioThreadIdManager.flush().catch((error) => {
+      Logger.error('ioThread state flush failed', error)
+    })
     await rm(this.codexioMetadata.serverStatePath, {
       force: true
     })

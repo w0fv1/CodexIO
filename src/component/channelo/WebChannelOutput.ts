@@ -38,7 +38,10 @@ export class WebChannelOutput implements ChannelOutput {
     }
     const webThreadId = this.ioThreadIdManager.getPlatformThreadId(message.ioThreadId)
       .find((item) => item.source === 'web')
-    return this.hub.send(message, webThreadId?.id)
+    if (!webThreadId) {
+      return Result.successVoid()
+    }
+    return this.hub.send(message, webThreadId.id)
   }
 
   async stop(): Promise<Result<void>> {

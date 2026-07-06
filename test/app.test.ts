@@ -1,4 +1,5 @@
 import { Server as HttpServer } from 'node:http'
+import { randomUUID } from 'node:crypto'
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -18,6 +19,7 @@ import { FeishuChannelInput } from '../src/controller/channeli/FeishuChannelInpu
 import { EmailChannelInput } from '../src/controller/channeli/EmailChannelInput.js'
 import { NfircoThreadInput } from '../src/controller/channeli/NfircoThreadInput.js'
 import { WebChannelHub } from '../src/component/channel/WebChannelHub.js'
+import { WebThreadManager } from '../src/component/channel/WebThreadManager.js'
 import { WebChannelOutput } from '../src/component/channelo/WebChannelOutput.js'
 import { FeishuChannelOutput } from '../src/component/channelo/FeishuChannelOutput.js'
 import { FeishuWebhookChannelOutput } from '../src/component/channelo/FeishuWebhookChannelOutput.js'
@@ -45,8 +47,8 @@ describe('server', () => {
     expect(webPageHtml).toContain('id="threads"')
     expect(webPageHtml).toContain('newWebThreadId')
     expect(webPageHtml).toContain("message.type === 'agent'")
-    expect(webPageHtml).not.toContain('snapshot')
-    expect(webPageHtml).not.toContain('replaceMessages')
+    expect(webPageHtml).toContain('replaceHistory')
+    expect(webPageHtml).toContain('replaceThreads')
   })
 
   it('returns all described config fields to the config page', async () => {
@@ -139,21 +141,32 @@ describe('server', () => {
     }))
     await waitForWebSocketMessages(messages, 2)
     const restored = await openRecordedWebSocket(baseUrl)
-    const restoredMessages = restored.messages
-    await waitForWebSocketMessages(restoredMessages, 2)
-    expect(restoredMessages[0]).toMatchObject({
-      event: 'message',
-      role: 'user',
-      webThreadId: 'web-thread-history',
-      ioThreadId: expect.any(String),
-      text: 'message'
-    })
-    expect(restoredMessages[1]).toMatchObject({
-      event: 'message',
-      role: 'agent',
-      webThreadId: 'web-thread-history',
-      ioThreadId: expect.any(String),
-      text: 'message'
+    await waitForWebSocketMessages(restored.messages, 1)
+    expect(restored.messages[0]).toMatchObject({
+      event: 'history',
+      threads: [
+        {
+          id: 'web-thread-history',
+          ioThreadId: expect.any(String),
+          title: 'message'
+        }
+      ],
+      messages: [
+        {
+          event: 'message',
+          role: 'user',
+          webThreadId: 'web-thread-history',
+          ioThreadId: expect.any(String),
+          text: 'message'
+        },
+        {
+          event: 'message',
+          role: 'agent',
+          webThreadId: 'web-thread-history',
+          ioThreadId: expect.any(String),
+          text: 'message'
+        }
+      ]
     })
     await closeWebSocket(restored.socket)
     await closeWebSocket(socket)
@@ -453,7 +466,7 @@ describe('server', () => {
       name: 'agent.png',
       mime: 'image/png'
     })
-    const ioThreadIdManager = new IoThreadIdManager()
+    const ioThreadIdManager = createIoThreadIdManager()
     ioThreadIdManager.bind('io-thread', {
       source: 'nfirco',
       id: 'thread-1'
@@ -531,8 +544,10 @@ async function createTestCodexioApp(configer: Configer): Promise<{
   })
   const eventBus = new EventBus()
   const fileStore = new FileStore(metadata)
-  const ioThreadIdManager = new IoThreadIdManager()
-  const webHub = new WebChannelHub(fileStore)
+  const ioThreadIdManager = createIoThreadIdManager()
+  const codexClient = new CodexClient(configer, metadata)
+  const webThreadManager = new WebThreadManager(ioThreadIdManager, eventBus)
+  const webHub = new WebChannelHub(fileStore, webThreadManager)
   const webInput = new WebChannelInput(configer, webHub)
   const webOutput = new WebChannelOutput(configer, webHub, ioThreadIdManager)
   const feishuInput = new FeishuChannelInput(configer)
@@ -552,7 +567,6 @@ async function createTestCodexioApp(configer: Configer): Promise<{
     emailOutput,
     nfircoOutput
   )
-  const codexClient = new CodexClient(configer, metadata)
   const codexAgent = new CodexAgent(configer, eventBus, ioThreadIdManager, codexClient, new CodexMessageStreamer(eventBus))
   const echoAgent = new EchoAgent(eventBus)
   const agentManager = new AgentManager(configer, eventBus, codexAgent, echoAgent)
@@ -614,7 +628,7 @@ async function openRecordedWebSocket(baseUrl: string): Promise<{
 }> {
   const url = baseUrl.replace('http://', 'ws://').replace('https://', 'wss://')
   const socket = new WebSocket(`${url}/ws`)
-  const messages = recordWebSocket(socket)
+  const messages = recordAllWebSocket(socket)
   await new Promise<void>((resolve, reject) => {
     socket.on('message', (data) => {
       const message = JSON.parse(data.toString()) as Record<string, unknown>
@@ -631,6 +645,17 @@ async function openRecordedWebSocket(baseUrl: string): Promise<{
 }
 
 function recordWebSocket(socket: WebSocket): Array<Record<string, unknown>> {
+  const messages: Array<Record<string, unknown>> = []
+  socket.on('message', (data) => {
+    const message = JSON.parse(data.toString()) as Record<string, unknown>
+    if (message.event === 'message') {
+      messages.push(message)
+    }
+  })
+  return messages
+}
+
+function recordAllWebSocket(socket: WebSocket): Array<Record<string, unknown>> {
   const messages: Array<Record<string, unknown>> = []
   socket.on('message', (data) => {
     const message = JSON.parse(data.toString()) as Record<string, unknown>
@@ -661,4 +686,11 @@ async function closeWebSocket(socket: WebSocket): Promise<void> {
     socket.once('close', resolve)
     socket.close()
   })
+}
+
+function createIoThreadIdManager(): IoThreadIdManager {
+  return new IoThreadIdManager(new CodexioMetadata({
+    rootPath: testMetadata.rootPath,
+    dataPath: join(tmpdir(), `codexio-io-thread-${randomUUID()}`)
+  }))
 }

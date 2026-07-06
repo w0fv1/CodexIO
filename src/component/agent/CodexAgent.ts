@@ -7,7 +7,7 @@ import { EventBus } from '../EventBus.js'
 import { IoThreadIdManager } from '../IoThreadIdManager.js'
 import { Logger } from '../Logger.js'
 import { Agent } from './Agent.js'
-import { CodexClient, CodexClientLoginEvent, CodexClientMessage } from './CodexClient.js'
+import { CodexClient, CodexClientLoginEvent, CodexClientMessage, CodexClientThread } from './CodexClient.js'
 import { CodexMessageStreamer } from './CodexMessageStreamer.js'
 
 @injectable()
@@ -36,6 +36,9 @@ export class CodexAgent implements Agent {
     this.disposers.push(
       this.client.on('message', (message) => {
         void this.receiveCodexMessage(message)
+      }),
+      this.client.on('thread', (thread) => {
+        this.receiveCodexThread(thread)
       }),
       this.client.on('login', (login) => {
         void this.receiveLogin(login)
@@ -215,6 +218,18 @@ export class CodexAgent implements Agent {
   private bindThread(ioThreadId: string, threadId: string): void {
     this.threadIdByIoThreadId.set(ioThreadId, threadId)
     this.ioThreadIdByThreadId.set(threadId, ioThreadId)
+    this.eventBus.emit(AppEvent.CodexThreadBound, {
+      ioThreadId,
+      threadId
+    })
+  }
+
+  private receiveCodexThread(thread: CodexClientThread): void {
+    this.eventBus.emit(AppEvent.CodexThreadChanged, {
+      threads: [
+        thread
+      ]
+    })
   }
 
   private async sendAgent(message: Message, inputType?: ChannelMessageReceivedEvent['inputType']): Promise<void> {
