@@ -23,7 +23,7 @@ function Invoke-NfircoApi {
         [Parameter(Mandatory)] [object] $Body
     )
     $json = $Body | ConvertTo-Json -Depth 8
-    $response = Invoke-RestMethod -Uri $Uri -Method Post -Headers $adminApiHeaders -ContentType "application/json; charset=utf-8" -Body $json -TimeoutSec 60
+    $response = Invoke-RestMethod -Uri $Uri -Method Post -Headers $adminApiHeaders -ContentType "application/json; charset=utf-8" -Body $json -TimeoutSec 60 -NoProxy
     if ($null -eq $response) {
         throw "Nfirco API returned empty response"
     }
@@ -70,7 +70,10 @@ if ($null -eq $uploadData -or [string]::IsNullOrWhiteSpace($uploadData.uploadUrl
 }
 
 Write-Step "上传到 OSS"
-Invoke-WebRequest -Uri $uploadData.uploadUrl -Method Put -InFile $artifactPath -ContentType $releaseInfo.mimeType -UseBasicParsing -TimeoutSec 900 | Out-Null
+& curl.exe --fail --show-error --location --noproxy "*" --http1.1 --request PUT --header "Content-Type: $($releaseInfo.mimeType)" --upload-file $artifactPath $uploadData.uploadUrl
+if ($LASTEXITCODE -ne 0) {
+    throw "OSS upload failed: curl exit code $LASTEXITCODE"
+}
 
 Write-Step "登记发布完成"
 $completeBody = @{
