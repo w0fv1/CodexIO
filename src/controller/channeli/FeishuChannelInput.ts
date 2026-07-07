@@ -37,6 +37,8 @@ type FeishuWsClientAdapter = {
   }
 }
 
+type FeishuWsClientOptions = ConstructorParameters<typeof Lark.WSClient>[0]
+
 @injectable()
 export class FeishuChannelInput implements ChannelInput {
   readonly type = 'feishu'
@@ -44,6 +46,9 @@ export class FeishuChannelInput implements ChannelInput {
   private wsClient?: Lark.WSClient
   private receiver?: ChannelInputReceiver
   private chatId = ''
+  private reconnectTimer?: ReturnType<typeof setTimeout>
+  private stopped = true
+  private reconnectDelayMs = 1000
 
   constructor(
     @inject(Configer) private readonly configer: Configer
@@ -56,6 +61,35 @@ export class FeishuChannelInput implements ChannelInput {
     }
     this.receiver = receiver
     this.chatId = this.inputConfig.chatId?.trim() ?? ''
+    this.stopped = false
+    await this.connect().catch((error) => {
+      Logger.warn('feishu ws input initial connect failed', {
+        message: error instanceof Error ? error.message : String(error)
+      })
+      this.scheduleReconnect()
+    })
+    return true
+  }
+
+  async stop(): Promise<Result<void>> {
+    Logger.info('feishu ws input stopping')
+    this.stopped = true
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = undefined
+    }
+    this.wsClient?.close()
+    this.wsClient = undefined
+    this.receiver = undefined
+    this.chatId = ''
+    this.inputConfig = undefined
+    return Result.successVoid()
+  }
+
+  private async connect(): Promise<void> {
+    if (!this.inputConfig?.enabled || this.stopped) {
+      return
+    }
     Logger.info('feishu ws input starting', {
       chatId: this.inputConfig.chatId?.trim() ?? '',
       wsEnabled: Boolean(this.inputConfig.ws?.trim())
@@ -66,35 +100,50 @@ export class FeishuChannelInput implements ChannelInput {
       ready = resolve
       failed = reject
     })
-    this.wsClient = new Lark.WSClient({
+    const wsClient = this.createWsClient({
       appId: this.inputConfig.appId,
       appSecret: this.inputConfig.appSecret,
       loggerLevel: Lark.LoggerLevel.warn,
-      autoReconnect: false,
+      autoReconnect: true,
       handshakeTimeoutMs: 15000,
       onReady: () => {
         Logger.info('feishu ws input connected')
         ready()
       },
+      onReconnecting: () => {
+        Logger.warn('feishu ws input reconnecting')
+      },
+      onReconnected: () => {
+        Logger.info('feishu ws input reconnected')
+      },
       onError: (error) => {
+        Logger.warn('feishu ws input error', {
+          message: error.message
+        })
+        if (this.wsClient === wsClient) {
+          wsClient.close()
+          this.wsClient = undefined
+        }
+        this.scheduleReconnect()
         failed(error)
       }
     })
     const ws = this.inputConfig.ws?.trim()
     if (ws && ws.length > 0) {
-      const wsClient = this.wsClient as unknown as FeishuWsClientAdapter
-      const pullConnectConfig = wsClient.pullConnectConfig.bind(wsClient)
-      wsClient.pullConnectConfig = async () => {
+      const wsClientAdapter = wsClient as unknown as FeishuWsClientAdapter
+      const pullConnectConfig = wsClientAdapter.pullConnectConfig.bind(wsClientAdapter)
+      wsClientAdapter.pullConnectConfig = async () => {
         const result = await pullConnectConfig()
         if (result.ok) {
-          wsClient.wsConfig.updateWs({
+          wsClientAdapter.wsConfig.updateWs({
             connectUrl: ws
           })
         }
         return result
       }
     }
-    await this.wsClient.start({
+    this.wsClient = wsClient
+    await wsClient.start({
       eventDispatcher: new Lark.EventDispatcher({}).register({
         'im.message.receive_v1': async (data) => {
           await this.receive(data)
@@ -102,16 +151,27 @@ export class FeishuChannelInput implements ChannelInput {
       })
     })
     await connected
-    return true
   }
 
-  async stop(): Promise<Result<void>> {
-    Logger.info('feishu ws input stopping')
-    this.wsClient?.close()
-    this.wsClient = undefined
-    this.receiver = undefined
-    this.chatId = ''
-    return Result.successVoid()
+  protected createWsClient(options: FeishuWsClientOptions): Lark.WSClient {
+    return new Lark.WSClient(options)
+  }
+
+  private scheduleReconnect(): void {
+    if (this.stopped || !this.inputConfig?.enabled || this.reconnectTimer) {
+      return
+    }
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined
+      this.wsClient?.close()
+      this.wsClient = undefined
+      void this.connect().catch((error) => {
+        Logger.warn('feishu ws input reconnect failed', {
+          message: error instanceof Error ? error.message : String(error)
+        })
+        this.scheduleReconnect()
+      })
+    }, this.reconnectDelayMs)
   }
 
   private async receive(data: FeishuMessageEvent): Promise<void> {

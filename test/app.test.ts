@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { WebSocket, WebSocketServer } from 'ws'
+import * as Lark from '@larksuiteoapi/node-sdk'
 import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
 import { resolveAvailableServerPort } from '../src/util/Network.js'
 import { webPageHtml } from '../src/controller/channeli/WebPage.js'
@@ -40,6 +41,49 @@ const testToken = 'test-message-token'
 const testMetadata = new CodexioMetadata()
 const testServerStops = new WeakMap<HttpServer, () => Promise<Result<void>>>()
 const nfircoAuthorization = `Basic ${Buffer.from('用户+Book:pass+密码', 'utf8').toString('base64')}`
+type FeishuWsClientOptions = ConstructorParameters<typeof Lark.WSClient>[0]
+
+class FakeFeishuWsClient {
+  readonly autoReconnect: boolean
+  started = false
+  closed = false
+  connectUrl = ''
+  readonly wsConfig = {
+    updateWs: (config: { connectUrl: string }) => {
+      this.connectUrl = config.connectUrl
+    }
+  }
+
+  constructor(readonly options: FeishuWsClientOptions) {
+    this.autoReconnect = options.autoReconnect ?? true
+  }
+
+  async pullConnectConfig(): Promise<{ ok: boolean }> {
+    return {
+      ok: true
+    }
+  }
+
+  async start(): Promise<void> {
+    this.started = true
+    await this.pullConnectConfig()
+    this.options.onReady?.()
+  }
+
+  close(): void {
+    this.closed = true
+  }
+}
+
+class TestFeishuChannelInput extends FeishuChannelInput {
+  readonly clients: FakeFeishuWsClient[] = []
+
+  protected override createWsClient(options: FeishuWsClientOptions): Lark.WSClient {
+    const client = new FakeFeishuWsClient(options)
+    this.clients.push(client)
+    return client as unknown as Lark.WSClient
+  }
+}
 
 describe('server', () => {
   it('serves the Codexio web chat page', () => {
@@ -242,6 +286,50 @@ describe('server', () => {
     expect(result.isFailed).toBe(false)
     expect(result.data.stopping).toBe(true)
     await closed
+  })
+
+  it('reconnects feishu input after websocket client error', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-feishu-input-'))
+    const configPath = join(dir, 'config.yaml')
+    await writeFile(configPath, [
+      'server:',
+      '  host: 127.0.0.1',
+      'channeli:',
+      '  feishu:',
+      '    enabled: true',
+      '    appId: app-id',
+      '    appSecret: app-secret',
+      '    chatId: chat-id',
+      '    ws: wss://example.test/ws',
+      'channelo:',
+      '  web:',
+      '    enabled: true'
+    ].join('\n'))
+    const metadata = new CodexioMetadata({
+      rootPath: testMetadata.rootPath,
+      configPath
+    })
+    const input = new TestFeishuChannelInput(new Configer(metadata))
+    ;(input as unknown as { reconnectDelayMs: number }).reconnectDelayMs = 10
+    await input.start({
+      receive: async () => Result.success({
+        ioThreadId: 'io-thread'
+      })
+    })
+    input.clients[0].options.onError?.(new Error('socket closed'))
+    const startedAt = Date.now()
+    while (input.clients.length < 2) {
+      if (Date.now() - startedAt > 4000) {
+        throw new Error(`feishu reconnect timeout: ${input.clients.length}`)
+      }
+      await new Promise((resolve) => {
+        setTimeout(resolve, 5)
+      })
+    }
+    expect(input.clients[0].closed).toBe(true)
+    expect(input.clients[1].started).toBe(true)
+    expect(input.clients[1].autoReconnect).toBe(true)
+    await input.stop()
   })
 
   it('reconnects nfirco thread input after the socket closes', async () => {
