@@ -227,6 +227,7 @@ export class CodexioApiController {
       try {
         response.json(Result.success({
           config: {
+            app: await this.configer.get('app'),
             server: await this.configer.get('server'),
             agents: await this.configer.get('agents'),
             workspace: await this.configer.get('workspace'),

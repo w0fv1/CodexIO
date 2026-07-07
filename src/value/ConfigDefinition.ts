@@ -41,6 +41,7 @@ export type InferConfig<T extends ConfigDefinitionMap> = {
 
 const positiveInt = z.number().int().positive()
 const workspacePath = z.preprocess((value) => value === null ? '~' : value, z.string())
+const optionalString = z.preprocess((value) => value === null ? '' : value, z.string())
 const defaultCodexInstruction = [
   'When the user asks you to generate, edit, export, or provide an image or file, save the real output as a local file in the workspace or as an absolute local path.',
   'A preview, candidate, canvas, generated display, or tool-visible image is not deliverable unless you can reference a real file path or URL.',
@@ -51,6 +52,16 @@ const defaultCodexInstruction = [
 ].join('\n')
 
 export const configDefinition = defineConfig({
+  app: group('App', {
+    id: field({
+      label: 'ID',
+      description: '本次 Codexio 启动生成的飞书绑定口令。飞书里使用 $bind <ID> 或 ￥bind <ID> 绑定群聊。',
+      type: 'string',
+      apply: '重启 Codexio',
+      schema: z.string(),
+      default: ''
+    })
+  }),
   server: group('Server', {
     host: field({
       label: 'Host',
@@ -232,7 +243,7 @@ export const configDefinition = defineConfig({
         description: '允许接收消息的飞书群聊 ID。',
         type: 'string',
         apply: '重连 Feishu 输入',
-        schema: z.string(),
+        schema: optionalString,
         default: ''
       }),
       ws: field({
@@ -438,7 +449,7 @@ export const configDefinition = defineConfig({
         description: '发送消息的飞书群聊 ID。',
         type: 'string',
         apply: '重连 Feishu 输出',
-        schema: z.string(),
+        schema: optionalString,
         default: ''
       })
     }),
@@ -637,12 +648,10 @@ export function validateCodexioConfig(config: CodexioConfig): void {
   if (config.channeli.feishu?.enabled) {
     requireValue(issues, config.channeli.feishu.appId, 'channeli.feishu.appId is required')
     requireValue(issues, config.channeli.feishu.appSecret, 'channeli.feishu.appSecret is required')
-    requireValue(issues, config.channeli.feishu.chatId, 'channeli.feishu.chatId is required')
   }
   if (config.channelo.feishu?.enabled) {
     requireValue(issues, config.channelo.feishu.appId, 'channelo.feishu.appId is required')
     requireValue(issues, config.channelo.feishu.appSecret, 'channelo.feishu.appSecret is required')
-    requireValue(issues, config.channelo.feishu.chatId, 'channelo.feishu.chatId is required')
   }
   if (config.channelo.feishuWebhook?.enabled) {
     requireValue(issues, config.channelo.feishuWebhook.url, 'channelo.feishuWebhook.url is required')

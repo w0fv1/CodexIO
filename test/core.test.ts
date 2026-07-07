@@ -40,6 +40,7 @@ function createTestCodexClient(configer: Configer, metadata = testMetadata): Cod
 describe('core', () => {
   it('creates channel-only default config', () => {
     const config = createDefaultConfig()
+    expect(config.app.id).toBe('')
     expect(config.server.host).toBe('127.0.0.1')
     expect(config.agents.instruction).toContain('Markdown reference')
     expect(config.agents.instruction).toContain('previews without a file path')
@@ -202,6 +203,23 @@ describe('core', () => {
       type: 'message',
       text: 'hello'
     })
+  })
+
+  it('parses empty feishu chat ids as unbound strings', async () => {
+    const config = await parseCodexioConfig({
+      channeli: {
+        feishu: {
+          chatId: null
+        }
+      },
+      channelo: {
+        feishu: {
+          chatId: null
+        }
+      }
+    }, 'config.yaml')
+    expect(config.channeli.feishu.chatId).toBe('')
+    expect(config.channelo.feishu.chatId).toBe('')
   })
 
   it('consumes test commands without sending them to the agent event', async () => {
@@ -428,6 +446,7 @@ describe('core', () => {
       '--auto-port'
     ])
     expect(await configer.get('server.autoPort')).toBe(true)
+    expect((await configer.get('app.id')).length).toBeGreaterThan(0)
   })
 
   it('passes configured no proxy hosts to the codex process', async () => {

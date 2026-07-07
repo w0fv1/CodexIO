@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import 'reflect-metadata'
+import { randomBytes } from 'node:crypto'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { exit, pid } from 'node:process'
@@ -128,6 +129,7 @@ export class CodexioApplication {
 }
 
 export async function applyRuntimeConfig(configer: Configer, args: string[]): Promise<void> {
+  await configer.set('app.id', randomBytes(6).toString('base64url'))
   if (args.includes('--auto-port')) {
     await configer.set('server.autoPort', true)
   }

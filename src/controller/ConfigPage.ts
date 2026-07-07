@@ -41,6 +41,9 @@ export const configPageHtml = String.raw`
     let config = {}
     let descriptors = []
     let values = {}
+    let configSnapshot = ''
+    let loading = false
+    let editing = false
 
     const getValue = (object, path) => path.split('.').reduce((current, key) => current == null ? undefined : current[key], object)
     const setValue = (object, path, value) => {
@@ -53,6 +56,7 @@ export const configPageHtml = String.raw`
       current[keys[keys.length - 1]] = value
     }
     const sameValue = (left, right) => JSON.stringify(left) === JSON.stringify(right)
+    const configText = (value) => JSON.stringify(value)
     const showStatus = (message, tone = 'info') => {
       status.className = 'rounded-md border px-4 py-3 text-sm ' + (tone === 'error' ? 'border-red-900 bg-red-950 text-red-200' : 'border-slate-800 bg-slate-900 text-slate-300')
       status.textContent = message
@@ -61,6 +65,7 @@ export const configPageHtml = String.raw`
       const changed = descriptors.some((field) => !sameValue(values[field.path], getValue(config, field.path)))
       save.disabled = !changed
       dirty.textContent = changed ? '有未保存修改' : '没有未保存修改'
+      editing = changed
     }
     const inputValue = (input, type) => {
       if (type === 'boolean') {
@@ -125,15 +130,57 @@ export const configPageHtml = String.raw`
       markDirty()
     }
     const load = async () => {
-      const response = await fetch('/api/config')
-      const result = await response.json()
-      if (result.isFailed) {
-        showStatus(result.message, 'error')
+      if (loading) {
         return
       }
-      config = result.data.config
-      descriptors = result.data.descriptor
-      render()
+      loading = true
+      try {
+        const response = await fetch('/api/config')
+        const result = await response.json()
+        if (result.isFailed) {
+          showStatus(result.message, 'error')
+          return
+        }
+        config = result.data.config
+        configSnapshot = configText(config)
+        descriptors = result.data.descriptor
+        render()
+      } catch (error) {
+        showStatus(error instanceof Error ? error.message : String(error), 'error')
+      } finally {
+        loading = false
+      }
+    }
+    const refreshExternalConfig = async () => {
+      if (loading) {
+        return
+      }
+      loading = true
+      try {
+        const response = await fetch('/api/config')
+        const result = await response.json()
+        if (result.isFailed) {
+          showStatus(result.message, 'error')
+          return
+        }
+        const nextSnapshot = configText(result.data.config)
+        if (nextSnapshot === configSnapshot) {
+          return
+        }
+        if (editing) {
+          showStatus('配置已在外部更新，保存或放弃当前修改后刷新页面查看最新配置。')
+          return
+        }
+        config = result.data.config
+        configSnapshot = nextSnapshot
+        descriptors = result.data.descriptor
+        render()
+        showStatus('配置已自动刷新')
+      } catch (error) {
+        showStatus(error instanceof Error ? error.message : String(error), 'error')
+      } finally {
+        loading = false
+      }
     }
     save.addEventListener('click', async () => {
       const patch = {}
@@ -189,6 +236,9 @@ export const configPageHtml = String.raw`
       await load()
     })
     void load()
+    setInterval(() => {
+      void refreshExternalConfig()
+    }, 2000)
   </script>
 </body>
 </html>

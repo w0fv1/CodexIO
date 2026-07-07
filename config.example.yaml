@@ -1,3 +1,5 @@
+app:
+  id: ''
 server:
   host: 127.0.0.1
   port: 8787
@@ -19,7 +21,7 @@ agents:
   echo:
     enabled: true
   codex:
-    enabled: true
+    enabled: false
     bundled: false
     command: codex
     developerInstructions: ''

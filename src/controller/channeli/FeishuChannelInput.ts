@@ -38,12 +38,32 @@ type FeishuWsClientAdapter = {
 }
 
 type FeishuWsClientOptions = ConstructorParameters<typeof Lark.WSClient>[0]
+type FeishuOpenApiClientOptions = ConstructorParameters<typeof Lark.Client>[0]
+type FeishuReplyMessageClient = {
+  im: {
+    v1: {
+      message: {
+        reply: (payload: {
+          path: {
+            message_id: string
+          }
+          data: {
+            msg_type: 'text'
+            content: string
+            reply_in_thread: true
+          }
+        }) => Promise<unknown>
+      }
+    }
+  }
+}
 
 @injectable()
 export class FeishuChannelInput implements ChannelInput {
   readonly type = 'feishu'
   private inputConfig?: FeishuChannelInputConfig
   private wsClient?: Lark.WSClient
+  private openApiClient?: Lark.Client
   private receiver?: ChannelInputReceiver
   private chatId = ''
   private reconnectTimer?: ReturnType<typeof setTimeout>
@@ -61,6 +81,10 @@ export class FeishuChannelInput implements ChannelInput {
     }
     this.receiver = receiver
     this.chatId = this.inputConfig.chatId?.trim() ?? ''
+    this.openApiClient = this.createOpenApiClient({
+      appId: this.inputConfig.appId,
+      appSecret: this.inputConfig.appSecret
+    })
     this.stopped = false
     await this.connect().catch((error) => {
       Logger.warn('feishu ws input initial connect failed', {
@@ -80,6 +104,7 @@ export class FeishuChannelInput implements ChannelInput {
     }
     this.wsClient?.close()
     this.wsClient = undefined
+    this.openApiClient = undefined
     this.receiver = undefined
     this.chatId = ''
     this.inputConfig = undefined
@@ -157,6 +182,10 @@ export class FeishuChannelInput implements ChannelInput {
     return new Lark.WSClient(options)
   }
 
+  protected createOpenApiClient(options: FeishuOpenApiClientOptions): Lark.Client {
+    return new Lark.Client(options)
+  }
+
   private scheduleReconnect(): void {
     if (this.stopped || !this.inputConfig?.enabled || this.reconnectTimer) {
       return
@@ -180,35 +209,7 @@ export class FeishuChannelInput implements ChannelInput {
     const feishuThreadId = typeof feishuMessage.thread_id === 'string' && feishuMessage.thread_id.trim().length > 0 ? feishuMessage.thread_id.trim() : ''
     const messageId = typeof data.message.message_id === 'string' && data.message.message_id.trim().length > 0 ? data.message.message_id.trim() : ''
     const sender = readFeishuSender(data)
-    if (feishuThreadId.length === 0) {
-      Logger.warn('feishu topic identity missing', {
-        chatId
-      })
-      return
-    }
-    if (messageId.length === 0) {
-      Logger.warn('feishu message identity missing', {
-        chatId
-      })
-      return
-    }
-    const channelThreadId = {
-      source: 'feishu' as const,
-      id: `${chatId}:thread:${feishuThreadId}`
-    }
     try {
-      if (this.chatId.length === 0) {
-        this.chatId = data.message.chat_id
-        Logger.info('feishu chat connected', {
-          chatId: data.message.chat_id
-        })
-      }
-      if (data.message.chat_id !== this.chatId) {
-        Logger.info('feishu chat ignored', {
-          chatId: data.message.chat_id
-        })
-        return
-      }
       const parsedText = parseFeishuMessageText(data.message.message_type, data.message.content, data.message.mentions ?? [])
       if (!parsedText.success && parsedText.reason === 'unsupported') {
         Logger.warn('feishu message unsupported', {
@@ -220,10 +221,18 @@ export class FeishuChannelInput implements ChannelInput {
         Logger.warn('feishu message parse failed')
         return
       }
-      if (!shouldReceiveFeishuMessage(data.message.chat_type, data.message.mentions, this.inputConfig?.aite ?? true)) {
+      const bindMatch = /^[￥$]bind(?:\s+(\S+))?\s*$/i.exec(parsedText.text.trim())
+      const isBindCommand = bindMatch !== null
+      if (this.chatId.length > 0 && data.message.chat_id !== this.chatId && !isBindCommand) {
+        Logger.info('feishu chat ignored', {
+          chatId: data.message.chat_id
+        })
+        return
+      }
+      if (this.chatId.length === 0 && !isBindCommand) {
         Logger.info('feishu message ignored', {
           chatId: data.message.chat_id,
-          reason: 'aite required'
+          reason: 'bind required'
         })
         return
       }
@@ -232,6 +241,109 @@ export class FeishuChannelInput implements ChannelInput {
           chatId: data.message.chat_id,
           reason: 'sender not allowed',
           openId: sender.openId
+        })
+        return
+      }
+      if (isBindCommand) {
+        const normalizedChatId = data.message.chat_id.trim()
+        const normalizedOpenId = sender.openId?.trim() ?? ''
+        const openApiClient = this.openApiClient
+        if (normalizedChatId.length === 0 || normalizedOpenId.length === 0) {
+          Logger.warn('feishu bind failed', {
+            chatId: normalizedChatId,
+            openId: normalizedOpenId,
+            reason: 'identity missing'
+          })
+          return
+        }
+        const config = await this.configer.get('channeli.feishu')
+        const appId = await this.configer.get('app.id')
+        if (appId.trim().length === 0 || (bindMatch[1]?.trim() ?? '') !== appId.trim()) {
+          Logger.warn('feishu bind failed', {
+            chatId: normalizedChatId,
+            openId: normalizedOpenId,
+            reason: 'app id mismatch'
+          })
+          if (openApiClient && messageId.length > 0) {
+            await (openApiClient as unknown as FeishuReplyMessageClient).im.v1.message.reply({
+              path: {
+                message_id: messageId
+              },
+              data: {
+                msg_type: 'text',
+                content: JSON.stringify({
+                  text: 'Codexio 飞书群聊绑定失败：绑定口令不正确'
+                }),
+                reply_in_thread: true
+              }
+            })
+          }
+          return
+        }
+        const allowedOpenIds = config.allowedOpenIds.map((item) => item.trim()).filter((item) => item.length > 0)
+        const nextAllowedOpenIds = allowedOpenIds.includes(normalizedOpenId) ? allowedOpenIds : [
+          ...allowedOpenIds,
+          normalizedOpenId
+        ]
+        await this.configer.patch({
+          channeli: {
+            feishu: {
+              chatId: normalizedChatId,
+              allowedOpenIds: nextAllowedOpenIds
+            }
+          },
+          channelo: {
+            feishu: {
+              enabled: true,
+              chatId: normalizedChatId
+            }
+          }
+        })
+        this.chatId = normalizedChatId
+        this.inputConfig = {
+          ...config,
+          chatId: normalizedChatId,
+          allowedOpenIds: nextAllowedOpenIds
+        }
+        Logger.info('feishu input bound', {
+          chatId: normalizedChatId,
+          openId: normalizedOpenId
+        })
+        if (openApiClient && messageId.length > 0) {
+          await (openApiClient as unknown as FeishuReplyMessageClient).im.v1.message.reply({
+            path: {
+              message_id: messageId
+            },
+            data: {
+              msg_type: 'text',
+              content: JSON.stringify({
+                text: 'Codexio 飞书群聊已绑定'
+              }),
+              reply_in_thread: true
+            }
+          })
+        } else {
+          Logger.warn('feishu bind reply skipped', {
+            chatId: normalizedChatId,
+            reason: 'message identity missing'
+          })
+        }
+        return
+      }
+      if (messageId.length === 0) {
+        Logger.warn('feishu message identity missing', {
+          chatId
+        })
+        return
+      }
+      const channelThreadId = {
+        source: 'feishu' as const,
+        id: feishuThreadId.length > 0 ? `${chatId}:thread:${feishuThreadId}` : `${chatId}:chat`
+      }
+      if (!shouldReceiveFeishuMessage(data.message.chat_type, data.message.mentions, this.inputConfig?.aite ?? true)) {
+        Logger.info('feishu message ignored', {
+          chatId: data.message.chat_id,
+          reason: 'aite required'
         })
         return
       }

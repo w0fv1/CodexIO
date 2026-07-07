@@ -76,13 +76,34 @@ class FakeFeishuWsClient {
   }
 }
 
+class FakeFeishuOpenApiClient {
+  readonly replies: unknown[] = []
+  readonly im = {
+    v1: {
+      message: {
+        reply: async (payload: unknown) => {
+          this.replies.push(payload)
+          return {}
+        }
+      }
+    }
+  }
+}
+
 class TestFeishuChannelInput extends FeishuChannelInput {
   readonly clients: FakeFeishuWsClient[] = []
+  readonly openApiClients: FakeFeishuOpenApiClient[] = []
 
   protected override createWsClient(options: FeishuWsClientOptions): Lark.WSClient {
     const client = new FakeFeishuWsClient(options)
     this.clients.push(client)
     return client as unknown as Lark.WSClient
+  }
+
+  protected override createOpenApiClient(): Lark.Client {
+    const client = new FakeFeishuOpenApiClient()
+    this.openApiClients.push(client)
+    return client as unknown as Lark.Client
   }
 }
 
@@ -102,6 +123,8 @@ describe('server', () => {
 
   it('serves config field descriptions on the config page', () => {
     expect(configPageHtml).toContain('field.description')
+    expect(configPageHtml).toContain('refreshExternalConfig')
+    expect(configPageHtml).toContain('配置已在外部更新')
   })
 
   it('returns all described config fields to the config page', async () => {
@@ -120,6 +143,7 @@ describe('server', () => {
     expect(result.isFailed).toBe(false)
     expect(Object.keys(result.data.config).sort()).toEqual([
       'agents',
+      'app',
       'channeli',
       'channelo',
       'proxy',
@@ -299,6 +323,8 @@ describe('server', () => {
     const dir = await mkdtemp(join(tmpdir(), 'codexio-feishu-input-'))
     const configPath = join(dir, 'config.yaml')
     await writeFile(configPath, [
+      'app:',
+      '  id: bind-secret',
       'server:',
       '  host: 127.0.0.1',
       'channeli:',
@@ -336,6 +362,212 @@ describe('server', () => {
     expect(input.clients[0].closed).toBe(true)
     expect(input.clients[1].started).toBe(true)
     expect(input.clients[1].autoReconnect).toBe(true)
+    await input.stop()
+  })
+
+  it('binds feishu input from a bind command when chat id is empty', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-feishu-bind-'))
+    const configPath = join(dir, 'config.yaml')
+    await writeFile(configPath, [
+      'app:',
+      '  id: bind-secret',
+      'server:',
+      '  host: 127.0.0.1',
+      'channeli:',
+      '  feishu:',
+      '    enabled: true',
+      '    appId: app-id',
+      '    appSecret: app-secret',
+      '    chatId: ""',
+      '    aite: false',
+      '    allowedOpenIds: []',
+      'channelo:',
+      '  feishu:',
+      '    enabled: false',
+      '    appId: app-id',
+      '    appSecret: app-secret',
+      '    chatId: ""',
+      '  web:',
+      '    enabled: true'
+    ].join('\n'))
+    const metadata = new CodexioMetadata({
+      rootPath: testMetadata.rootPath,
+      configPath
+    })
+    const configer = new Configer(metadata)
+    const input = new TestFeishuChannelInput(configer)
+    const received: unknown[] = []
+    await input.start({
+      receive: async (source, message) => {
+        received.push({
+          source,
+          message
+        })
+        return Result.success({
+          ioThreadId: 'io-thread'
+        })
+      }
+    })
+    await Reflect.get(input, 'receive').call(input, {
+      sender: {
+        sender_id: {
+          open_id: 'ou_ignored'
+        }
+      },
+      message: {
+        message_id: 'om_ignored',
+        chat_id: 'oc_1',
+        chat_type: 'group',
+        message_type: 'text',
+        content: JSON.stringify({
+          text: 'hello'
+        })
+      }
+    })
+    expect(received).toEqual([])
+    await Reflect.get(input, 'receive').call(input, {
+      sender: {
+        sender_id: {
+          open_id: 'ou_wrong'
+        }
+      },
+      message: {
+        message_id: 'om_wrong_bind',
+        chat_id: 'oc_wrong',
+        chat_type: 'group',
+        message_type: 'text',
+        content: JSON.stringify({
+          text: '$bind wrong-secret'
+        })
+      }
+    })
+    expect((await configer.get('channeli.feishu')).chatId).toBe('')
+    expect(input.openApiClients[0].replies).toMatchObject([
+      {
+        path: {
+          message_id: 'om_wrong_bind'
+        },
+        data: {
+          reply_in_thread: true
+        }
+      }
+    ])
+    await Reflect.get(input, 'receive').call(input, {
+      sender: {
+        sender_id: {
+          open_id: 'ou_1'
+        }
+      },
+      message: {
+        message_id: 'om_bind',
+        chat_id: 'oc_1',
+        chat_type: 'group',
+        message_type: 'text',
+        content: JSON.stringify({
+          text: '$bind bind-secret'
+        })
+      }
+    })
+    const config = await configer.get('channeli.feishu')
+    expect(config.chatId).toBe('oc_1')
+    expect(config.allowedOpenIds).toEqual([
+      'ou_1'
+    ])
+    const outputConfig = await configer.get('channelo.feishu')
+    expect(outputConfig.enabled).toBe(true)
+    expect(outputConfig.chatId).toBe('oc_1')
+    expect(input.openApiClients[0].replies).toMatchObject([
+      {
+        path: {
+          message_id: 'om_wrong_bind'
+        },
+        data: {
+          reply_in_thread: true
+        }
+      },
+      {
+        path: {
+          message_id: 'om_bind'
+        },
+        data: {
+          reply_in_thread: true
+        }
+      }
+    ])
+    expect(received).toEqual([])
+    await Reflect.get(input, 'receive').call(input, {
+      sender: {
+        sender_id: {
+          open_id: 'ou_1'
+        }
+      },
+      message: {
+        message_id: 'om_after_bind',
+        chat_id: 'oc_1',
+        chat_type: 'group',
+        message_type: 'text',
+        content: JSON.stringify({
+          text: 'hello after bind'
+        })
+      }
+    })
+    expect(received).toMatchObject([
+      {
+        source: 'feishu',
+        message: {
+          channelThreadId: {
+            source: 'feishu',
+            id: 'oc_1:chat'
+          },
+          sourceMessageId: 'om_after_bind',
+          text: 'hello after bind',
+          sender: {
+            openId: 'ou_1'
+          }
+        }
+      }
+    ])
+    await Reflect.get(input, 'receive').call(input, {
+      sender: {
+        sender_id: {
+          open_id: 'ou_2'
+        }
+      },
+      message: {
+        message_id: 'om_rebind_denied',
+        chat_id: 'oc_denied',
+        chat_type: 'group',
+        message_type: 'text',
+        content: JSON.stringify({
+          text: '$bind bind-secret'
+        })
+      }
+    })
+    const deniedInputConfig = await configer.get('channeli.feishu')
+    expect(deniedInputConfig.chatId).toBe('oc_1')
+    await Reflect.get(input, 'receive').call(input, {
+      sender: {
+        sender_id: {
+          open_id: 'ou_1'
+        }
+      },
+      message: {
+        message_id: 'om_rebind',
+        chat_id: 'oc_2',
+        chat_type: 'group',
+        message_type: 'text',
+        content: JSON.stringify({
+          text: '￥bind bind-secret'
+        })
+      }
+    })
+    const reboundInputConfig = await configer.get('channeli.feishu')
+    expect(reboundInputConfig.chatId).toBe('oc_2')
+    expect(reboundInputConfig.allowedOpenIds).toEqual([
+      'ou_1'
+    ])
+    const reboundOutputConfig = await configer.get('channelo.feishu')
+    expect(reboundOutputConfig.chatId).toBe('oc_2')
     await input.stop()
   })
 
