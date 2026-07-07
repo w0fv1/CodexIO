@@ -31,6 +31,7 @@ class CodexioDesktop {
   private statePath = ''
   private serverPath = ''
   private serverFailureNotified = false
+  private readonly notifications = new Set<electron.Notification>()
 
   async start(): Promise<void> {
     await app.whenReady()
@@ -314,6 +315,13 @@ class CodexioDesktop {
     if (onClick) {
       notification.on('click', onClick)
     }
+    this.notifications.add(notification)
+    notification.once('close', () => {
+      this.notifications.delete(notification)
+    })
+    notification.once('failed', () => {
+      this.notifications.delete(notification)
+    })
     notification.show()
   }
 

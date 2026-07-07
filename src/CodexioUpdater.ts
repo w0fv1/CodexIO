@@ -94,7 +94,7 @@ export class CodexioUpdater {
   handleUserAction(): void {
     switch (this.state.kind) {
       case 'ready':
-        this.notifyReadyUpdate(this.state)
+        void this.openReadyInstaller()
         return
       case 'checking':
         this.options.notify('Codexio 更新', '正在检查更新。')
@@ -191,7 +191,7 @@ export class CodexioUpdater {
   }
 
   private notifyReadyUpdate(state: Extract<UpdateState, { kind: 'ready' }>): void {
-    this.options.notify('Codexio 更新已下载', `${state.version} 已下载完成，点击打开安装包。`, () => {
+    this.options.notify('Codexio 更新已下载', `${state.version} 已下载完成，点击打开安装包并退出 Codexio。`, () => {
       void this.openReadyInstaller()
     })
   }
@@ -229,7 +229,7 @@ export class CodexioUpdater {
     this.options.log(`updater installer open requested version=${version} file=${downloadedFile}`)
     this.state = { kind: 'installing', version }
     this.options.refreshMenu()
-    this.options.notify('Codexio 正在更新', `正在打开 ${version} 安装包，请按安装器提示完成更新。`)
+    this.options.notify('Codexio 正在更新', `正在打开 ${version} 安装包，Codexio 将退出。`)
     try {
       const message = await this.options.openInstaller(downloadedFile)
       if (message.trim().length > 0) {
