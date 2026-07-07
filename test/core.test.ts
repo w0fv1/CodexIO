@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ChannelOutputManager } from '../src/component/channelo/ChannelOutputManager.js'
 import { ChannelOutput } from '../src/component/channelo/ChannelOutput.js'
@@ -422,7 +422,6 @@ describe('core', () => {
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codex'],
       ['agents.instruction', ''],
-      ['agents.codex.developerInstructions', ''],
       ['agents.codex.requestTimeoutSeconds', 120]
     ])
     const client = createTestCodexClient({
@@ -450,7 +449,6 @@ describe('core', () => {
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codex'],
       ['agents.instruction', ''],
-      ['agents.codex.developerInstructions', ''],
       ['agents.codex.requestTimeoutSeconds', 120]
     ])
     const dir = await mkdtemp(join(tmpdir(), 'codexio-default-workspace-'))
@@ -466,12 +464,13 @@ describe('core', () => {
     expect(runtimeConfig.command).not.toContain('app.asar')
   })
 
-  it('resolves the system codex command from known install locations', async () => {
+  it('resolves the system codex command from vscode before openai install and path', async () => {
     const previousPath = process.env.PATH
     const previousLocalAppData = process.env.LOCALAPPDATA
     const previousUserProfile = process.env.USERPROFILE
     const localAppData = await mkdtemp(join(tmpdir(), 'codexio-localappdata-'))
     const userProfile = await mkdtemp(join(tmpdir(), 'codexio-userprofile-'))
+    const pathBin = await mkdtemp(join(tmpdir(), 'codexio-path-bin-'))
     const localBin = join(localAppData, 'OpenAI', 'Codex', 'bin', 'system-codex')
     const vscodeBin = join(userProfile, '.vscode', 'extensions', 'openai.chatgpt-test', 'bin', 'windows-x86_64')
     await mkdir(localBin, {
@@ -482,7 +481,8 @@ describe('core', () => {
     })
     await writeFile(join(localBin, 'codex.exe'), '')
     await writeFile(join(vscodeBin, 'codex.exe'), '')
-    process.env.PATH = ''
+    await writeFile(join(pathBin, process.platform === 'win32' ? 'codex.exe' : 'codex'), '')
+    process.env.PATH = pathBin
     process.env.LOCALAPPDATA = localAppData
     process.env.USERPROFILE = userProfile
     try {
@@ -496,7 +496,6 @@ describe('core', () => {
         ['server.host', '127.0.0.1'],
         ['agents.codex.command', 'codex'],
         ['agents.instruction', ''],
-        ['agents.codex.developerInstructions', ''],
         ['agents.codex.requestTimeoutSeconds', 120]
       ])
       const metadata = new CodexioMetadata({
@@ -538,7 +537,6 @@ describe('core', () => {
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codex'],
       ['agents.instruction', 'File rule with Markdown reference'],
-      ['agents.codex.developerInstructions', 'Project rule'],
       ['agents.codex.requestTimeoutSeconds', 120]
     ])
     const client = createTestCodexClient({
@@ -559,7 +557,63 @@ describe('core', () => {
     }
     await client['startThread']()
     expect(String(threadStartParams?.developerInstructions)).toContain('Markdown reference')
-    expect(String(threadStartParams?.developerInstructions)).toContain('Project rule')
+  })
+
+  it('adds the resolved codex executable directory to codex thread instructions', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-command-dir-'))
+    const codexCommand = join(dir, 'bin', 'codex.exe')
+    const values = new Map<string, unknown>([
+      ['agents.codex.bundled', false],
+      ['workspace.path', '~'],
+      ['proxy.enabled', false],
+      ['proxy.host', '127.0.0.1'],
+      ['proxy.port', 7890],
+      ['proxy.noProxy', ''],
+      ['server.host', '127.0.0.1'],
+      ['agents.codex.command', codexCommand],
+      ['agents.instruction', 'Project instruction'],
+      ['agents.codex.requestTimeoutSeconds', 120]
+    ])
+    const client = createTestCodexClient({
+      get: async (path: string) => values.get(path)
+    } as unknown as Configer)
+    let threadStartParams: Record<string, unknown> | undefined
+    client['request'] = async (method: string, params?: unknown) => {
+      if (method === 'thread/start') {
+        threadStartParams = params as Record<string, unknown>
+        return {
+          thread: {
+            id: 'thread-1',
+            name: 'thread'
+          }
+        }
+      }
+      throw new Error(method)
+    }
+    await client['startThread']()
+    expect(String(threadStartParams?.developerInstructions)).toContain('Project instruction')
+    expect(String(threadStartParams?.developerInstructions)).toContain(`Codex executable directory: ${dirname(codexCommand)}`)
+  })
+
+  it('does not add a codex executable directory instruction for unresolved bare commands', async () => {
+    const values = new Map<string, unknown>([
+      ['agents.codex.bundled', false],
+      ['workspace.path', '~'],
+      ['proxy.enabled', false],
+      ['proxy.host', '127.0.0.1'],
+      ['proxy.port', 7890],
+      ['proxy.noProxy', ''],
+      ['server.host', '127.0.0.1'],
+      ['agents.codex.command', 'codexio-missing-command'],
+      ['agents.instruction', 'Project instruction'],
+      ['agents.codex.requestTimeoutSeconds', 120]
+    ])
+    const client = createTestCodexClient({
+      get: async (path: string) => values.get(path)
+    } as unknown as Configer)
+    const runtimeConfig = await client['readRuntimeConfig']()
+    expect(runtimeConfig.command).toBe('codexio-missing-command')
+    expect(runtimeConfig.instruction).toBe('Project instruction')
   })
 
   it('starts new codex threads inside the io thread workspace when enabled', async () => {
@@ -575,7 +629,6 @@ describe('core', () => {
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codex'],
       ['agents.instruction', ''],
-      ['agents.codex.developerInstructions', ''],
       ['agents.codex.requestTimeoutSeconds', 120]
     ])
     const client = createTestCodexClient({
@@ -721,7 +774,6 @@ describe('core', () => {
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codex'],
       ['agents.instruction', ''],
-      ['agents.codex.developerInstructions', ''],
       ['agents.codex.requestTimeoutSeconds', 120]
     ])
     const client = createTestCodexClient({

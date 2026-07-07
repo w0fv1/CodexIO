@@ -17,7 +17,6 @@ export type CodexioConfig = {
       enabled: boolean
       bundled: boolean
       command: string
-      developerInstructions: string
       requestTimeoutSeconds: number
     }
   }
@@ -141,7 +140,6 @@ const configFields: ConfigField[] = [
   field('agents.codex.enabled', 'Codex Agent', 'Enabled', 'boolean', '重启 Codex Agent', z.boolean(), false),
   field('agents.codex.bundled', 'Codex Agent', 'Bundled', 'boolean', '重启 Codex Agent', z.boolean(), true),
   field('agents.codex.command', 'Codex Agent', 'Command', 'string', '重启 Codex Agent', z.string(), 'codex'),
-  field('agents.codex.developerInstructions', 'Codex Agent', 'Developer Instructions', 'string', '重启 Codex Agent', z.string(), ''),
   field('agents.codex.requestTimeoutSeconds', 'Codex Agent', 'Request Timeout Seconds', 'number', '重启 Codex Agent', positiveInt, 120),
   field('workspace.path', 'Workspace', 'Path', 'string', '重启 Codex Agent', workspacePath, ''),
   field('workspace.perIoThread', 'Workspace', 'Per IoThread', 'boolean', '重启 Codex Agent', z.boolean(), false),

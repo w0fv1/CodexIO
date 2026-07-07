@@ -85,7 +85,6 @@ type CodexClientRuntimeConfig = {
   proxyUrl?: string
   noProxyHosts: string[]
   instruction: string
-  developerInstructions: string
   requestTimeoutMs: number
 }
 
@@ -333,6 +332,10 @@ export class CodexClient {
   private async startThread(ioThreadId: string): Promise<CodexClientThread> {
     const config = await this.readRuntimeConfig()
     const cwd = await this.workspaceResolver.ensure(ioThreadId)
+    const codexExecutablePath = config.bundled && config.args[0] && isAbsolute(config.args[0])
+      ? config.args[0]
+      : config.command
+    const codexExecutableDirectory = isAbsolute(codexExecutablePath) ? dirname(codexExecutablePath) : ''
     const response = await this.request('thread/start', {
       cwd,
       approvalPolicy: 'never',
@@ -340,7 +343,12 @@ export class CodexClient {
       ephemeral: false,
       developerInstructions: [
         config.instruction,
-        config.developerInstructions
+        codexExecutableDirectory.length > 0
+          ? [
+              'Codex runtime context:',
+              `- Codex executable directory: ${codexExecutableDirectory}`
+            ].join('\n')
+          : ''
       ].filter((item) => item.trim().length > 0).join('\n\n')
     })
     if (!response || typeof response !== 'object') {
@@ -676,7 +684,6 @@ export class CodexClient {
       serverHost,
       codexCommand,
       instruction,
-      developerInstructions,
       requestTimeoutSeconds
     ] = await Promise.all([
       this.configer.get('agents.codex.bundled'),
@@ -687,7 +694,6 @@ export class CodexClient {
       this.configer.get('server.host'),
       this.configer.get('agents.codex.command'),
       this.configer.get('agents.instruction'),
-      this.configer.get('agents.codex.developerInstructions'),
       this.configer.get('agents.codex.requestTimeoutSeconds')
     ])
     const command = bundled
@@ -709,7 +715,6 @@ export class CodexClient {
         ...proxyNoProxy.split(',').map((item) => item.trim()).filter((item) => item.length > 0)
       ],
       instruction,
-      developerInstructions,
       requestTimeoutMs: requestTimeoutSeconds * 1000
     }
   }
@@ -752,18 +757,20 @@ function bundledCodexCommand(): CodexCommand {
       ]
     }
   }
+  const codexScriptPath = require.resolve('@openai/codex/bin/codex.js')
   return {
     command: process.execPath,
     args: [
-      require.resolve('@openai/codex/bin/codex.js'),
+      codexScriptPath,
       'app-server'
     ]
   }
 }
 
 function externalCodexCommand(commandValue: string): CodexCommand {
+  const command = resolveExternalCommand(commandValue.trim().length > 0 ? commandValue.trim() : 'codex')
   return {
-    command: resolveExternalCommand(commandValue.trim().length > 0 ? commandValue.trim() : 'codex'),
+    command,
     args: [
       'app-server'
     ]
@@ -814,8 +821,8 @@ function externalCommandDirectories(command: string): string[] {
     return pathDirectories
   }
   return uniquePaths([
-    ...pathDirectories,
-    ...codexCliDirectories()
+    ...codexCliDirectories(),
+    ...pathDirectories
   ])
 }
 
