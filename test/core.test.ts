@@ -312,6 +312,20 @@ describe('core', () => {
     expect(() => validateCodexioConfig(config)).toThrow('one agent must be enabled')
   })
 
+  it('requires nfirco output section when nfirco output is enabled', () => {
+    const config = ConfigSchema.parse({
+      channelo: {
+        nfirco: {
+          enabled: true,
+          baseUrl: 'https://firco.cn',
+          account: 'codexio',
+          password: 'password'
+        }
+      }
+    })
+    expect(() => validateCodexioConfig(config)).toThrow('channelo.nfirco.section is required')
+  })
+
   it('keeps codex agent and workspace config fields when importing', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'codexio-config-'))
     const configPath = join(dir, 'config.yaml')

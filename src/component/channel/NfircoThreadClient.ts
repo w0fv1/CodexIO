@@ -31,6 +31,21 @@ export type NfircoThreadCreateMessageInput = {
   imageIds?: number[]
 }
 
+export type NfircoThreadCreateThreadInput = {
+  section: string
+  title: string
+  text: string
+  requestId: string
+  fileIds?: number[]
+  imageIds?: number[]
+}
+
+export type NfircoThreadData = {
+  threadUuid: string
+  section?: string
+  title?: string
+}
+
 export type NfircoThreadMessageEvent = {
   type: 'thread.message.created'
   eventId: string
@@ -63,6 +78,36 @@ export function openNfircoThreadSocket(credentials: NfircoThreadCredentials): We
   return new WebSocket(`${toWsBaseUrl(credentials.baseUrl)}/api/threadio/ws`, {
     headers: credentialsHeaders(credentials)
   })
+}
+
+export async function createNfircoThread(credentials: NfircoThreadCredentials, input: NfircoThreadCreateThreadInput): Promise<Result<NfircoThreadData>> {
+  const response = await fetch(`${toHttpBaseUrl(credentials.baseUrl)}/api/threadio/thread`, {
+    method: 'POST',
+    headers: {
+      ...credentialsHeaders(credentials),
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      requestId: input.requestId,
+      section: input.section,
+      title: input.title,
+      text: input.text,
+      fileIds: input.fileIds ?? [],
+      imageIds: input.imageIds ?? []
+    })
+  })
+  const body = await readJson(response)
+  if (!response.ok) {
+    return Result.fail(readResponseMessage(body, `nfirco thread create failed: ${response.status}`))
+  }
+  if (isFailedResponse(body)) {
+    return Result.fail(readResponseMessage(body, 'nfirco thread create failed'))
+  }
+  const data = readResponseData(body)
+  if (!isThreadData(data)) {
+    return Result.fail('nfirco thread create response invalid')
+  }
+  return Result.success(data)
 }
 
 export async function createNfircoThreadMessage(credentials: NfircoThreadCredentials, threadUuid: string, input: NfircoThreadCreateMessageInput): Promise<Result<unknown>> {
@@ -253,6 +298,14 @@ function isUploadFileUrl(value: unknown): value is NfircoThreadUploadFileUrl {
   return typeof record.id === 'number'
     && typeof record.uploadUrl === 'string'
     && record.uploadUrl.trim().length > 0
+}
+
+function isThreadData(value: unknown): value is NfircoThreadData {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false
+  }
+  const record = value as Record<string, unknown>
+  return typeof record.threadUuid === 'string' && record.threadUuid.trim().length > 0
 }
 
 function readAttachments(value: unknown): NfircoThreadAttachment[] {

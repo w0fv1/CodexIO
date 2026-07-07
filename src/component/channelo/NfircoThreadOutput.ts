@@ -7,7 +7,7 @@ import { Logger } from '../Logger.js'
 import { CodexioConfig } from '../../value/ConfigDefinition.js'
 import { Message, MessageFile } from '../../value/Message.js'
 import { Result } from '../../value/Result.js'
-import { createNfircoThreadMessage, generateNfircoThreadUploadUrl, normalizeNfircoThreadCredentials, NfircoThreadCredentials } from '../channel/NfircoThreadClient.js'
+import { createNfircoThread, createNfircoThreadMessage, generateNfircoThreadUploadUrl, normalizeNfircoThreadCredentials, NfircoThreadCredentials } from '../channel/NfircoThreadClient.js'
 import { ChannelOutput, ChannelOutputContext } from './ChannelOutput.js'
 
 type NfircoOutputConfig = CodexioConfig['channelo']['nfirco']
@@ -42,10 +42,6 @@ export class NfircoThreadOutput implements ChannelOutput {
     if (!this.config?.enabled) {
       return Result.successVoid()
     }
-    const threadUuid = this.findThreadUuid(message.ioThreadId)
-    if (!threadUuid) {
-      return Result.fail('nfirco thread uuid not found')
-    }
     const text = message.text.trim()
     const files = this.outputFiles(message.files ?? [])
     if (text.length === 0 && files.length === 0) {
@@ -55,6 +51,41 @@ export class NfircoThreadOutput implements ChannelOutput {
     const uploaded = await this.uploadFiles(credentials, files)
     if (uploaded.isFailed) {
       return Result.fail(uploaded.message)
+    }
+    let threadUuid = this.findThreadUuid(message.ioThreadId)
+    if (!threadUuid) {
+      let title = text.replace(/\s+/g, ' ').slice(0, 80).trim()
+      if (title.length === 0 && files.length > 0) {
+        title = files[0].file.name
+      }
+      if (title.length === 0) {
+        title = 'Codexio 会话'
+      }
+      const created = await createNfircoThread(
+        credentials,
+        {
+          section: this.config.section.trim(),
+          title,
+          text,
+          requestId: `${message.ioThreadId}:thread:${randomUUID()}`,
+          fileIds: uploaded.data?.fileIds ?? [],
+          imageIds: uploaded.data?.imageIds ?? []
+        }
+      )
+      if (created.isFailed || !created.data) {
+        return Result.fail(created.message)
+      }
+      threadUuid = created.data.threadUuid
+      this.ioThreadIdManager.bind(message.ioThreadId, {
+        source: 'nfirco',
+        id: threadUuid
+      })
+      Logger.info('nfirco thread created', {
+        ioThreadId: message.ioThreadId,
+        threadUuid,
+        section: this.config.section.trim()
+      })
+      return Result.successVoid()
     }
     const result = await createNfircoThreadMessage(
       credentials,

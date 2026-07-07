@@ -554,6 +554,14 @@ export const configDefinition = defineConfig({
         apply: '重连 Nfirco Thread 输出',
         schema: z.string(),
         default: ''
+      }),
+      section: field({
+        label: 'Section',
+        description: '创建 Nfirco Thread 主题的分区。',
+        type: 'string',
+        apply: '重连 Nfirco Thread 输出',
+        schema: z.string(),
+        default: ''
       })
     })
   }
@@ -649,6 +657,7 @@ export function validateCodexioConfig(config: CodexioConfig): void {
     requireValue(issues, nfirco.baseUrl, 'channelo.nfirco.baseUrl is required')
     requireValue(issues, nfirco.account, 'channelo.nfirco.account is required')
     requireValue(issues, nfirco.password, 'channelo.nfirco.password is required')
+    requireValue(issues, nfirco.section, 'channelo.nfirco.section is required')
   }
   if (issues.length > 0) {
     throw new Error([
