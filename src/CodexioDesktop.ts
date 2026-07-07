@@ -13,6 +13,8 @@ type ServerState = {
   port: number
 }
 
+type MenuIconName = 'message' | 'settings' | 'refresh' | 'fileText' | 'download' | 'power'
+
 const { app, Menu, nativeImage, shell, Tray, Notification } = electron
 const iconPath = 'assets/icon.png'
 
@@ -108,34 +110,35 @@ class CodexioDesktop {
     this.tray?.setContextMenu(Menu.buildFromTemplate([
       {
         label: '对话',
+        icon: createMenuIcon('message'),
         click: () => {
           void this.openChat()
         }
       },
       {
         label: '配置',
+        icon: createMenuIcon('settings'),
         click: () => {
           void this.openConfig()
         }
       },
       {
         label: '重启',
+        icon: createMenuIcon('refresh'),
         click: () => {
           void this.restartServer()
         }
       },
       {
         label: '日志',
-        icon: createTrayIcon(this.appRoot).resize({
-          width: 16,
-          height: 16
-        }),
+        icon: createMenuIcon('fileText'),
         click: () => {
           void this.exportLog()
         }
       },
       {
         label: this.updater?.getMenuLabel() ?? '更新',
+        icon: createMenuIcon('download'),
         click: () => {
           this.updater?.handleUserAction()
         }
@@ -145,6 +148,7 @@ class CodexioDesktop {
       },
       {
         label: '退出',
+        icon: createMenuIcon('power'),
         click: () => {
           this.quitting = true
           this.stopServer()
@@ -335,6 +339,20 @@ class CodexioDesktop {
 
 function createTrayIcon(appRoot: string): NativeImage {
   return nativeImage.createFromPath(join(appRoot, iconPath))
+}
+
+function createMenuIcon(name: MenuIconName): NativeImage {
+  const paths: Record<MenuIconName, string> = {
+    message: '<path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/><path d="M8 9h8"/><path d="M8 13h5"/>',
+    settings: '<path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 1 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7A2 2 0 1 1 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 .9-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.6.9h.1a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1.6 1z"/>',
+    refresh: '<path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M3 12A9 9 0 0 1 18.5 5.8"/><path d="M3 17v4h4"/><path d="M21 7V3h-4"/>',
+    fileText: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h8"/><path d="M8 9h2"/>',
+    download: '<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>',
+    power: '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>'
+  }
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#111827" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths[name]}</svg>`
+  const dataUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
+  return nativeImage.createFromDataURL(dataUrl)
 }
 
 function normalizeErrorMessage(error: unknown): string {
