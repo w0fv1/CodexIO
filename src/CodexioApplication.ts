@@ -2,7 +2,7 @@
 import 'reflect-metadata'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
-import { pid } from 'node:process'
+import { exit, pid } from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { Container, inject, injectable } from 'inversify'
 import { ChannelInputManager } from './controller/channeli/ChannelInputManager.js'
@@ -20,6 +20,7 @@ import { IoThreadIdManager } from './component/IoThreadIdManager.js'
 @injectable()
 export class CodexioApplication {
   private stopping = false
+  private exiting = false
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
@@ -32,7 +33,7 @@ export class CodexioApplication {
     @inject(IoThreadIdManager) private readonly ioThreadIdManager: IoThreadIdManager
   ) {
     this.eventBus.on(AppEvent.StopRequested, () => {
-      void this.stop()
+      void this.stopAndExit(0)
     })
   }
 
@@ -103,11 +104,26 @@ export class CodexioApplication {
     await rm(this.codexioMetadata.serverStatePath, {
       force: true
     })
+    await Logger.flush()
     return Result.successVoid()
   }
 
   private requestStop(): void {
-    void this.stop()
+    void this.stopAndExit(0)
+  }
+
+  private async stopAndExit(code: number): Promise<void> {
+    if (this.exiting) {
+      return
+    }
+    this.exiting = true
+    const stopped = await this.stop()
+    if (stopped.isFailed) {
+      Logger.error('codexio server stop before exit failed', new Error(stopped.message))
+      await Logger.flush()
+      exit(1)
+    }
+    exit(code)
   }
 }
 

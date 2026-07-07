@@ -1,6 +1,6 @@
 import { spawn, ChildProcess } from 'node:child_process'
 import { appendFileSync, existsSync } from 'node:fs'
-import { mkdir, readFile, rm } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, rm } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { setTimeout as wait } from 'node:timers/promises'
 import electron from 'electron'
@@ -124,6 +124,16 @@ class CodexioDesktop {
         }
       },
       {
+        label: '日志',
+        icon: createTrayIcon(this.appRoot).resize({
+          width: 16,
+          height: 16
+        }),
+        click: () => {
+          void this.exportLog()
+        }
+      },
+      {
         label: this.updater?.getMenuLabel() ?? '更新',
         click: () => {
           this.updater?.handleUserAction()
@@ -207,6 +217,29 @@ class CodexioDesktop {
     this.restarting = false
     this.startServer()
     void this.notifyServerReady('重启成功')
+  }
+
+  private async exportLog(): Promise<void> {
+    const logDir = dirname(this.logPath)
+    void shell.openPath(logDir)
+    const date = new Date()
+    const year = date.getFullYear()
+    const month = String(date.getMonth() + 1).padStart(2, '0')
+    const day = String(date.getDate()).padStart(2, '0')
+    const logFileName = `${year}-${month}-${day}.log`
+    const sourcePath = join(logDir, logFileName)
+    if (!existsSync(sourcePath)) {
+      this.notify('Codexio 日志不存在', `没有找到今日日志 ${logFileName}`)
+      return
+    }
+    const targetPath = join(app.getPath('downloads'), logFileName)
+    try {
+      await copyFile(sourcePath, targetPath)
+      this.notify('Codexio 日志已导出', `已保存到 Downloads\\${logFileName}`)
+    } catch (error) {
+      this.log(`export log failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
+      this.notify('Codexio 日志导出失败', normalizeErrorMessage(error))
+    }
   }
 
   private async scheduleServerRestart(): Promise<void> {
