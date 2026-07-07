@@ -8,6 +8,7 @@ import { WebSocket, WebSocketServer } from 'ws'
 import * as Lark from '@larksuiteoapi/node-sdk'
 import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
 import { resolveAvailableServerPort } from '../src/util/Network.js'
+import { configPageHtml } from '../src/controller/ConfigPage.js'
 import { webPageHtml } from '../src/controller/channeli/WebPage.js'
 import { Configer } from '../src/component/Configer.js'
 import { Result } from '../src/value/Result.js'
@@ -99,6 +100,10 @@ describe('server', () => {
     expect(webPageHtml).toContain("'v' + version")
   })
 
+  it('serves config field descriptions on the config page', () => {
+    expect(configPageHtml).toContain('field.description')
+  })
+
   it('returns all described config fields to the config page', async () => {
     const { baseUrl, listener } = await startTestServer()
     const response = await fetch(`${baseUrl}/api/config`)
@@ -108,6 +113,7 @@ describe('server', () => {
         config: Record<string, unknown>
         descriptor: Array<{
           path: string
+          description: string
         }>
       }
     }
@@ -121,6 +127,7 @@ describe('server', () => {
       'workspace'
     ])
     for (const field of result.data.descriptor) {
+      expect(field.description.trim().length).toBeGreaterThan(0)
       const value = field.path.split('.').reduce<unknown>((current, key) => {
         if (!current || typeof current !== 'object' || Array.isArray(current)) {
           return undefined

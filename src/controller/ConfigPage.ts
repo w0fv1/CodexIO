@@ -89,6 +89,9 @@ export const configPageHtml = String.raw`
           const label = document.createElement('span')
           label.className = 'text-sm text-slate-300'
           label.textContent = field.label
+          const description = document.createElement('span')
+          description.className = 'text-xs leading-5 text-slate-500'
+          description.textContent = field.description
           const input = document.createElement(field.type === 'stringList' ? 'textarea' : 'input')
           input.dataset.path = field.path
           input.className = 'rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-blue-500'
@@ -114,7 +117,7 @@ export const configPageHtml = String.raw`
             values[field.path] = inputValue(input, field.type)
             markDirty()
           })
-          row.append(label, input)
+          row.append(label, description, input)
           grid.append(row)
         }
         form.append(section)

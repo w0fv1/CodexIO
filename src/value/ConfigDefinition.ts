@@ -1,123 +1,43 @@
 import { randomBytes } from 'node:crypto'
 import { z } from 'zod'
 
-export type CodexioConfig = {
-  server: {
-    host: string
-    port: number
-    token: string
-    autoPort: boolean
-  }
-  agents: {
-    instruction: string
-    echo: {
-      enabled: boolean
-    }
-    codex: {
-      enabled: boolean
-      bundled: boolean
-      command: string
-      requestTimeoutSeconds: number
-    }
-  }
-  workspace: {
-    path: string
-    perIoThread: boolean
-  }
-  proxy: {
-    enabled: boolean
-    host: string
-    port: number
-    noProxy: string
-  }
-  channeli: {
-    web?: {
-      enabled: boolean
-    }
-    feishu?: {
-      enabled: boolean
-      appId: string
-      appSecret: string
-      chatId: string
-      ws: string
-      aite: boolean
-      allowedOpenIds: string[]
-    }
-    email?: {
-      enabled: boolean
-      user: string
-      account: {
-        imap: {
-          host: string
-          port: number
-          secure: boolean
-          user: string
-          password: string
-          mailbox: string
-        }
-      }
-      idle: boolean
-      pollSeconds: number
-    }
-    nfirco?: {
-      enabled: boolean
-      baseUrl: string
-      account: string
-      password: string
-      section: string
-    }
-  }
-  channelo: {
-    web?: {
-      enabled: boolean
-    }
-    feishu?: {
-      enabled: boolean
-      appId: string
-      appSecret: string
-      chatId: string
-    }
-    feishuWebhook?: {
-      enabled: boolean
-      url: string
-    }
-    email?: {
-      enabled: boolean
-      user: string
-      account: {
-        smtp: {
-          host: string
-          port: number
-          secure: boolean
-          user: string
-          password: string
-          from: string
-        }
-      }
-    }
-    nfirco?: {
-      enabled: boolean
-      baseUrl: string
-      account: string
-      password: string
-    }
-  }
-}
-
 export type ConfigFieldDescriptor = {
   path: string
   group: string
   label: string
+  description: string
   type: 'boolean' | 'number' | 'string' | 'password' | 'stringList'
   apply: string
 }
 
-type ConfigField = ConfigFieldDescriptor & {
-  schema: z.ZodTypeAny
-  default: unknown | (() => unknown)
+type ConfigFieldDefinition<S extends z.ZodTypeAny = z.ZodTypeAny> = ConfigFieldDescriptor & {
+  kind: 'field'
+  schema: S
+  default: z.output<S> | (() => z.output<S>)
 }
 
+type ConfigGroupDefinition<T extends ConfigDefinitionMap = ConfigDefinitionMap> = {
+  kind: 'group'
+  label: string
+  fields: T
+}
+
+type ConfigDefinitionNode = ConfigFieldDefinition | ConfigGroupDefinition | ConfigDefinitionMap
+type ConfigDefinitionMap = {
+  [key: string]: ConfigDefinitionNode
+}
 type ConfigObject = Record<string, unknown>
+type InferConfigNode<T> = T extends ConfigFieldDefinition<infer S>
+  ? z.output<S>
+  : T extends ConfigGroupDefinition<infer F>
+    ? InferConfig<F>
+    : T extends ConfigDefinitionMap
+      ? InferConfig<T>
+      : never
+
+export type InferConfig<T extends ConfigDefinitionMap> = {
+  [K in keyof T]: InferConfigNode<T[K]>
+}
 
 const positiveInt = z.number().int().positive()
 const workspacePath = z.preprocess((value) => value === null ? '~' : value, z.string())
@@ -130,71 +50,529 @@ const defaultCodexInstruction = [
   'Do not answer only that the file has been generated, and do not rely on previews without a file path.'
 ].join('\n')
 
-const configFields: ConfigField[] = [
-  field('server.host', 'Server', 'Host', 'string', '重启 Codexio', z.string(), '127.0.0.1'),
-  field('server.port', 'Server', 'Port', 'number', '重启 Codexio', positiveInt, 8787),
-  field('server.token', 'Server', 'Token', 'password', '重启 Codexio', z.string(), ''),
-  field('server.autoPort', 'Server', 'Auto Port', 'boolean', '重启 Codexio', z.boolean(), false),
-  field('agents.instruction', 'Agents', 'Instruction', 'string', '重启 Agent', z.string(), defaultCodexInstruction),
-  field('agents.echo.enabled', 'Echo Agent', 'Enabled', 'boolean', '重启 Echo Agent', z.boolean(), true),
-  field('agents.codex.enabled', 'Codex Agent', 'Enabled', 'boolean', '重启 Codex Agent', z.boolean(), false),
-  field('agents.codex.bundled', 'Codex Agent', 'Bundled', 'boolean', '重启 Codex Agent', z.boolean(), true),
-  field('agents.codex.command', 'Codex Agent', 'Command', 'string', '重启 Codex Agent', z.string(), 'codex'),
-  field('agents.codex.requestTimeoutSeconds', 'Codex Agent', 'Request Timeout Seconds', 'number', '重启 Codex Agent', positiveInt, 120),
-  field('workspace.path', 'Workspace', 'Path', 'string', '重启 Codex Agent', workspacePath, ''),
-  field('workspace.perIoThread', 'Workspace', 'Per IoThread', 'boolean', '重启 Codex Agent', z.boolean(), false),
-  field('proxy.enabled', 'Proxy', 'Enabled', 'boolean', '重启 Codexio', z.boolean(), false),
-  field('proxy.host', 'Proxy', 'Host', 'string', '重启 Codexio', z.string(), '127.0.0.1'),
-  field('proxy.port', 'Proxy', 'Port', 'number', '重启 Codexio', positiveInt, 7890),
-  field('proxy.noProxy', 'Proxy', 'NO_PROXY', 'string', '重启 Codexio', z.string(), ''),
-  field('channeli.web.enabled', 'Web Input', 'Enabled', 'boolean', '重启 Codexio', z.boolean(), true),
-  field('channeli.feishu.enabled', 'Feishu Input', 'Enabled', 'boolean', '重连 Feishu 输入', z.boolean(), false),
-  field('channeli.feishu.appId', 'Feishu Input', 'App ID', 'string', '重连 Feishu 输入', z.string(), ''),
-  field('channeli.feishu.appSecret', 'Feishu Input', 'App Secret', 'password', '重连 Feishu 输入', z.string(), ''),
-  field('channeli.feishu.chatId', 'Feishu Input', 'Chat ID', 'string', '重连 Feishu 输入', z.string(), ''),
-  field('channeli.feishu.ws', 'Feishu Input', 'WebSocket', 'string', '重连 Feishu 输入', z.string(), ''),
-  field('channeli.feishu.aite', 'Feishu Input', 'Require Aite', 'boolean', '重连 Feishu 输入', z.boolean(), true),
-  field('channeli.feishu.allowedOpenIds', 'Feishu Input', 'Allowed Open IDs', 'stringList', '重连 Feishu 输入', z.array(z.string()), []),
-  field('channeli.email.enabled', 'Email Input', 'Enabled', 'boolean', '重连 Email 输入', z.boolean(), false),
-  field('channeli.email.user', 'Email Input', 'User', 'string', '重连 Email 输入', z.string(), ''),
-  field('channeli.email.account.imap.host', 'Email Input IMAP', 'Host', 'string', '重连 Email 输入', z.string(), ''),
-  field('channeli.email.account.imap.port', 'Email Input IMAP', 'Port', 'number', '重连 Email 输入', positiveInt, 993),
-  field('channeli.email.account.imap.secure', 'Email Input IMAP', 'Secure', 'boolean', '重连 Email 输入', z.boolean(), true),
-  field('channeli.email.account.imap.user', 'Email Input IMAP', 'User', 'string', '重连 Email 输入', z.string(), ''),
-  field('channeli.email.account.imap.password', 'Email Input IMAP', 'Password', 'password', '重连 Email 输入', z.string(), ''),
-  field('channeli.email.account.imap.mailbox', 'Email Input IMAP', 'Mailbox', 'string', '重连 Email 输入', z.string(), 'INBOX'),
-  field('channeli.email.idle', 'Email Input', 'Idle', 'boolean', '重连 Email 输入', z.boolean(), true),
-  field('channeli.email.pollSeconds', 'Email Input', 'Poll Seconds', 'number', '重连 Email 输入', positiveInt, 30),
-  field('channeli.nfirco.enabled', 'Nfirco Thread Input', 'Enabled', 'boolean', '重连 Nfirco Thread 输入', z.boolean(), false),
-  field('channeli.nfirco.baseUrl', 'Nfirco Thread Input', 'Base URL', 'string', '重连 Nfirco Thread 输入', z.string(), ''),
-  field('channeli.nfirco.account', 'Nfirco Thread Input', 'Account', 'string', '重连 Nfirco Thread 输入', z.string(), ''),
-  field('channeli.nfirco.password', 'Nfirco Thread Input', 'Password', 'password', '重连 Nfirco Thread 输入', z.string(), ''),
-  field('channeli.nfirco.section', 'Nfirco Thread Input', 'Section', 'string', '重连 Nfirco Thread 输入', z.string(), ''),
-  field('channelo.web.enabled', 'Web Output', 'Enabled', 'boolean', '重启 Codexio', z.boolean(), true),
-  field('channelo.feishu.enabled', 'Feishu Output', 'Enabled', 'boolean', '重连 Feishu 输出', z.boolean(), false),
-  field('channelo.feishu.appId', 'Feishu Output', 'App ID', 'string', '重连 Feishu 输出', z.string(), ''),
-  field('channelo.feishu.appSecret', 'Feishu Output', 'App Secret', 'password', '重连 Feishu 输出', z.string(), ''),
-  field('channelo.feishu.chatId', 'Feishu Output', 'Chat ID', 'string', '重连 Feishu 输出', z.string(), ''),
-  field('channelo.feishuWebhook.enabled', 'Feishu Webhook Output', 'Enabled', 'boolean', '重连 Feishu Webhook 输出', z.boolean(), false),
-  field('channelo.feishuWebhook.url', 'Feishu Webhook Output', 'URL', 'password', '重连 Feishu Webhook 输出', z.string(), ''),
-  field('channelo.email.enabled', 'Email Output', 'Enabled', 'boolean', '重连 Email 输出', z.boolean(), false),
-  field('channelo.email.user', 'Email Output', 'User', 'string', '重连 Email 输出', z.string(), ''),
-  field('channelo.email.account.smtp.host', 'Email Output SMTP', 'Host', 'string', '重连 Email 输出', z.string(), ''),
-  field('channelo.email.account.smtp.port', 'Email Output SMTP', 'Port', 'number', '重连 Email 输出', positiveInt, 465),
-  field('channelo.email.account.smtp.secure', 'Email Output SMTP', 'Secure', 'boolean', '重连 Email 输出', z.boolean(), true),
-  field('channelo.email.account.smtp.user', 'Email Output SMTP', 'User', 'string', '重连 Email 输出', z.string(), ''),
-  field('channelo.email.account.smtp.password', 'Email Output SMTP', 'Password', 'password', '重连 Email 输出', z.string(), ''),
-  field('channelo.email.account.smtp.from', 'Email Output SMTP', 'From', 'string', '重连 Email 输出', z.string(), ''),
-  field('channelo.nfirco.enabled', 'Nfirco Thread Output', 'Enabled', 'boolean', '重连 Nfirco Thread 输出', z.boolean(), false),
-  field('channelo.nfirco.baseUrl', 'Nfirco Thread Output', 'Base URL', 'string', '重连 Nfirco Thread 输出', z.string(), ''),
-  field('channelo.nfirco.account', 'Nfirco Thread Output', 'Account', 'string', '重连 Nfirco Thread 输出', z.string(), ''),
-  field('channelo.nfirco.password', 'Nfirco Thread Output', 'Password', 'password', '重连 Nfirco Thread 输出', z.string(), '')
-]
+export const configDefinition = defineConfig({
+  server: group('Server', {
+    host: field({
+      label: 'Host',
+      description: 'Codexio HTTP 服务监听地址。',
+      type: 'string',
+      apply: '重启 Codexio',
+      schema: z.string(),
+      default: '127.0.0.1'
+    }),
+    port: field({
+      label: 'Port',
+      description: 'Codexio HTTP 服务监听端口。',
+      type: 'number',
+      apply: '重启 Codexio',
+      schema: positiveInt,
+      default: 8787
+    }),
+    token: field({
+      label: 'Token',
+      description: '调用管理 API 时使用的 Bearer Token。',
+      type: 'password',
+      apply: '重启 Codexio',
+      schema: z.string(),
+      default: ''
+    }),
+    autoPort: field({
+      label: 'Auto Port',
+      description: '端口被占用时自动寻找可用端口，并写回实际端口。',
+      type: 'boolean',
+      apply: '重启 Codexio',
+      schema: z.boolean(),
+      default: false
+    })
+  }),
+  agents: group('Agents', {
+    instruction: field({
+      label: 'Instruction',
+      description: '注入给 Agent 的共享运行指令。',
+      type: 'string',
+      apply: '重启 Agent',
+      schema: z.string(),
+      default: defaultCodexInstruction
+    }),
+    echo: group('Echo Agent', {
+      enabled: field({
+        label: 'Enabled',
+        description: '启用直接回显用户消息的测试 Agent。',
+        type: 'boolean',
+        apply: '重启 Echo Agent',
+        schema: z.boolean(),
+        default: true
+      })
+    }),
+    codex: group('Codex Agent', {
+      enabled: field({
+        label: 'Enabled',
+        description: '启用 Codex 命令行 Agent。',
+        type: 'boolean',
+        apply: '重启 Codex Agent',
+        schema: z.boolean(),
+        default: false
+      }),
+      bundled: field({
+        label: 'Bundled',
+        description: '使用 Codexio 内置的 Codex 运行环境。',
+        type: 'boolean',
+        apply: '重启 Codex Agent',
+        schema: z.boolean(),
+        default: true
+      }),
+      command: field({
+        label: 'Command',
+        description: '未使用内置运行环境时执行的 Codex 命令。',
+        type: 'string',
+        apply: '重启 Codex Agent',
+        schema: z.string(),
+        default: 'codex'
+      }),
+      requestTimeoutSeconds: field({
+        label: 'Request Timeout Seconds',
+        description: '单次 Codex 请求等待超时时间。',
+        type: 'number',
+        apply: '重启 Codex Agent',
+        schema: positiveInt,
+        default: 120
+      })
+    })
+  }),
+  workspace: group('Workspace', {
+    path: field({
+      label: 'Path',
+      description: 'Codex Agent 执行任务时使用的工作目录，留空时使用数据目录下的 workspace。',
+      type: 'string',
+      apply: '重启 Codex Agent',
+      schema: workspacePath,
+      default: ''
+    }),
+    perIoThread: field({
+      label: 'Per IoThread',
+      description: '为每个 IoThread 使用独立子工作目录。',
+      type: 'boolean',
+      apply: '重启 Codex Agent',
+      schema: z.boolean(),
+      default: false
+    })
+  }),
+  proxy: group('Proxy', {
+    enabled: field({
+      label: 'Enabled',
+      description: '为 Codex 进程注入 HTTP_PROXY、HTTPS_PROXY 和 NO_PROXY。',
+      type: 'boolean',
+      apply: '重启 Codexio',
+      schema: z.boolean(),
+      default: false
+    }),
+    host: field({
+      label: 'Host',
+      description: '代理服务主机地址。',
+      type: 'string',
+      apply: '重启 Codexio',
+      schema: z.string(),
+      default: '127.0.0.1'
+    }),
+    port: field({
+      label: 'Port',
+      description: '代理服务端口。',
+      type: 'number',
+      apply: '重启 Codexio',
+      schema: positiveInt,
+      default: 7890
+    }),
+    noProxy: field({
+      label: 'NO_PROXY',
+      description: '不走代理的主机列表，按逗号分隔。',
+      type: 'string',
+      apply: '重启 Codexio',
+      schema: z.string(),
+      default: ''
+    })
+  }),
+  channeli: {
+    web: group('Web Input', {
+      enabled: field({
+        label: 'Enabled',
+        description: '启用网页对话输入通道。',
+        type: 'boolean',
+        apply: '重启 Codexio',
+        schema: z.boolean(),
+        default: true
+      })
+    }),
+    feishu: group('Feishu Input', {
+      enabled: field({
+        label: 'Enabled',
+        description: '启用飞书 WebSocket 输入通道。',
+        type: 'boolean',
+        apply: '重连 Feishu 输入',
+        schema: z.boolean(),
+        default: false
+      }),
+      appId: field({
+        label: 'App ID',
+        description: '飞书应用的 App ID。',
+        type: 'string',
+        apply: '重连 Feishu 输入',
+        schema: z.string(),
+        default: ''
+      }),
+      appSecret: field({
+        label: 'App Secret',
+        description: '飞书应用的 App Secret。',
+        type: 'password',
+        apply: '重连 Feishu 输入',
+        schema: z.string(),
+        default: ''
+      }),
+      chatId: field({
+        label: 'Chat ID',
+        description: '允许接收消息的飞书群聊 ID。',
+        type: 'string',
+        apply: '重连 Feishu 输入',
+        schema: z.string(),
+        default: ''
+      }),
+      ws: field({
+        label: 'WebSocket',
+        description: '飞书长连接地址，留空时由飞书 SDK 自动获取。',
+        type: 'string',
+        apply: '重连 Feishu 输入',
+        schema: z.string(),
+        default: ''
+      }),
+      aite: field({
+        label: 'Require Aite',
+        description: '只处理明确提及机器人的飞书消息。',
+        type: 'boolean',
+        apply: '重连 Feishu 输入',
+        schema: z.boolean(),
+        default: true
+      }),
+      allowedOpenIds: field({
+        label: 'Allowed Open IDs',
+        description: '允许触发输入的飞书用户 Open ID 列表，留空表示不限制。',
+        type: 'stringList',
+        apply: '重连 Feishu 输入',
+        schema: z.array(z.string()),
+        default: []
+      })
+    }),
+    email: group('Email Input', {
+      enabled: field({
+        label: 'Enabled',
+        description: '启用邮件输入通道。',
+        type: 'boolean',
+        apply: '重连 Email 输入',
+        schema: z.boolean(),
+        default: false
+      }),
+      user: field({
+        label: 'User',
+        description: '接收邮件时代表的 Codexio 用户标识。',
+        type: 'string',
+        apply: '重连 Email 输入',
+        schema: z.string(),
+        default: ''
+      }),
+      account: {
+        imap: group('Email Input IMAP', {
+          host: field({
+            label: 'Host',
+            description: 'IMAP 服务器地址。',
+            type: 'string',
+            apply: '重连 Email 输入',
+            schema: z.string(),
+            default: ''
+          }),
+          port: field({
+            label: 'Port',
+            description: 'IMAP 服务器端口。',
+            type: 'number',
+            apply: '重连 Email 输入',
+            schema: positiveInt,
+            default: 993
+          }),
+          secure: field({
+            label: 'Secure',
+            description: 'IMAP 连接是否使用 TLS。',
+            type: 'boolean',
+            apply: '重连 Email 输入',
+            schema: z.boolean(),
+            default: true
+          }),
+          user: field({
+            label: 'User',
+            description: 'IMAP 登录用户名。',
+            type: 'string',
+            apply: '重连 Email 输入',
+            schema: z.string(),
+            default: ''
+          }),
+          password: field({
+            label: 'Password',
+            description: 'IMAP 登录密码或应用专用密码。',
+            type: 'password',
+            apply: '重连 Email 输入',
+            schema: z.string(),
+            default: ''
+          }),
+          mailbox: field({
+            label: 'Mailbox',
+            description: '监听的邮箱文件夹名称。',
+            type: 'string',
+            apply: '重连 Email 输入',
+            schema: z.string(),
+            default: 'INBOX'
+          })
+        })
+      },
+      idle: field({
+        label: 'Idle',
+        description: '使用 IMAP IDLE 实时等待新邮件。',
+        type: 'boolean',
+        apply: '重连 Email 输入',
+        schema: z.boolean(),
+        default: true
+      }),
+      pollSeconds: field({
+        label: 'Poll Seconds',
+        description: '未使用实时等待时的轮询间隔秒数。',
+        type: 'number',
+        apply: '重连 Email 输入',
+        schema: positiveInt,
+        default: 30
+      })
+    }),
+    nfirco: group('Nfirco Thread Input', {
+      enabled: field({
+        label: 'Enabled',
+        description: '启用 Nfirco Thread 输入通道。',
+        type: 'boolean',
+        apply: '重连 Nfirco Thread 输入',
+        schema: z.boolean(),
+        default: false
+      }),
+      baseUrl: field({
+        label: 'Base URL',
+        description: 'Nfirco 后端基础地址。',
+        type: 'string',
+        apply: '重连 Nfirco Thread 输入',
+        schema: z.string(),
+        default: ''
+      }),
+      account: field({
+        label: 'Account',
+        description: '连接 Nfirco Thread API 的账号。',
+        type: 'string',
+        apply: '重连 Nfirco Thread 输入',
+        schema: z.string(),
+        default: ''
+      }),
+      password: field({
+        label: 'Password',
+        description: '连接 Nfirco Thread API 的密码。',
+        type: 'password',
+        apply: '重连 Nfirco Thread 输入',
+        schema: z.string(),
+        default: ''
+      }),
+      section: field({
+        label: 'Section',
+        description: '订阅的 Nfirco Thread 分区。',
+        type: 'string',
+        apply: '重连 Nfirco Thread 输入',
+        schema: z.string(),
+        default: ''
+      })
+    })
+  },
+  channelo: {
+    web: group('Web Output', {
+      enabled: field({
+        label: 'Enabled',
+        description: '启用网页对话输出通道。',
+        type: 'boolean',
+        apply: '重启 Codexio',
+        schema: z.boolean(),
+        default: true
+      })
+    }),
+    feishu: group('Feishu Output', {
+      enabled: field({
+        label: 'Enabled',
+        description: '启用飞书群聊输出通道。',
+        type: 'boolean',
+        apply: '重连 Feishu 输出',
+        schema: z.boolean(),
+        default: false
+      }),
+      appId: field({
+        label: 'App ID',
+        description: '飞书应用的 App ID。',
+        type: 'string',
+        apply: '重连 Feishu 输出',
+        schema: z.string(),
+        default: ''
+      }),
+      appSecret: field({
+        label: 'App Secret',
+        description: '飞书应用的 App Secret。',
+        type: 'password',
+        apply: '重连 Feishu 输出',
+        schema: z.string(),
+        default: ''
+      }),
+      chatId: field({
+        label: 'Chat ID',
+        description: '发送消息的飞书群聊 ID。',
+        type: 'string',
+        apply: '重连 Feishu 输出',
+        schema: z.string(),
+        default: ''
+      })
+    }),
+    feishuWebhook: group('Feishu Webhook Output', {
+      enabled: field({
+        label: 'Enabled',
+        description: '启用飞书机器人 Webhook 输出通道。',
+        type: 'boolean',
+        apply: '重连 Feishu Webhook 输出',
+        schema: z.boolean(),
+        default: false
+      }),
+      url: field({
+        label: 'URL',
+        description: '飞书机器人 Webhook 地址。',
+        type: 'password',
+        apply: '重连 Feishu Webhook 输出',
+        schema: z.string(),
+        default: ''
+      })
+    }),
+    email: group('Email Output', {
+      enabled: field({
+        label: 'Enabled',
+        description: '启用邮件输出通道。',
+        type: 'boolean',
+        apply: '重连 Email 输出',
+        schema: z.boolean(),
+        default: false
+      }),
+      user: field({
+        label: 'User',
+        description: '接收 Agent 输出邮件的目标邮箱。',
+        type: 'string',
+        apply: '重连 Email 输出',
+        schema: z.string(),
+        default: ''
+      }),
+      account: {
+        smtp: group('Email Output SMTP', {
+          host: field({
+            label: 'Host',
+            description: 'SMTP 服务器地址。',
+            type: 'string',
+            apply: '重连 Email 输出',
+            schema: z.string(),
+            default: ''
+          }),
+          port: field({
+            label: 'Port',
+            description: 'SMTP 服务器端口。',
+            type: 'number',
+            apply: '重连 Email 输出',
+            schema: positiveInt,
+            default: 465
+          }),
+          secure: field({
+            label: 'Secure',
+            description: 'SMTP 连接是否使用 TLS。',
+            type: 'boolean',
+            apply: '重连 Email 输出',
+            schema: z.boolean(),
+            default: true
+          }),
+          user: field({
+            label: 'User',
+            description: 'SMTP 登录用户名。',
+            type: 'string',
+            apply: '重连 Email 输出',
+            schema: z.string(),
+            default: ''
+          }),
+          password: field({
+            label: 'Password',
+            description: 'SMTP 登录密码或应用专用密码。',
+            type: 'password',
+            apply: '重连 Email 输出',
+            schema: z.string(),
+            default: ''
+          }),
+          from: field({
+            label: 'From',
+            description: '邮件发件人地址，留空时使用 SMTP 用户名。',
+            type: 'string',
+            apply: '重连 Email 输出',
+            schema: z.string(),
+            default: ''
+          })
+        })
+      }
+    }),
+    nfirco: group('Nfirco Thread Output', {
+      enabled: field({
+        label: 'Enabled',
+        description: '启用 Nfirco Thread 输出通道。',
+        type: 'boolean',
+        apply: '重连 Nfirco Thread 输出',
+        schema: z.boolean(),
+        default: false
+      }),
+      baseUrl: field({
+        label: 'Base URL',
+        description: 'Nfirco 后端基础地址。',
+        type: 'string',
+        apply: '重连 Nfirco Thread 输出',
+        schema: z.string(),
+        default: ''
+      }),
+      account: field({
+        label: 'Account',
+        description: '连接 Nfirco Thread API 的账号。',
+        type: 'string',
+        apply: '重连 Nfirco Thread 输出',
+        schema: z.string(),
+        default: ''
+      }),
+      password: field({
+        label: 'Password',
+        description: '连接 Nfirco Thread API 的密码。',
+        type: 'password',
+        apply: '重连 Nfirco Thread 输出',
+        schema: z.string(),
+        default: ''
+      })
+    })
+  }
+})
 
-export const configFieldDescriptors: ConfigFieldDescriptor[] = configFields.map(({ path, group, label, type, apply }) => ({
+type NormalizedConfigField = ConfigFieldDefinition & {
+  path: string
+  group: string
+}
+
+export type CodexioConfig = InferConfig<typeof configDefinition>
+
+const normalizedConfigDefinition = normalizeConfigDefinition(configDefinition)
+
+export const configFieldDescriptors: ConfigFieldDescriptor[] = normalizedConfigDefinition.fields.map(({ path, group, label, description, type, apply }) => ({
   path,
   group,
   label,
+  description,
   type,
   apply
 }))
@@ -280,24 +658,74 @@ export function validateCodexioConfig(config: CodexioConfig): void {
   }
 }
 
-function field(path: string, group: string, label: string, type: ConfigFieldDescriptor['type'], apply: string, schema: z.ZodTypeAny, defaultValue: unknown | (() => unknown)): ConfigField {
+function defineConfig<T extends ConfigDefinitionMap>(definition: T): T {
+  return definition
+}
+
+function group<T extends ConfigDefinitionMap>(label: string, fields: T): ConfigGroupDefinition<T> {
   return {
-    path,
-    group,
+    kind: 'group',
     label,
-    type,
-    apply,
-    schema,
-    default: defaultValue
+    fields
+  }
+}
+
+function field<S extends z.ZodTypeAny>(definition: Omit<ConfigFieldDefinition<S>, 'kind' | 'path' | 'group'>): ConfigFieldDefinition<S> {
+  return {
+    kind: 'field',
+    path: '',
+    group: '',
+    ...definition
   }
 }
 
 function createConfigSchema(): z.ZodType<CodexioConfig> {
-  const tree: Record<string, unknown> = {}
-  for (const item of configFields) {
-    setPath(tree, item.path, item.schema.default(defaultValue(item.default)))
+  return buildSchema(normalizedConfigDefinition.schemaTree) as z.ZodType<CodexioConfig>
+}
+
+function normalizeConfigDefinition(definition: ConfigDefinitionMap): {
+  fields: NormalizedConfigField[]
+  schemaTree: ConfigObject
+  defaultTree: ConfigObject
+} {
+  const fields: NormalizedConfigField[] = []
+  const schemaTree: ConfigObject = {}
+  const defaultTree: ConfigObject = {}
+  collectConfigDefinition(definition, [], '', fields, schemaTree, defaultTree)
+  return {
+    fields,
+    schemaTree,
+    defaultTree
   }
-  return buildSchema(tree) as z.ZodType<CodexioConfig>
+}
+
+function collectConfigDefinition(node: ConfigDefinitionNode, path: string[], groupName: string, fields: NormalizedConfigField[], schemaTree: ConfigObject, defaultTree: ConfigObject): void {
+  if (isFieldDefinition(node)) {
+    const fullPath = path.join('.')
+    fields.push({
+      ...node,
+      path: fullPath,
+      group: groupName
+    })
+    setPath(schemaTree, fullPath, node.schema.default(defaultValue(node.default)))
+    setPath(defaultTree, fullPath, defaultValue(node.default))
+    return
+  }
+  if (isGroupDefinition(node)) {
+    collectConfigDefinition(node.fields, path, node.label, fields, schemaTree, defaultTree)
+    return
+  }
+  for (const [key, child] of Object.entries(node)) {
+    collectConfigDefinition(child, [...path, key], groupName, fields, schemaTree, defaultTree)
+  }
+}
+
+function isFieldDefinition(value: ConfigDefinitionNode): value is ConfigFieldDefinition {
+  return isPlainObject(value) && value.kind === 'field'
+}
+
+function isGroupDefinition(value: ConfigDefinitionNode): value is ConfigGroupDefinition {
+  return isPlainObject(value) && value.kind === 'group'
 }
 
 function deepMergeConfig(left: unknown, right: unknown): unknown {
@@ -329,11 +757,17 @@ function buildSchema(value: unknown): z.ZodTypeAny {
 }
 
 function defaultConfigObject(): ConfigObject {
-  const result: ConfigObject = {}
-  for (const item of configFields) {
-    setPath(result, item.path, defaultValue(item.default))
+  return cloneConfigObject(normalizedConfigDefinition.defaultTree)
+}
+
+function cloneConfigObject(value: unknown): ConfigObject {
+  if (!isPlainObject(value)) {
+    return value as ConfigObject
   }
-  return result
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+    key,
+    Array.isArray(item) ? [...item] : isPlainObject(item) ? cloneConfigObject(item) : item
+  ]))
 }
 
 function defaultValue(value: unknown | (() => unknown)): unknown {
