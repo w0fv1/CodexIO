@@ -5,6 +5,7 @@ export type NfircoThreadCredentials = {
   baseUrl: string
   account: string
   password: string
+  accessId?: string
 }
 
 export type NfircoThreadAttachment = {
@@ -51,6 +52,7 @@ export type NfircoThreadMessageEvent = {
   eventId: string
   threadUuid: string
   section?: string
+  authorAccessId?: string
   messageUuid: string
   text: string
   files: NfircoThreadAttachment[]
@@ -62,6 +64,7 @@ export type NfircoThreadCreatedEvent = {
   eventId: string
   threadUuid: string
   section?: string
+  authorAccessId?: string
   text: string
   files: NfircoThreadAttachment[]
   images: NfircoThreadAttachment[]
@@ -178,6 +181,7 @@ export function parseNfircoThreadSocketEvent(value: unknown): NfircoThreadSocket
   }
   const threadUuid = typeof record.threadUuid === 'string' ? record.threadUuid.trim() : ''
   const text = typeof record.text === 'string' ? record.text : ''
+  const authorAccessId = readString(record.authorAccessId)
   const files = readAttachments(record.files)
   const images = readAttachments(record.images)
   if (threadUuid.length === 0 || (text.trim().length === 0 && files.length === 0 && images.length === 0)) {
@@ -189,6 +193,7 @@ export function parseNfircoThreadSocketEvent(value: unknown): NfircoThreadSocket
       eventId: typeof record.eventId === 'string' && record.eventId.trim().length > 0 ? record.eventId.trim() : threadUuid,
       threadUuid,
       section: typeof record.section === 'string' && record.section.trim().length > 0 ? record.section.trim() : undefined,
+      ...(authorAccessId ? { authorAccessId } : {}),
       text,
       files,
       images
@@ -203,6 +208,7 @@ export function parseNfircoThreadSocketEvent(value: unknown): NfircoThreadSocket
     eventId: typeof record.eventId === 'string' && record.eventId.trim().length > 0 ? record.eventId.trim() : messageUuid,
     threadUuid,
     section: typeof record.section === 'string' && record.section.trim().length > 0 ? record.section.trim() : undefined,
+    ...(authorAccessId ? { authorAccessId } : {}),
     messageUuid,
     text,
     files,
@@ -218,7 +224,8 @@ export function normalizeNfircoThreadCredentials(credentials: NfircoThreadCreden
   return {
     baseUrl: toHttpBaseUrl(credentials.baseUrl),
     account: credentials.account.trim(),
-    password: credentials.password
+    password: credentials.password,
+    accessId: credentials.accessId?.trim()
   }
 }
 

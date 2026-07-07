@@ -62,6 +62,7 @@ describe('core', () => {
       eventId: 'event-1',
       threadUuid: 'thread-1',
       section: 'section-1',
+      authorAccessId: 'access-1',
       messageUuid: 'message-1',
       text: 'hello',
       files: [
@@ -87,6 +88,7 @@ describe('core', () => {
       eventId: 'event-1',
       threadUuid: 'thread-1',
       section: 'section-1',
+      authorAccessId: 'access-1',
       messageUuid: 'message-1',
       text: 'hello',
       files: [
@@ -113,12 +115,14 @@ describe('core', () => {
       eventId: 'thread-2',
       threadUuid: 'thread-2',
       section: 'section-1',
+      authorAccessId: 'access-2',
       text: 'thread body'
     })).toEqual({
       type: 'thread.created',
       eventId: 'thread-2',
       threadUuid: 'thread-2',
       section: 'section-1',
+      authorAccessId: 'access-2',
       text: 'thread body',
       files: [],
       images: []
@@ -319,7 +323,8 @@ describe('core', () => {
           enabled: true,
           baseUrl: 'https://firco.cn',
           account: 'codexio',
-          password: 'password'
+          password: 'password',
+          accessId: 'access-1'
         }
       }
     })

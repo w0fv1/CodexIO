@@ -393,6 +393,7 @@ describe('server', () => {
       `    baseUrl: http://127.0.0.1:${port}`,
       '    account: 用户+Book',
       '    password: pass+密码',
+      '    accessId: self-access',
       '    section: section-1',
       'channelo:',
       '  web:',
@@ -437,6 +438,7 @@ describe('server', () => {
       eventId: 'event-1',
       threadUuid: 'thread-1',
       section: 'section-1',
+      authorAccessId: 'external-access',
       messageUuid: 'message-1',
       text: 'hello',
       files: [
@@ -454,7 +456,17 @@ describe('server', () => {
       eventId: 'thread-2',
       threadUuid: 'thread-2',
       section: 'section-1',
+      authorAccessId: 'external-access',
       text: 'thread body'
+    }))
+    sockets[1].send(JSON.stringify({
+      type: 'thread.message.created',
+      eventId: 'event-self',
+      threadUuid: 'thread-self',
+      section: 'section-1',
+      authorAccessId: 'self-access',
+      messageUuid: 'message-self',
+      text: 'self body'
     }))
     await waitForWebSocketMessages(received, 2)
     expect(received).toEqual([
@@ -561,6 +573,7 @@ describe('server', () => {
       `    baseUrl: http://127.0.0.1:${port}`,
       '    account: 用户+Book',
       '    password: pass+密码',
+      '    accessId: self-access',
       '    section: section-1'
     ].join('\n'))
     const metadata = new CodexioMetadata({
@@ -690,6 +703,7 @@ describe('server', () => {
       `    baseUrl: http://127.0.0.1:${port}`,
       '    account: 用户+Book',
       '    password: pass+密码',
+      '    accessId: self-access',
       '    section: section-1'
     ].join('\n'))
     const metadata = new CodexioMetadata({

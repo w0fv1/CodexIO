@@ -150,6 +150,13 @@ export class NfircoThreadInput implements ChannelInput {
       return
     }
     this.handledEventIds.add(event.eventId)
+    if (this.isSelfEvent(event.authorAccessId)) {
+      Logger.info('nfirco thread self event ignored', {
+        type: event.type,
+        threadUuid: event.threadUuid
+      })
+      return
+    }
     const receiver = this.receiver
     if (!receiver) {
       return
@@ -192,5 +199,10 @@ export class NfircoThreadInput implements ChannelInput {
         message: result.message
       })
     }
+  }
+
+  private isSelfEvent(authorAccessId?: string): boolean {
+    const selfAccessId = this.config?.accessId?.trim()
+    return selfAccessId !== undefined && selfAccessId.length > 0 && authorAccessId?.trim() === selfAccessId
   }
 }

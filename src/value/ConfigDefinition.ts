@@ -379,6 +379,14 @@ export const configDefinition = defineConfig({
         schema: z.string(),
         default: ''
       }),
+      accessId: field({
+        label: 'Access ID',
+        description: '当前 Codexio 用户的 Userver AccessId，用于过滤自己创建的主题和回复。',
+        type: 'string',
+        apply: '重连 Nfirco Thread 输入',
+        schema: z.string(),
+        default: ''
+      }),
       section: field({
         label: 'Section',
         description: '订阅的 Nfirco Thread 分区。',
@@ -555,6 +563,14 @@ export const configDefinition = defineConfig({
         schema: z.string(),
         default: ''
       }),
+      accessId: field({
+        label: 'Access ID',
+        description: '当前 Codexio 用户的 Userver AccessId，用于标识输出作者。',
+        type: 'string',
+        apply: '重连 Nfirco Thread 输出',
+        schema: z.string(),
+        default: ''
+      }),
       section: field({
         label: 'Section',
         description: '创建 Nfirco Thread 主题的分区。',
@@ -643,6 +659,7 @@ export function validateCodexioConfig(config: CodexioConfig): void {
     requireValue(issues, nfirco.baseUrl, 'channeli.nfirco.baseUrl is required')
     requireValue(issues, nfirco.account, 'channeli.nfirco.account is required')
     requireValue(issues, nfirco.password, 'channeli.nfirco.password is required')
+    requireValue(issues, nfirco.accessId, 'channeli.nfirco.accessId is required')
     requireValue(issues, nfirco.section, 'channeli.nfirco.section is required')
   }
   if (config.channelo.email?.enabled) {
@@ -657,6 +674,7 @@ export function validateCodexioConfig(config: CodexioConfig): void {
     requireValue(issues, nfirco.baseUrl, 'channelo.nfirco.baseUrl is required')
     requireValue(issues, nfirco.account, 'channelo.nfirco.account is required')
     requireValue(issues, nfirco.password, 'channelo.nfirco.password is required')
+    requireValue(issues, nfirco.accessId, 'channelo.nfirco.accessId is required')
     requireValue(issues, nfirco.section, 'channelo.nfirco.section is required')
   }
   if (issues.length > 0) {
