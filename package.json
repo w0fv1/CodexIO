@@ -51,8 +51,7 @@
     "nsis": {
       "oneClick": false,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
-      "include": "scripts/installer.nsh"
+      "allowToChangeInstallationDirectory": true
     },
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "publish": [
