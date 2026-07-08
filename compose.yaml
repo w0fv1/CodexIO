@@ -1,0 +1,19 @@
+services:
+  codexio:
+    build:
+      context: .
+      dockerfile: Containerfile
+    image: nfirco/codexio:local
+    container_name: codexio
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      CODEXIO_SERVER_TOKEN: ${CODEXIO_SERVER_TOKEN:-change-this-token}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - codexio-data:/data
+      - codexio-workspace:/workspace
+
+volumes:
+  codexio-data:
+  codexio-workspace:

@@ -41,6 +41,119 @@ Codexio 首次启动会自动准备必要的本机配置。你不需要手动创
 
 ## 日常使用方式
 
+### 容器运行
+
+Codexio 可以作为无桌面容器服务运行。容器模式适合部署在一台固定机器上，对外暴露 Web 页面和 WebSocket 通道。容器内环境按独立机器使用，镜像内自带 Node、构建工具和 Codex 运行环境，Codex 登录态、配置、日志和工作区都保存在容器卷，不依赖宿主机的 Codex CLI 或 `~/.codex`。
+
+容器入口文件：
+
+```bash
+cd app/codexio
+cp container/.env.example container/.env
+podman-compose --env-file container/.env up -d --build
+```
+
+启动后访问：
+
+```text
+http://127.0.0.1:8787
+ws://127.0.0.1:8787/ws
+```
+
+Linux Podman 默认使用 host network。这样容器内可以访问宿主机 `127.0.0.1:7890` 代理，外部也可以直接访问 `127.0.0.1:8787`。数据、配置和工作区仍通过 named volume 与宿主隔离。需要修改服务端口时，改 `/data/config.yaml` 的 `server.port`，不要在 compose 里维护第二套端口配置。
+
+容器默认使用两个 named volume：
+
+| Volume | 容器路径 | 内容 |
+| --- | --- | --- |
+| `codexio-data` | `/data` | 配置、日志、上传文件、运行状态、Codex 登录态 |
+| `codexio-workspace` | `/workspace` | Codex 执行任务的工作目录 |
+
+首次启动时，镜像会把 `container/config.yaml` 复制到 `/data/config.yaml`。默认只启用 Web 输入、Web 输出和 Codex Agent，不启用飞书、邮件和 nfirco 线程通道。`server.host` 必须保持 `0.0.0.0`，否则容器外无法访问。`server.token` 默认从 `CODEXIO_SERVER_TOKEN` 读取，用于管理 API，例如停止服务。
+
+容器内 Codex 以 root 身份运行。这样 Codex 可以在容器里安装系统包、修改容器文件系统、拉取源码、构建项目和写入 `/workspace`。宿主机不挂载到容器内，文件需要通过 Codexio 文件接口、Web 页面下载、`podman cp` 或专门新增的 volume 显式进出。
+
+查看当前配置：
+
+```bash
+podman exec codexio cat /data/config.yaml
+```
+
+修改配置：
+
+```bash
+podman cp codexio:/data/config.yaml .tmp/codexio-container-config.yaml
+vim .tmp/codexio-container-config.yaml
+podman cp .tmp/codexio-container-config.yaml codexio:/data/config.yaml
+podman restart codexio
+```
+
+容器默认使用镜像内置的 Codex 运行环境：
+
+```yaml
+agents:
+  echo:
+    enabled: false
+  codex:
+    enabled: true
+    bundled: true
+workspace:
+  path: /workspace
+  perIoThread: true
+```
+
+首次使用 Codex 时，如果容器内还没有登录态，Web 页面会返回登录地址和验证码。按提示完成登录后，登录态会保存在 `codexio-data` volume 的 `/data/codex`，重启容器不会丢失。
+
+容器默认按 Linux host network 的宿主本机代理配置出网代理：
+
+```yaml
+proxy:
+  enabled: true
+  host: 127.0.0.1
+  port: 7890
+  noProxy: localhost,127.0.0.1,::1
+```
+
+如果宿主机代理不是 `7890`，修改 `/data/config.yaml` 后重启容器。如果不需要代理，把 `proxy.enabled` 改为 `false`。如果未来改成桥接网络，不要继续使用 `127.0.0.1` 指向宿主代理，应改为容器网络可访问的代理地址，例如 `host.containers.internal` 或一个明确暴露的局域网地址。
+
+如果需要让外部程序直接发消息，连接 WebSocket 后发送：
+
+```json
+{"webThreadId":"thread-1","text":"你好","files":[]}
+```
+
+同一个连接会收到 `ready`、`history`、`threads` 和 `message` 事件。`message.role` 为 `agent` 时就是 Codex 回复。
+
+从外部向容器传文件可以使用 Web 页面上传，也可以调用文件接口：
+
+```bash
+curl -F file=@./local-file.txt http://127.0.0.1:8787/api/files
+```
+
+接口会返回文件 ID。把这个 ID 放到 WebSocket 消息的 `files` 数组里，Codexio 会把文件写入当前线程工作区。Codex 在容器内生成文件时，应把结果保存到 `/workspace` 或当前线程目录，并在回复里用 Markdown 链接引用真实文件路径，Web 页面会把文件作为可下载内容展示。
+
+需要直接从容器复制文件到宿主机时使用：
+
+```bash
+podman cp codexio:/workspace/output.zip ./output.zip
+```
+
+需要从宿主机导入目录到容器工作区时使用：
+
+```bash
+podman cp ./project codexio:/workspace/project
+```
+
+如果需要长期挂载某个外部目录，应在 `compose.yaml` 中新增明确 volume，不要挂载宿主机家目录或 Codex 配置目录。
+
+管理 API 停止容器内服务：
+
+```bash
+curl -X POST -H "Authorization: Bearer $CODEXIO_SERVER_TOKEN" http://127.0.0.1:8787/api/server/stop
+```
+
+容器模式不建议挂载宿主机 `~/.codex` 或宿主机 Codex 命令。这样可以避免宿主机个人配置、PATH、登录态和升级节奏影响容器服务。
+
 ### 打开对话页面
 
 双击系统托盘中的 Codexio 图标，会使用默认浏览器打开本机对话页面。

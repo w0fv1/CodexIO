@@ -1,0 +1,91 @@
+app:
+  id: container
+server:
+  host: 0.0.0.0
+  port: 8787
+  token: "${CODEXIO_SERVER_TOKEN}"
+  autoPort: false
+proxy:
+  enabled: true
+  host: 127.0.0.1
+  port: 7890
+  noProxy: localhost,127.0.0.1,::1
+agents:
+  instruction: |
+    When the user asks you to generate, edit, export, or provide an image or file, save the real output as a local file in the workspace or as an absolute local path.
+    A preview, candidate, canvas, generated display, or tool-visible image is not deliverable unless you can reference a real file path or URL.
+    The final answer must include the real file as a Markdown reference so Codexio can deliver it to the user.
+    Use image syntax for images, for example ![name](absolute-or-workspace-relative-path).
+    Use normal link syntax for other files, for example [name](absolute-or-workspace-relative-path).
+    Do not answer only that the file has been generated, and do not rely on previews without a file path.
+  echo:
+    enabled: false
+  codex:
+    enabled: true
+    bundled: true
+    command: codex
+    developerInstructions: ''
+    requestTimeoutSeconds: 180
+workspace:
+  path: /workspace
+  perIoThread: true
+channeli:
+  web:
+    enabled: true
+  feishu:
+    enabled: false
+    appId: ''
+    appSecret: ''
+    chatId: ''
+    ws: ''
+    aite: true
+    allowedOpenIds: []
+  email:
+    enabled: false
+    user: ''
+    account:
+      imap:
+        host: ''
+        port: 993
+        secure: true
+        user: ''
+        password: ''
+        mailbox: INBOX
+    idle: true
+    pollSeconds: 30
+  nfirco:
+    enabled: false
+    baseUrl: ''
+    account: ''
+    password: ''
+    accessId: ''
+    section: ''
+channelo:
+  web:
+    enabled: true
+  feishu:
+    enabled: false
+    appId: ''
+    appSecret: ''
+    chatId: ''
+  feishuWebhook:
+    enabled: false
+    url: ''
+  email:
+    enabled: false
+    user: ''
+    account:
+      smtp:
+        host: ''
+        port: 465
+        secure: true
+        user: ''
+        password: ''
+        from: ''
+  nfirco:
+    enabled: false
+    baseUrl: ''
+    account: ''
+    password: ''
+    accessId: ''
+    section: ''
