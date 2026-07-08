@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { delimiter, join, resolve } from 'node:path'
 
-export function createProcessEnv(homePath?: string, shellEnvironmentPath?: string, proxyUrl?: string, noProxyHosts: string[] = [], variables: Record<string, string> = {}): NodeJS.ProcessEnv {
+export function createProcessEnv(homePath?: string, shellEnvironmentPath?: string, proxyUrl?: string, noProxyHosts: string[] = [], variables: Record<string, string> = {}, includeLocalBin = true): NodeJS.ProcessEnv {
   const env = {
     ...process.env
   }
@@ -28,12 +28,14 @@ export function createProcessEnv(homePath?: string, shellEnvironmentPath?: strin
   if (shellEnvironmentPath) {
     syncShellEnvironmentConfig(shellEnvironmentPath, proxyUrl, noProxy, variables)
   }
-  const binPaths = [
-    join(process.cwd(), 'node_modules', '.bin'),
-    resolve(process.cwd(), 'node_modules', '.bin')
-  ]
   const pathKey = Object.keys(env).find((key) => key.toLowerCase() === 'path') ?? 'PATH'
-  env[pathKey] = `${binPaths.join(delimiter)}${delimiter}${env[pathKey] ?? ''}`
+  if (includeLocalBin) {
+    const binPaths = [
+      join(process.cwd(), 'node_modules', '.bin'),
+      resolve(process.cwd(), 'node_modules', '.bin')
+    ]
+    env[pathKey] = `${binPaths.join(delimiter)}${delimiter}${env[pathKey] ?? ''}`
+  }
   return env
 }
 

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ChannelOutputManager } from '../src/component/channelo/ChannelOutputManager.js'
 import { ChannelOutput } from '../src/component/channelo/ChannelOutput.js'
@@ -561,6 +561,52 @@ describe('core', () => {
         delete process.env.USERPROFILE
       } else {
         process.env.USERPROFILE = previousUserProfile
+      }
+    }
+  })
+
+  it('does not resolve the external codex command from its own package bin', async () => {
+    const previousPath = process.env.PATH
+    const rootPath = await mkdtemp(join(tmpdir(), 'codexio-root-'))
+    const dataPath = await mkdtemp(join(tmpdir(), 'codexio-data-'))
+    const localBin = join(rootPath, 'node_modules', '.bin')
+    const systemBin = await mkdtemp(join(tmpdir(), 'codexio-system-bin-'))
+    await mkdir(localBin, {
+      recursive: true
+    })
+    const executableName = process.platform === 'win32' ? 'codex.exe' : 'codex'
+    await writeFile(join(localBin, executableName), '')
+    await writeFile(join(systemBin, executableName), '')
+    process.env.PATH = [
+      localBin,
+      systemBin
+    ].join(delimiter)
+    try {
+      const values = new Map<string, unknown>([
+        ['agents.codex.bundled', false],
+        ['workspace.path', ''],
+        ['proxy.enabled', false],
+        ['proxy.host', '127.0.0.1'],
+        ['proxy.port', 7890],
+        ['proxy.noProxy', ''],
+        ['server.host', '127.0.0.1'],
+        ['agents.codex.command', 'codex'],
+        ['agents.instruction', ''],
+        ['agents.codex.requestTimeoutSeconds', 120]
+      ])
+      const client = createTestCodexClient({
+        get: async (path: string) => values.get(path)
+      } as unknown as Configer, new CodexioMetadata({
+        rootPath,
+        dataPath
+      }))
+      const runtimeConfig = await client['readRuntimeConfig']()
+      expect(runtimeConfig.command).toBe(join(systemBin, executableName))
+    } finally {
+      if (previousPath === undefined) {
+        delete process.env.PATH
+      } else {
+        process.env.PATH = previousPath
       }
     }
   })

@@ -3,7 +3,7 @@ import { existsSync, readdirSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { createInterface } from 'node:readline'
 import { delimiter } from 'node:path'
-import { dirname, extname, isAbsolute, join } from 'node:path'
+import { dirname, extname, isAbsolute, join, resolve } from 'node:path'
 import { inject, injectable } from 'inversify'
 import { execa } from 'execa'
 import { Configer } from '../Configer.js'
@@ -142,7 +142,9 @@ export class CodexClient {
         config.codexHomePath,
         config.codexHomePath ? `${config.codexHomePath}/config.toml` : undefined,
         config.proxyUrl,
-        config.noProxyHosts
+        config.noProxyHosts,
+        {},
+        config.bundled
       )
       Logger.info('codex client starting', {
         cwd: config.processCwd,
@@ -698,7 +700,7 @@ export class CodexClient {
     ])
     const command = bundled
       ? bundledCodexCommand()
-      : externalCodexCommand(codexCommand)
+      : externalCodexCommand(codexCommand, this.metadata.rootPath)
     const cwd = await this.workspaceResolver.resolveBase()
     return {
       bundled,
@@ -767,8 +769,8 @@ function bundledCodexCommand(): CodexCommand {
   }
 }
 
-function externalCodexCommand(commandValue: string): CodexCommand {
-  const command = resolveExternalCommand(commandValue.trim().length > 0 ? commandValue.trim() : 'codex')
+function externalCodexCommand(commandValue: string, rootPath: string): CodexCommand {
+  const command = resolveExternalCommand(commandValue.trim().length > 0 ? commandValue.trim() : 'codex', rootPath)
   return {
     command,
     args: [
@@ -777,11 +779,11 @@ function externalCodexCommand(commandValue: string): CodexCommand {
   }
 }
 
-function resolveExternalCommand(command: string): string {
+function resolveExternalCommand(command: string, rootPath: string): string {
   if (!isBareCommand(command)) {
     return command
   }
-  for (const directory of externalCommandDirectories(command)) {
+  for (const directory of externalCommandDirectories(command, rootPath)) {
     for (const executableName of executableNames(command)) {
       const executablePath = join(directory, executableName)
       if (existsSync(executablePath)) {
@@ -812,17 +814,27 @@ function executableNames(command: string): string[] {
   ]
 }
 
-function externalCommandDirectories(command: string): string[] {
+function externalCommandDirectories(command: string, rootPath: string): string[] {
   const pathDirectories = (process.env.PATH ?? '')
     .split(delimiter)
     .map((item) => item.trim())
     .filter((item) => item.length > 0)
+  const localBinDirectories = new Set([
+    join(rootPath, 'node_modules', '.bin'),
+    resolve(rootPath, 'node_modules', '.bin'),
+    join(dirname(process.execPath), 'resources', 'app.asar.unpacked', 'node_modules', '.bin'),
+    resolve(dirname(process.execPath), 'resources', 'app.asar.unpacked', 'node_modules', '.bin')
+  ].map((item) => process.platform === 'win32' ? item.toLowerCase() : item))
+  const externalPathDirectories = pathDirectories.filter((item) => {
+    const path = process.platform === 'win32' ? resolve(item).toLowerCase() : resolve(item)
+    return !localBinDirectories.has(path)
+  })
   if (!['codex', 'codex.exe'].includes(command.toLowerCase())) {
-    return pathDirectories
+    return externalPathDirectories
   }
   return uniquePaths([
     ...codexCliDirectories(),
-    ...pathDirectories
+    ...externalPathDirectories
   ])
 }
 
