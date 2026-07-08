@@ -502,7 +502,7 @@ describe('core', () => {
     expect(runtimeConfig.command).not.toContain('app.asar')
   })
 
-  it('resolves the system codex command from vscode before openai install and path', async () => {
+  it('resolves the system codex command by platform search order', async () => {
     const previousPath = process.env.PATH
     const previousLocalAppData = process.env.LOCALAPPDATA
     const previousUserProfile = process.env.USERPROFILE
@@ -544,7 +544,8 @@ describe('core', () => {
         get: async (path: string) => values.get(path)
       } as unknown as Configer, metadata)
       const runtimeConfig = await client['readRuntimeConfig']()
-      expect(runtimeConfig.command).toBe(join(vscodeBin, 'codex.exe'))
+      const expectedCommand = process.platform === 'win32' ? join(vscodeBin, 'codex.exe') : join(pathBin, 'codex')
+      expect(runtimeConfig.command).toBe(expectedCommand)
     } finally {
       if (previousPath === undefined) {
         delete process.env.PATH
