@@ -1345,6 +1345,7 @@ describe('core', () => {
       get: async () => undefined
     } as unknown as Configer)
     const requests: Array<{ method: string, params?: unknown }> = []
+    const ignoreThread = vi.spyOn(client['observerLifecycle'], 'ignoreThread')
     client['request'] = async (method: string, params?: unknown) => {
       requests.push({ method, params })
       if (method === 'thread/resume') {
@@ -1374,6 +1375,7 @@ describe('core', () => {
     })
 
     expect(result.isFailed).toBe(false)
+    expect(ignoreThread).not.toHaveBeenCalled()
     expect(requests).toEqual([
       {
         method: 'thread/resume',
@@ -1475,6 +1477,53 @@ describe('core', () => {
     expect(result.message).toContain('codex resumed unexpected thread: different-thread')
     expect(requests).toEqual(['thread/resume'])
     expect(client['threads'].size).toBe(0)
+  })
+
+  it('keeps new Codexio threads out of external thread observation', async () => {
+    const values = new Map<string, unknown>([
+      ['agents.codex.bundled', false],
+      ['app.workspace.path', '~'],
+      ['proxy.enabled', false],
+      ['proxy.host', '127.0.0.1'],
+      ['proxy.port', 7890],
+      ['proxy.noProxy', ''],
+      ['server.host', '127.0.0.1'],
+      ['agents.codex.command', 'codex'],
+      ['agents.instruction', ''],
+      ['agents.codex.requestTimeoutSeconds', 120],
+      ['agents.codex.observe', { enabled: true, intervalSeconds: 1 }]
+    ])
+    const client = createTestCodexClient({
+      get: async (path: string) => values.get(path)
+    } as unknown as Configer)
+    const ignoreThread = vi.spyOn(client['observerLifecycle'], 'ignoreThread')
+    client['request'] = async (method: string) => {
+      if (method === 'thread/start') {
+        return {
+          thread: {
+            id: 'new-thread',
+            name: 'New thread'
+          }
+        }
+      }
+      if (method === 'turn/start') {
+        return {
+          turn: {
+            id: 'new-turn',
+            threadId: 'new-thread'
+          }
+        }
+      }
+      throw new Error(method)
+    }
+
+    const result = await client.send({
+      thread: { id: 'io-thread', name: 'New thread' },
+      text: 'start'
+    })
+
+    expect(result.isFailed).toBe(false)
+    expect(ignoreThread).toHaveBeenCalledExactlyOnceWith('new-thread')
   })
 
   it('upserts repeated web messages by stable message id', () => {

@@ -106,6 +106,50 @@ describe('Codex agent ingestion', () => {
     expect(context.client.sentThreadIds).toEqual(['codex-thread'])
     await context.agent.stop()
   })
+
+  it('routes reconciled completion back to the source channel after continuing an observed thread', async () => {
+    const context = fixture()
+    await context.agent.start()
+    await context.client.emitSnapshot({
+      thread: { id: 'codex-thread', name: 'VS Code thread' },
+      messages: []
+    })
+    await context.agent.receive({
+      source: 'feishu',
+      sourceMessageId: 'om_user',
+      message: createMessage({
+        id: 'feishu-message',
+        thread: { id: 'codex-thread', name: 'VS Code thread' },
+        role: 'user',
+        text: 'continue'
+      })
+    })
+
+    await context.client.emitSnapshot({
+      thread: { id: 'codex-thread', name: 'VS Code thread' },
+      messages: [{
+        turnId: 'turn',
+        itemId: 'agent-item',
+        role: 'assistant',
+        text: 'completed reply',
+        completedAt: 200
+      }]
+    })
+
+    expect(context.events).toContainEqual({
+      message: expect.objectContaining({
+        thread: { id: 'codex-thread', name: 'VS Code thread' },
+        role: 'agent',
+        status: 'completed',
+        text: 'completed reply'
+      }),
+      context: {
+        source: 'feishu',
+        sourceMessageId: 'om_user'
+      }
+    })
+    await context.agent.stop()
+  })
 })
 
 function fixture(): {

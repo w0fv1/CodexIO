@@ -461,7 +461,6 @@ export class CodexClient {
       thread.title = fallbackTitle
     }
     this.upsertThread(thread)
-    this.observerLifecycle.ignoreThread(thread.id)
     Logger.info('codex client thread resumed', {
       threadId: thread.id,
       title: thread.title,
