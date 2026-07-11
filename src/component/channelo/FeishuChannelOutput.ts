@@ -198,7 +198,8 @@ export class FeishuChannelOutput implements ChannelOutput {
           })
         })
       }
-      let replyMessageId = context?.sourceMessageId?.trim() || this.replyMessageIdByIoThreadId.get(message.thread.id)
+      const sourceReplyMessageId = context?.source === 'feishu' ? context.sourceMessageId?.trim() : undefined
+      let replyMessageId = sourceReplyMessageId || this.replyMessageIdByIoThreadId.get(message.thread.id)
       const messageClient = this.client as unknown as FeishuCreateMessageClient
       for (const [index, outgoingMessage] of outgoingMessages.entries()) {
         const uuid = deriveExternalDeliveryId('feishu', message, String(index))

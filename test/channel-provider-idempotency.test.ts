@@ -33,14 +33,42 @@ describe('channel provider idempotency', () => {
     })
     const [first, second] = revisions()
 
-    await output.send(first, { sourceMessageId: 'source' })
-    await output.send(second, { sourceMessageId: 'source' })
+    await output.send(first, { source: 'feishu', sourceMessageId: 'source' })
+    await output.send(second, { source: 'feishu', sourceMessageId: 'source' })
 
     expect(calls.map((call) => call.data.uuid)).toEqual([
       deriveExternalDeliveryId('feishu', first, '0'),
       deriveExternalDeliveryId('feishu', second, '0')
     ])
     expect(calls[0].data.uuid).not.toBe(calls[1].data.uuid)
+  })
+
+  it('never uses another channel message identity as a Feishu reply identity', async () => {
+    const create = vi.fn(async () => ({
+      data: {
+        message_id: 'om_created',
+        thread_id: 'omt_created'
+      }
+    }))
+    const reply = vi.fn()
+    const output = new FeishuChannelOutput({} as never, threadRegistry())
+    Reflect.set(output, 'chatId', 'chat')
+    Reflect.set(output, 'client', {
+      im: {
+        v1: {
+          message: { create, reply }
+        }
+      }
+    })
+
+    const result = await output.send(revisions()[0], {
+      source: 'web',
+      sourceMessageId: 'browser-message-id'
+    })
+
+    expect(result.isFailed).toBe(false)
+    expect(create).toHaveBeenCalledOnce()
+    expect(reply).not.toHaveBeenCalled()
   })
 
   it('uses the message revision in SMTP Message-IDs', async () => {

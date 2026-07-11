@@ -1340,6 +1340,44 @@ describe('core', () => {
     })
   })
 
+  it('continues an explicit Codex thread without requiring a process-local cache entry', async () => {
+    const client = createTestCodexClient({
+      get: async () => undefined
+    } as unknown as Configer)
+    const requests: Array<{ method: string, params?: unknown }> = []
+    client['request'] = async (method: string, params?: unknown) => {
+      requests.push({ method, params })
+      if (method === 'turn/start') {
+        return {
+          turn: {
+            id: 'continued-turn',
+            threadId: 'codex-thread'
+          }
+        }
+      }
+      throw new Error(method)
+    }
+
+    const result = await client.send({
+      thread: { id: 'codex-thread', name: 'VS Code thread' },
+      threadId: 'codex-thread',
+      text: 'continue'
+    })
+
+    expect(result.isFailed).toBe(false)
+    expect(requests).toEqual([{
+      method: 'turn/start',
+      params: {
+        threadId: 'codex-thread',
+        input: [{
+          type: 'text',
+          text: 'continue',
+          text_elements: []
+        }]
+      }
+    }])
+  })
+
   it('upserts repeated web messages by stable message id', () => {
     const manager = new WebThreadManager(createThreadRegistry())
     const message = createMessage({

@@ -10,7 +10,7 @@ import { CodexClientEventMap } from '../src/component/agent/codex/CodexProtocol.
 import { CodexMessageStreamer } from '../src/component/agent/CodexMessageStreamer.js'
 import { WebThreadManager } from '../src/component/channel/WebThreadManager.js'
 import { Result } from '../src/value/Result.js'
-import { Message } from '../src/value/Message.js'
+import { createMessage, Message } from '../src/value/Message.js'
 import { ChannelOutputManager } from '../src/component/channelo/ChannelOutputManager.js'
 
 describe('Codex agent ingestion', () => {
@@ -75,12 +75,44 @@ describe('Codex agent ingestion', () => {
     expect(context.web.snapshot().messages).toHaveLength(1)
     await context.agent.stop()
   })
+
+  it('continues an observed Codex thread after a channel thread is bound to it', async () => {
+    const context = fixture()
+    await context.agent.start()
+    await context.client.emitSnapshot({
+      thread: { id: 'codex-thread', name: 'VS Code thread' },
+      messages: []
+    })
+    context.registry.bind('codex-thread', {
+      source: 'feishu',
+      id: 'chat:thread:omt_thread'
+    })
+    const thread = context.registry.resolve({
+      source: 'feishu',
+      id: 'chat:thread:omt_thread'
+    })
+
+    await context.agent.receive({
+      source: 'feishu',
+      sourceMessageId: 'om_reply',
+      message: createMessage({
+        id: 'feishu-message',
+        thread,
+        role: 'user',
+        text: 'continue'
+      })
+    })
+
+    expect(context.client.sentThreadIds).toEqual(['codex-thread'])
+    await context.agent.stop()
+  })
 })
 
 function fixture(): {
   agent: CodexAgent
   client: RecordingCodexClient
   web: WebThreadManager
+  registry: ThreadRegistry
   events: Array<{ message: Message, context?: object }>
 } {
   const registry = new ThreadRegistry(new CodexioMetadata({
@@ -103,7 +135,7 @@ function fixture(): {
     client as unknown as CodexClient,
     new CodexMessageStreamer(outputManager)
   )
-  return { agent, client, web, events }
+  return { agent, client, web, registry, events }
 }
 
 function completedMessage(index: number): CodexClientMessage {
@@ -122,6 +154,7 @@ function completedMessage(index: number): CodexClientMessage {
 }
 
 class RecordingCodexClient {
+  readonly sentThreadIds: Array<string | undefined> = []
   private readonly listeners = new Map<keyof CodexClientEventMap, Set<(...args: never[]) => unknown>>()
 
   on<K extends keyof CodexClientEventMap>(event: K, listener: CodexClientEventMap[K]): () => void {
@@ -137,6 +170,18 @@ class RecordingCodexClient {
 
   async stop(): Promise<Result<void>> {
     return Result.successVoid()
+  }
+
+  async login(): Promise<Result<boolean>> {
+    return Result.success(true)
+  }
+
+  async send(input: { threadId?: string }): Promise<Result<{ threadId: string, turnId: string }>> {
+    this.sentThreadIds.push(input.threadId)
+    return Result.success({
+      threadId: input.threadId ?? 'new-codex-thread',
+      turnId: 'turn'
+    })
   }
 
   emitMessage(message: CodexClientMessage): void {

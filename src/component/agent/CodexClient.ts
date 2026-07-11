@@ -365,7 +365,7 @@ export class CodexClient {
       return Result.fail('text or file is required')
     }
     try {
-      const threadId = normalizedThreadId.length > 0 && this.threads.has(normalizedThreadId)
+      const threadId = normalizedThreadId.length > 0
         ? normalizedThreadId
         : (await this.startThread(input.thread)).id
       const turnInput = this.toTurnInput(input)
