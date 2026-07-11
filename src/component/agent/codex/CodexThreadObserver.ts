@@ -216,9 +216,6 @@ export class CodexThreadObserver {
       })
     }
     const candidates = this.readyCandidates(Date.now())
-    let succeededThreadCount = 0
-    let pendingThreadCount = 0
-    let failedThreadCount = 0
     let nextCandidateIndex = 0
     await Promise.all(Array.from({ length: Math.min(4, candidates.length) }, async () => {
       while (this.active) {
@@ -236,7 +233,6 @@ export class CodexThreadObserver {
           const reconciled = await this.readThread(candidate.id)
           if (!reconciled) {
             this.scheduleRetry(state)
-            pendingThreadCount += 1
             continue
           }
           if (state.updatedAt === candidate.updatedAt) {
@@ -245,11 +241,9 @@ export class CodexThreadObserver {
             state.retryAttempt = 0
             state.retryAt = 0
           }
-          succeededThreadCount += 1
         } catch (error) {
           const failure = error instanceof Error ? error : new Error(String(error))
           this.scheduleRetry(state)
-          failedThreadCount += 1
           this.receiveError(failure)
           this.diagnose({
             event: 'threadReconcileFailed',
@@ -264,17 +258,6 @@ export class CodexThreadObserver {
         }
       }
     }))
-    this.diagnose({
-      event: 'pollCompleted',
-      data: {
-        readyThreadCount: candidates.length,
-        succeededThreadCount,
-        pendingThreadCount,
-        failedThreadCount,
-        unreconciledThreadCount: this.pendingThreadCount(),
-        updatedAtWatermark: this.updatedAtWatermark
-      }
-    })
   }
 
   private async scanCandidates(): Promise<void> {
@@ -282,16 +265,13 @@ export class CodexThreadObserver {
     const boundary = Math.max(Math.floor(Date.now() / 1000), this.updatedAtWatermark) - overlapSeconds
     const observationBoundary = this.baselineCompletedAt - overlapSeconds
     const observedAt = Date.now()
-    const observedThreadIds = new Set<string>()
     let cursor: string | null = null
-    let pageCount = 0
     let crossedBoundary = false
     let crossedObservationBoundary = false
     let newestUpdatedAt = this.updatedAtWatermark
     let recentContinuation: string | null = null
     do {
       const page = await this.listPage(cursor)
-      pageCount += 1
       for (const thread of page.data) {
         newestUpdatedAt = Math.max(newestUpdatedAt, thread.updatedAt)
         if (thread.updatedAt < observationBoundary) {
@@ -305,7 +285,6 @@ export class CodexThreadObserver {
         if (this.ignoredThreadIds.has(thread.id)) {
           continue
         }
-        observedThreadIds.add(thread.id)
         this.observe(thread, observedAt)
       }
       recentContinuation = page.nextCursor ?? null
@@ -329,7 +308,6 @@ export class CodexThreadObserver {
           this.auditCursor = null
           throw error
         }
-        pageCount += 1
         let auditCrossedObservationBoundary = false
         for (const thread of auditPage.data) {
           newestUpdatedAt = Math.max(newestUpdatedAt, thread.updatedAt)
@@ -340,28 +318,12 @@ export class CodexThreadObserver {
           if (this.ignoredThreadIds.has(thread.id)) {
             continue
           }
-          observedThreadIds.add(thread.id)
           this.observe(thread, observedAt)
         }
         this.auditCursor = auditCrossedObservationBoundary ? null : auditPage.nextCursor ?? null
       }
     }
     this.updatedAtWatermark = newestUpdatedAt
-    this.diagnose({
-      event: 'candidateScanCompleted',
-      data: {
-        pageCount,
-        candidateThreadCount: observedThreadIds.size,
-        observedThreadCount: this.threadStates.size,
-        unreconciledThreadCount: this.pendingThreadCount(),
-        overlapSeconds,
-        boundary,
-        observationBoundary,
-        auditPending: this.auditCursor !== null,
-        crossedBoundary,
-        updatedAtWatermark: this.updatedAtWatermark
-      }
-    })
   }
 
   private observe(thread: ThreadCandidate, observedAt: number): void {

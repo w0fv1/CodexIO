@@ -138,6 +138,11 @@ export class ThreadRegistry {
       this.threads.set(id, thread)
     }
     this.lastActiveThreadId = state.lastActiveThreadId
+    Logger.info('thread registry restored', {
+      threadCount: this.threads.size,
+      bindingCount: [...this.threads.values()].reduce((count, thread) => count + thread.values().length, 0),
+      lastActiveThreadId: this.lastActiveThreadId ?? null
+    })
   }
 
   resolve(channelThreadId: ChannelThreadId, preferredName?: string, initialName?: string): MessageThread {
@@ -147,12 +152,26 @@ export class ThreadRegistry {
         this.rename(existing.id, preferredName)
       }
       this.touch(existing.id)
+      Logger.info('thread registry resolved channel thread', {
+        resolution: 'existing',
+        channelSource: channelThreadId.source,
+        channelThreadId: channelThreadId.id,
+        ioThreadId: existing.id,
+        bindings: existing.values()
+      })
       return existing.value()
     }
     const thread = new RegisteredThread(randomUUID(), normalizeThreadName(preferredName ?? initialName))
     thread.bind(channelThreadId)
     this.threads.set(thread.id, thread)
     this.touch(thread.id, true)
+    Logger.info('thread registry resolved channel thread', {
+      resolution: 'created',
+      channelSource: channelThreadId.source,
+      channelThreadId: channelThreadId.id,
+      ioThreadId: thread.id,
+      bindings: thread.values()
+    })
     return thread.value()
   }
 
@@ -196,10 +215,23 @@ export class ThreadRegistry {
     const thread = this.ensure(threadId)
     const existing = this.find(channelThreadId)
     if (existing && existing.id !== thread.id) {
+      Logger.warn('thread registry channel binding conflicted', {
+        channelSource: channelThreadId.source,
+        channelThreadId: channelThreadId.id,
+        requestedIoThreadId: thread.id,
+        existingIoThreadId: existing.id
+      })
       throw new Error('thread key already bound')
     }
     const changed = this.threads.get(thread.id)?.bind(channelThreadId) ?? false
     this.touch(thread.id, changed)
+    Logger.info('thread registry bound channel thread', {
+      changed,
+      channelSource: channelThreadId.source,
+      channelThreadId: channelThreadId.id,
+      ioThreadId: thread.id,
+      bindings: this.threads.get(thread.id)?.values() ?? []
+    })
   }
 
   rename(threadId: string, name: string): MessageThread {

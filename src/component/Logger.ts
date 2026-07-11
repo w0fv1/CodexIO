@@ -1,6 +1,7 @@
 import { mkdir, appendFile, readdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { inspect } from 'node:util'
+import { pid } from 'node:process'
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
@@ -15,6 +16,7 @@ export type LoggerCleanupResult = {
 
 type LogRecord = {
   time: string
+  pid: number
   level: LogLevel
   message: string
   data?: unknown
@@ -58,6 +60,7 @@ export class Logger {
   static error(message: string, error?: unknown): void {
     const record: LogRecord = {
       time: new Date().toISOString(),
+      pid,
       level: 'error',
       message
     }
@@ -107,6 +110,7 @@ export class Logger {
   private static write(level: LogLevel, message: string, data?: unknown): void {
     const record: LogRecord = {
       time: new Date().toISOString(),
+      pid,
       level,
       message
     }
@@ -123,7 +127,7 @@ export class Logger {
     }
     const payload = record.error ?? record.data
     const suffix = payload === undefined ? '' : ` ${Logger.stringifyConsole(payload)}`
-    const line = `[${record.level}] ${record.message}${suffix}\n`
+    const line = `[${record.level}] [pid:${record.pid}] ${record.message}${suffix}\n`
     if (record.level === 'error' || record.level === 'warn') {
       process.stderr.write(line)
       return

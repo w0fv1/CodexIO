@@ -219,13 +219,32 @@ export class ChannelOutputManager {
         ? `channel output not found: ${targetTypes.join(', ')}`
         : 'channel output not found')
     }
+    Logger.info('channel output dispatch started', {
+      messageId: message.id,
+      ioThreadId: message.thread.id,
+      role: message.role,
+      status: message.status,
+      source: context?.source ?? null,
+      sourceMessageId: context?.sourceMessageId ?? null,
+      outputs: outputs.map((output) => output.type)
+    })
     const results = await Promise.all(outputs.map((output) => this.enqueueOutput(output, message, context)))
     const failures = results.flatMap((result, index) => result.isFailed
       ? [`${outputs[index].type}: ${result.message}`]
       : [])
     if (failures.length > 0) {
+      Logger.warn('channel output dispatch failed', {
+        messageId: message.id,
+        ioThreadId: message.thread.id,
+        failures
+      })
       return Result.fail(failures.join('\n'))
     }
+    Logger.info('channel output dispatch completed', {
+      messageId: message.id,
+      ioThreadId: message.thread.id,
+      outputs: outputs.map((output) => output.type)
+    })
     return Result.successVoid()
   }
 

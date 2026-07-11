@@ -79,6 +79,15 @@ export class ChannelInputManager implements ChannelInputReceiver {
     })
     return this.inbox.run(messageId, revision, async () => {
       const thread = this.threadRegistry.resolve(channelThreadId, input.threadName, input.text)
+      Logger.info('channel input resolved thread', {
+        source,
+        channelSource: channelThreadId.source,
+        channelThreadId: channelThreadId.id,
+        sourceMessageId,
+        messageId,
+        ioThreadId: thread.id,
+        bindings: this.threadRegistry.getChannelThreadIds(thread.id)
+      })
       const message = createMessage({
         id: messageId,
         thread,

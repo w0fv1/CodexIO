@@ -116,9 +116,18 @@ export class CodexAgent implements Agent {
     if (!loggedIn.data) {
       return Result.successVoid()
     }
+    const mappedThreadId = this.threadIdByIoThreadId.get(event.message.thread.id)
+    Logger.info('codex agent routing channel message', {
+      source: event.source,
+      sourceMessageId: event.sourceMessageId ?? null,
+      messageId: event.message.id,
+      ioThreadId: event.message.thread.id,
+      mappedThreadId: mappedThreadId ?? null,
+      bindings: this.threadRegistry.getChannelThreadIds(event.message.thread.id)
+    })
     const sent = await this.client.send({
       thread: event.message.thread,
-      threadId: this.threadIdByIoThreadId.get(event.message.thread.id),
+      threadId: mappedThreadId,
       text: event.message.text,
       files: event.message.files
     })
@@ -302,11 +311,18 @@ export class CodexAgent implements Agent {
 
   private resolveThread(agentThread: CodexClientMessage['thread']): Message['thread'] {
     let ioThreadId = this.ioThreadIdByThreadId.get(agentThread.id)
+    const resolution = ioThreadId ? 'mapped' : 'canonical'
     if (!ioThreadId) {
       ioThreadId = agentThread.id
       this.bindThread(ioThreadId, agentThread.id)
     }
     const currentThread = this.threadRegistry.ensure(ioThreadId)
+    Logger.info('codex agent resolved agent thread', {
+      resolution,
+      agentThreadId: agentThread.id,
+      ioThreadId,
+      bindings: this.threadRegistry.getChannelThreadIds(ioThreadId)
+    })
     return agentThread.name === '新对话' && currentThread.name !== '新对话'
       ? currentThread
       : this.threadRegistry.rename(ioThreadId, agentThread.name)
@@ -329,8 +345,17 @@ export class CodexAgent implements Agent {
   }
 
   private bindThread(ioThreadId: string, threadId: string): void {
+    const previousThreadId = this.threadIdByIoThreadId.get(ioThreadId)
+    const previousIoThreadId = this.ioThreadIdByThreadId.get(threadId)
     this.threadIdByIoThreadId.set(ioThreadId, threadId)
     this.ioThreadIdByThreadId.set(threadId, ioThreadId)
+    Logger.info('codex agent bound thread identity', {
+      ioThreadId,
+      threadId,
+      previousThreadId: previousThreadId ?? null,
+      previousIoThreadId: previousIoThreadId ?? null,
+      changed: previousThreadId !== threadId || previousIoThreadId !== ioThreadId
+    })
   }
 
   private bindSourceMessageId(ioThreadId: string, sourceMessageId?: string): void {

@@ -365,12 +365,24 @@ export class CodexClient {
       return Result.fail('text or file is required')
     }
     try {
+      Logger.info('codex client routing turn', {
+        ioThreadId: input.thread.id,
+        requestedThreadId: normalizedThreadId || null,
+        route: normalizedThreadId ? 'continue' : 'create',
+        cachedThread: normalizedThreadId ? this.threads.has(normalizedThreadId) : false,
+        activeTurnId: normalizedThreadId ? this.turnIdByThreadId.get(normalizedThreadId) ?? null : null
+      })
       const threadId = normalizedThreadId.length > 0
         ? normalizedThreadId
         : (await this.startThread(input.thread)).id
       const turnInput = this.toTurnInput(input)
       const activeTurnId = this.turnIdByThreadId.get(threadId)
       if (activeTurnId) {
+        Logger.info('codex client steering turn', {
+          ioThreadId: input.thread.id,
+          threadId,
+          turnId: activeTurnId
+        })
         await this.request('turn/steer', {
           threadId,
           expectedTurnId: activeTurnId,
@@ -381,6 +393,10 @@ export class CodexClient {
           turnId: activeTurnId
         })
       }
+      Logger.info('codex client starting turn', {
+        ioThreadId: input.thread.id,
+        threadId
+      })
       const response = await this.request('turn/start', {
         threadId,
         input: turnInput
@@ -398,6 +414,12 @@ export class CodexClient {
         turnId
       }
       this.turnIdByThreadId.set(threadId, turnId)
+      Logger.info('codex client turn started', {
+        ioThreadId: input.thread.id,
+        requestedThreadId: normalizedThreadId || null,
+        threadId: result.threadId,
+        turnId
+      })
       this.emitMessage({
         thread: this.messageThread(result.threadId),
         turnId,

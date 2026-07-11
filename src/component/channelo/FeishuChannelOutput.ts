@@ -101,8 +101,15 @@ export class FeishuChannelOutput implements ChannelOutput {
       return Result.fail('feishu chat not ready')
     }
     try {
+      const registeredFeishuThreadId = this.feishuThreadId(message.thread.id)
       Logger.info('feishu openapi send started', {
+        messageId: message.id,
+        ioThreadId: message.thread.id,
         role: message.role,
+        contextSource: context?.source ?? null,
+        sourceMessageId: context?.sourceMessageId ?? null,
+        registeredFeishuThreadId: registeredFeishuThreadId ?? null,
+        cachedReplyMessageId: this.replyMessageIdByIoThreadId.get(message.thread.id) ?? null,
         length: message.text.length,
         files: message.files?.length ?? 0
       })
@@ -204,6 +211,14 @@ export class FeishuChannelOutput implements ChannelOutput {
       for (const [index, outgoingMessage] of outgoingMessages.entries()) {
         const uuid = deriveExternalDeliveryId('feishu', message, String(index))
         if (replyMessageId) {
+          Logger.info('feishu openapi replying message', {
+            messageId: message.id,
+            ioThreadId: message.thread.id,
+            replyMessageId,
+            registeredFeishuThreadId: registeredFeishuThreadId ?? null,
+            deliveryIndex: index,
+            deliveryId: uuid
+          })
           const replied = await messageClient.im.v1.message.reply({
             path: {
               message_id: replyMessageId
@@ -220,6 +235,14 @@ export class FeishuChannelOutput implements ChannelOutput {
             this.replyMessageIdByIoThreadId.set(message.thread.id, createdMessageId)
           }
           const repliedThreadId = replied.data?.thread_id?.trim()
+          Logger.info('feishu openapi replied message', {
+            messageId: message.id,
+            ioThreadId: message.thread.id,
+            replyMessageId,
+            createdMessageId: createdMessageId ?? null,
+            returnedFeishuThreadId: repliedThreadId ?? null,
+            registeredFeishuThreadId: registeredFeishuThreadId ?? null
+          })
           if (repliedThreadId && !this.feishuThreadId(message.thread.id)) {
             this.threadRegistry.bind(message.thread.id, {
               source: 'feishu',
@@ -228,6 +251,13 @@ export class FeishuChannelOutput implements ChannelOutput {
           }
           continue
         }
+        Logger.info('feishu openapi creating message', {
+          messageId: message.id,
+          ioThreadId: message.thread.id,
+          registeredFeishuThreadId: registeredFeishuThreadId ?? null,
+          deliveryIndex: index,
+          deliveryId: uuid
+        })
         const created = await messageClient.im.v1.message.create({
           params: {
             receive_id_type: 'chat_id'
@@ -240,12 +270,19 @@ export class FeishuChannelOutput implements ChannelOutput {
           }
         })
         const createdMessageId = created.data?.message_id?.trim()
+        const createdThreadId = created?.data?.thread_id?.trim()
+        Logger.info('feishu openapi created message', {
+          messageId: message.id,
+          ioThreadId: message.thread.id,
+          createdMessageId: createdMessageId ?? null,
+          returnedFeishuThreadId: createdThreadId ?? null,
+          registeredFeishuThreadId: registeredFeishuThreadId ?? null
+        })
         if (createdMessageId) {
           replyMessageId = createdMessageId
           this.replyMessageIdByIoThreadId.set(message.thread.id, createdMessageId)
         }
-        if (!this.feishuThreadId(message.thread.id)) {
-          const createdThreadId = created?.data?.thread_id?.trim()
+        if (!registeredFeishuThreadId) {
           if (!createdThreadId) {
             throw new Error('feishu thread_id missing')
           }
@@ -256,6 +293,8 @@ export class FeishuChannelOutput implements ChannelOutput {
         }
       }
       Logger.info('feishu openapi send completed', {
+        messageId: message.id,
+        ioThreadId: message.thread.id,
         role: message.role,
         images: images.length,
         files: files.length

@@ -348,7 +348,12 @@ export class FeishuChannelInput implements ChannelInput {
         return
       }
       Logger.info('feishu message received', {
-        chatId: data.message.chat_id,
+        chatId,
+        chatType: data.message.chat_type ?? null,
+        feishuThreadId: feishuThreadId || null,
+        channelThreadId: channelThreadId.id,
+        sourceMessageId: messageId,
+        mentioned: Boolean(data.message.mentions?.some((mention) => mention.key.trim().length > 0)),
         length: parsedText.text.length
       })
       const receiver = this.receiver
@@ -369,7 +374,15 @@ export class FeishuChannelInput implements ChannelInput {
           Logger.warn('feishu message receive failed', {
             message: result.message
           })
+          return
         }
+        Logger.info('feishu message routed', {
+          chatId,
+          feishuThreadId: feishuThreadId || null,
+          channelThreadId: channelThreadId.id,
+          sourceMessageId: messageId,
+          ioThreadId: result.data?.ioThreadId ?? null
+        })
       }).catch((error) => {
         Logger.error('feishu message receive crashed', error)
       })
