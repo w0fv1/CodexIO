@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { ChannelOutputManager } from '../src/component/channelo/ChannelOutputManager.js'
-import { ChannelOutput, ChannelOutputContext } from '../src/component/channelo/ChannelOutput.js'
+import { ChannelOutput } from '../src/component/channelo/ChannelOutput.js'
 import { Result } from '../src/value/Result.js'
 import { Message } from '../src/value/Message.js'
 
@@ -41,7 +41,7 @@ describe('channel output delivery', () => {
     })
   })
 
-  it('projects snapshots only to their selected outputs', async () => {
+  it('delivers completed agent messages to every enabled output', async () => {
     const sent: string[] = []
     const manager = managerWith(
       output('web', async () => {
@@ -54,11 +54,9 @@ describe('channel output delivery', () => {
       })
     )
 
-    await manager.sendAgent(message(), {
-      targets: ['web']
-    } as ChannelOutputContext)
+    await manager.sendAgent(message())
 
-    expect(sent).toEqual(['web'])
+    expect(sent).toEqual(['web', 'feishu'])
   })
 
   it('keeps streaming revisions inside the Web projection', async () => {
@@ -126,11 +124,35 @@ describe('channel output delivery', () => {
 
     expect(vi.mocked(web.send).mock.calls[0][0].sequence).toBe(7)
   })
+
+  it('preserves system message identity and source context', async () => {
+    const feishu = output('feishu')
+    const manager = managerWith(feishu)
+    const systemMessage = {
+      ...message(),
+      role: 'system' as const
+    }
+
+    await manager.send(systemMessage, {
+      source: 'feishu',
+      sourceMessageId: 'om_1'
+    })
+
+    expect(vi.mocked(feishu.send).mock.calls[0]).toMatchObject([
+      {
+        id: systemMessage.id,
+        role: 'system'
+      },
+      {
+        source: 'feishu',
+        sourceMessageId: 'om_1'
+      }
+    ])
+  })
 })
 
 function managerWith(...outputs: ChannelOutput[]): ChannelOutputManager {
   const manager = new ChannelOutputManager(
-    {} as never,
     {} as never,
     {} as never,
     {} as never,

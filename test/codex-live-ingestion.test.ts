@@ -1,15 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import { CodexMessageStreamer } from '../src/component/agent/CodexMessageStreamer.js'
 import { KeyedSerialQueue } from '../src/component/KeyedSerialQueue.js'
-import { EventBus } from '../src/component/EventBus.js'
-import { AppEvent } from '../src/value/Event.js'
+import { ChannelOutputManager } from '../src/component/channelo/ChannelOutputManager.js'
 import { Message } from '../src/value/Message.js'
 import { Result } from '../src/value/Result.js'
 
 describe('Codex live ingestion', () => {
   it('does not lose concurrent completions from different turns in one thread', async () => {
     const sent = recordingMessages()
-    const streamer = new CodexMessageStreamer(sent.eventBus)
+    const streamer = new CodexMessageStreamer(sent.outputManager)
 
     await Promise.all(Array.from({ length: 5 }, (_, index) => streamer.complete({
       thread: { id: 'io-thread', name: 'Thread' },
@@ -32,7 +31,7 @@ describe('Codex live ingestion', () => {
 
   it('replays a duplicate completion with the same stable identity', async () => {
     const sent = recordingMessages()
-    const streamer = new CodexMessageStreamer(sent.eventBus)
+    const streamer = new CodexMessageStreamer(sent.outputManager)
     const thread = {
       thread: { id: 'io-thread', name: 'Thread' },
       agentThreadId: 'codex-thread',
@@ -111,7 +110,7 @@ describe('Codex live ingestion', () => {
 
   it('uses one identity for streaming, live completion, and snapshot replay', async () => {
     const sent = recordingMessages()
-    const streamer = new CodexMessageStreamer(sent.eventBus)
+    const streamer = new CodexMessageStreamer(sent.outputManager)
     const thread = {
       thread: { id: 'io-thread', name: 'Thread' },
       agentThreadId: 'codex-thread',
@@ -141,13 +140,14 @@ describe('Codex live ingestion', () => {
   })
 
   it('keeps a completed item retryable when output delivery fails', async () => {
-    const eventBus = new EventBus()
     let attempts = 0
-    eventBus.on(AppEvent.ChannelMessageDisplayRequested, async () => {
-      attempts += 1
-      return attempts === 1 ? Result.fail('temporarily unavailable') : Result.successVoid()
-    })
-    const streamer = new CodexMessageStreamer(eventBus)
+    const outputManager = {
+      sendAgent: async () => {
+        attempts += 1
+        return attempts === 1 ? Result.fail('temporarily unavailable') : Result.successVoid()
+      }
+    } as unknown as ChannelOutputManager
+    const streamer = new CodexMessageStreamer(outputManager)
     const thread = {
       thread: { id: 'io-thread', name: 'Thread' },
       agentThreadId: 'codex-thread',
@@ -159,9 +159,9 @@ describe('Codex live ingestion', () => {
     expect(attempts).toBe(2)
   })
 
-  it('stages item completion for Web and publishes externally only at turn completion', async () => {
+  it('stages a streaming revision and publishes completion at turn completion', async () => {
     const sent = recordingMessages()
-    const streamer = new CodexMessageStreamer(sent.eventBus)
+    const streamer = new CodexMessageStreamer(sent.outputManager)
     const thread = {
       thread: { id: 'io-thread', name: 'Thread' },
       agentThreadId: 'codex-thread',
@@ -177,7 +177,7 @@ describe('Codex live ingestion', () => {
 
   it('uses authoritative turn item order and clears only that turn', async () => {
     const sent = recordingMessages()
-    const streamer = new CodexMessageStreamer(sent.eventBus)
+    const streamer = new CodexMessageStreamer(sent.outputManager)
     const firstTurn = {
       thread: { id: 'io-thread', name: 'Thread' },
       agentThreadId: 'codex-thread',
@@ -200,13 +200,14 @@ describe('Codex live ingestion', () => {
   })
 })
 
-function recordingMessages(): { eventBus: EventBus, messages: Message[] } {
-  const eventBus = new EventBus()
+function recordingMessages(): { outputManager: ChannelOutputManager, messages: Message[] } {
   const messages: Message[] = []
-  eventBus.on(AppEvent.ChannelMessageDisplayRequested, async ({ message }) => {
-    messages.push(message)
-    await Promise.resolve()
-    return Result.successVoid()
-  })
-  return { eventBus, messages }
+  const outputManager = {
+    sendAgent: async (message: Message) => {
+      messages.push(message)
+      await Promise.resolve()
+      return Result.successVoid()
+    }
+  } as unknown as ChannelOutputManager
+  return { outputManager, messages }
 }

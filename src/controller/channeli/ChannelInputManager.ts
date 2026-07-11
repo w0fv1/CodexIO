@@ -1,10 +1,11 @@
 import { inject, injectable } from 'inversify'
 import { Configer, ConfigSubscription } from '../../component/Configer.js'
-import { EventBus } from '../../component/EventBus.js'
 import { Logger } from '../../component/Logger.js'
 import { MessageInbox } from '../../component/MessageInbox.js'
 import { ThreadRegistry } from '../../component/ThreadRegistry.js'
-import { AppEvent, ChannelInputReceiveResult } from '../../value/Event.js'
+import { ChannelOutputManager } from '../../component/channelo/ChannelOutputManager.js'
+import { AgentManager } from '../../component/agent/AgentManager.js'
+import { ChannelInputReceiveResult } from '../../value/Event.js'
 import { createMessage, deriveMessageId, deriveMessageRevision } from '../../value/Message.js'
 import { Result } from '../../value/Result.js'
 import { CommandExecutor } from '../CommandExecutor.js'
@@ -24,8 +25,9 @@ export class ChannelInputManager implements ChannelInputReceiver {
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
-    @inject(EventBus) private readonly eventBus: EventBus,
     @inject(ThreadRegistry) private readonly threadRegistry: ThreadRegistry,
+    @inject(ChannelOutputManager) private readonly outputManager: ChannelOutputManager,
+    @inject(AgentManager) private readonly agentManager: AgentManager,
     @inject(CommandExecutor) private readonly commandExecutor: CommandExecutor,
     @inject(WebChannelInput) web: ChannelInput,
     @inject(FeishuChannelInput) feishu: ChannelInput,
@@ -84,14 +86,12 @@ export class ChannelInputManager implements ChannelInputReceiver {
         text: input.text,
         files: input.files
       })
-      const sendResultList = await this.eventBus.emitAsync(AppEvent.ChannelMessageDisplayRequested, {
+      const displayed = await this.outputManager.sendUser(message, {
         source,
-        message,
         sourceMessageId
       })
-      const sendFailures = sendResultList.filter((item) => item.isFailed)
-      if (sendFailures.length > 0) {
-        return Result.fail(sendFailures.map((item) => item.message).join('\n'))
+      if (displayed.isFailed) {
+        return Result.fail(displayed.message)
       }
       const command = await this.commandExecutor.receive({
         source,
@@ -101,14 +101,13 @@ export class ChannelInputManager implements ChannelInputReceiver {
       if (command.isFailed || command.data?.consumed) {
         return command
       }
-      const resultList = await this.eventBus.emitAsync(AppEvent.ChannelMessageReceived, {
+      const received = await this.agentManager.receive({
         source,
         message,
         sourceMessageId
       })
-      const failures = resultList.filter((item) => item.isFailed)
-      if (failures.length > 0) {
-        return Result.fail(failures.map((item) => item.message).join('\n'))
+      if (received.isFailed) {
+        return Result.fail(received.message)
       }
       return Result.success({
         ioThreadId: message.thread.id

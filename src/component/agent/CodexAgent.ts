@@ -1,14 +1,12 @@
 import { inject, injectable } from 'inversify'
-import { AppEvent, ChannelMessageReceivedEvent } from '../../value/Event.js'
 import { createMessage, deriveMessageId, Message } from '../../value/Message.js'
 import { Result } from '../../value/Result.js'
 import { Configer } from '../Configer.js'
-import { EventBus } from '../EventBus.js'
 import { ThreadRegistry } from '../ThreadRegistry.js'
 import { Logger } from '../Logger.js'
 import { KeyedSerialQueue } from '../KeyedSerialQueue.js'
-import { Agent } from './Agent.js'
-import { ChannelOutputContext } from '../channelo/ChannelOutput.js'
+import { Agent, AgentInput } from './Agent.js'
+import { ChannelOutputManager } from '../channelo/ChannelOutputManager.js'
 import { CodexClient, CodexClientLoginEvent, CodexClientMessage, CodexClientThread, CodexThreadSnapshot } from './CodexClient.js'
 import { codexMessageId, CodexMessageStreamer } from './CodexMessageStreamer.js'
 
@@ -19,7 +17,7 @@ export class CodexAgent implements Agent {
   private loginIoThreadId?: string
   private readonly threadIdByIoThreadId = new Map<string, string>()
   private readonly ioThreadIdByThreadId = new Map<string, string>()
-  private readonly sourceByIoThreadId = new Map<string, ChannelMessageReceivedEvent['source']>()
+  private readonly sourceByIoThreadId = new Map<string, AgentInput['source']>()
   private readonly sourceMessageIdByIoThreadId = new Map<string, string>()
   private readonly lastOccurredAtByThreadId = new Map<string, number>()
   private readonly disposers: Array<() => void> = []
@@ -30,7 +28,7 @@ export class CodexAgent implements Agent {
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
-    @inject(EventBus) private readonly eventBus: EventBus,
+    @inject(ChannelOutputManager) private readonly outputManager: ChannelOutputManager,
     @inject(ThreadRegistry) private readonly threadRegistry: ThreadRegistry,
     @inject(CodexClient) private readonly client: CodexClient,
     @inject(CodexMessageStreamer) private readonly messageStreamer: CodexMessageStreamer
@@ -103,7 +101,7 @@ export class CodexAgent implements Agent {
     return startPromise
   }
 
-  async receive(event: ChannelMessageReceivedEvent): Promise<Result<void>> {
+  async receive(event: AgentInput): Promise<Result<void>> {
     const started = await this.start()
     if (started.isFailed) {
       return started
@@ -273,7 +271,7 @@ export class CodexAgent implements Agent {
         thread,
         role: 'agent',
         text: snapshotMessage.text
-      }), source, sourceMessageId, ['web'])
+      }), source, sourceMessageId)
       if (result.isFailed) {
         throw new Error(result.message)
       }
@@ -361,25 +359,19 @@ export class CodexAgent implements Agent {
 
   private async sendAgent(
     message: Message,
-    source?: ChannelMessageReceivedEvent['source'],
-    sourceMessageId?: string,
-    targets?: ChannelOutputContext['targets']
+    source?: AgentInput['source'],
+    sourceMessageId?: string
   ): Promise<Result<void>> {
-    const results = await this.eventBus.emitAsync(AppEvent.ChannelMessageDisplayRequested, {
+    const result = await this.outputManager.sendAgent(message, {
       source,
-      sourceMessageId,
-      targets,
-      message
+      sourceMessageId
     })
-    const failures = results.filter((result) => result.isFailed)
-    if (failures.length > 0) {
-      const failure = Result.fail<void>(failures.map((result) => result.message).join('\n'))
+    if (result.isFailed) {
       Logger.warn('codex agent output failed', {
-        message: failure.message
+        message: result.message
       })
-      return failure
     }
-    return Result.successVoid()
+    return result
   }
 
   private clearListeners(): void {

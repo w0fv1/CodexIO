@@ -1,8 +1,8 @@
 import { inject, injectable } from 'inversify'
-import { EventBus } from '../component/EventBus.js'
+import { ChannelOutputManager } from '../component/channelo/ChannelOutputManager.js'
 import { Logger } from '../component/Logger.js'
 import type { ChannelType, ChannelInputMessage } from './channeli/ChannelInput.js'
-import { AppEvent, ChannelInputReceiveResult } from '../value/Event.js'
+import { ChannelInputReceiveResult } from '../value/Event.js'
 import { createMessage, deriveMessageId, Message, MessageThread } from '../value/Message.js'
 import { Result } from '../value/Result.js'
 
@@ -63,7 +63,7 @@ export function parseCommandInput(text: string): ParsedInput {
 @injectable()
 export class CommandExecutor {
   constructor(
-    @inject(EventBus) private readonly eventBus: EventBus
+    @inject(ChannelOutputManager) private readonly outputManager: ChannelOutputManager
   ) {}
 
   async receive(input: CommandExecutorInput): Promise<Result<ChannelInputReceiveResult>> {
@@ -137,20 +137,14 @@ export class CommandExecutor {
     requestMessageId: string,
     sourceMessageId?: string
   ): Promise<Result<void>> {
-    const results = await this.eventBus.emitAsync(AppEvent.ChannelMessageDisplayRequested, {
+    return this.outputManager.send(createMessage({
+      id: deriveMessageId('command', requestMessageId),
+      thread,
+      role: 'system',
+      text
+    }), {
       source,
-      sourceMessageId,
-      message: createMessage({
-        id: deriveMessageId('command', requestMessageId),
-        thread,
-        role: 'system',
-        text
-      })
+      sourceMessageId
     })
-    const failures = results.filter((item) => item.isFailed)
-    if (failures.length > 0) {
-      return Result.fail(failures.map((item) => item.message).join('\n'))
-    }
-    return Result.successVoid()
   }
 }

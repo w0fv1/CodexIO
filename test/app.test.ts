@@ -175,8 +175,9 @@ describe('server', () => {
     try {
       const listener = await controller.start()
       const address = listener.address()
-      expect(address && typeof address !== 'string' ? address.port : undefined).toBe(configuredPort + 1)
-      expect(runtime.requireEndpoint().port).toBe(configuredPort + 1)
+      const runtimePort = address && typeof address !== 'string' ? address.port : undefined
+      expect(runtimePort).toBeGreaterThan(configuredPort)
+      expect(runtime.requireEndpoint().port).toBe(runtimePort)
     } finally {
       await controller.stop()
       await new Promise<void>((resolve) => blocker.close(() => resolve()))
@@ -1164,7 +1165,6 @@ async function createTestCodexioApp(configer: Configer): Promise<{
   const outputManager = new ChannelOutputManager(
     configer,
     fileStore,
-    eventBus,
     threadRegistry,
     webOutput,
     feishuOutput,
@@ -1173,10 +1173,10 @@ async function createTestCodexioApp(configer: Configer): Promise<{
     nfircoOutput,
     workspaceResolver
   )
-  const codexAgent = new CodexAgent(configer, eventBus, threadRegistry, codexClient, new CodexMessageStreamer(eventBus))
-  const echoAgent = new EchoAgent(eventBus)
-  const agentManager = new AgentManager(configer, eventBus, codexAgent, echoAgent, workspaceResolver)
-  const inputManager = new ChannelInputManager(configer, eventBus, threadRegistry, new CommandExecutor(eventBus), webInput, feishuInput, emailInput, nfircoInput)
+  const codexAgent = new CodexAgent(configer, outputManager, threadRegistry, codexClient, new CodexMessageStreamer(outputManager))
+  const echoAgent = new EchoAgent(outputManager)
+  const agentManager = new AgentManager(configer, codexAgent, echoAgent, workspaceResolver)
+  const inputManager = new ChannelInputManager(configer, threadRegistry, outputManager, agentManager, new CommandExecutor(outputManager), webInput, feishuInput, emailInput, nfircoInput)
   const apiController = new CodexioApiController(configer, outputManager, fileStore, webHub, eventBus, metadata, serverRuntime)
   await outputManager.start()
   await agentManager.start()

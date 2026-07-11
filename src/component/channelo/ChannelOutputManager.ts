@@ -3,13 +3,11 @@ import { basename, isAbsolute, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { Result } from '../../value/Result.js'
 import { createMessage, Message, MessageFile } from '../../value/Message.js'
-import { AppEvent, ChannelMessageDisplayRequestedEvent } from '../../value/Event.js'
 import { parseMarkdownAttachmentReferences } from '../../util/Markdown.js'
 import { ChannelOutput, ChannelOutputContext } from './ChannelOutput.js'
 import { FileStore } from '../FileStore.js'
 import { Logger } from '../Logger.js'
 import { Configer, ConfigSubscription } from '../Configer.js'
-import { EventBus } from '../EventBus.js'
 import { ThreadRegistry } from '../ThreadRegistry.js'
 import { ThreadWorkspaceResolver } from '../ThreadWorkspaceResolver.js'
 import { KeyedSerialQueue } from '../KeyedSerialQueue.js'
@@ -22,11 +20,6 @@ import { WebChannelOutput } from './WebChannelOutput.js'
 
 @injectable()
 export class ChannelOutputManager {
-  private readonly listener = (event: ChannelMessageDisplayRequestedEvent) => this.send(event.message, {
-    source: event.source,
-    sourceMessageId: event.sourceMessageId,
-    targets: event.targets
-  })
   private readonly availableOutputs: ChannelOutput[]
   private readonly outputs = new Map<string, ChannelOutput>()
   private readonly deliveryQueue = new KeyedSerialQueue()
@@ -37,7 +30,6 @@ export class ChannelOutputManager {
   constructor(
     @inject(Configer) private readonly configer: Configer,
     @inject(FileStore) private readonly fileStore: FileStore,
-    @inject(EventBus) private readonly eventBus: EventBus,
     @inject(ThreadRegistry) private readonly threadRegistry: ThreadRegistry,
     @inject(WebChannelOutput) web: ChannelOutput,
     @inject(FeishuChannelOutput) feishu: ChannelOutput,
@@ -60,7 +52,6 @@ export class ChannelOutputManager {
       return
     }
     this.started = true
-    this.eventBus.on(AppEvent.ChannelMessageDisplayRequested, this.listener)
     this.subscription = this.configer.subscribe('channelo', async () => {
       const applied = await this.applyConfig()
       if (applied.isFailed) {
@@ -80,7 +71,19 @@ export class ChannelOutputManager {
     if (message.role === 'agent') {
       return this.sendAgent(message, context)
     }
-    return this.sendSystem(message.text, message.thread.id)
+    if (message.text.trim().length === 0 && (!message.files || message.files.length === 0)) {
+      return Result.fail('text or file is required')
+    }
+    return this.broadcast(createMessage({
+      id: message.id,
+      occurredAt: message.occurredAt,
+      sequence: message.sequence,
+      status: message.status,
+      thread: message.thread,
+      role: 'system',
+      text: message.text,
+      files: message.files
+    }), context)
   }
 
   async sendUser(message: Message, context?: ChannelOutputContext): Promise<Result<void>>
@@ -108,8 +111,7 @@ export class ChannelOutputManager {
     })
     return this.broadcast(stored, {
       source: context?.source,
-      sourceMessageId: context?.sourceMessageId,
-      targets: context?.targets
+      sourceMessageId: context?.sourceMessageId
     })
   }
 
@@ -133,8 +135,7 @@ export class ChannelOutputManager {
     })
     return this.broadcast(stored, {
       source: context?.source,
-      sourceMessageId: context?.sourceMessageId,
-      targets: context?.targets
+      sourceMessageId: context?.sourceMessageId
     })
   }
 
@@ -154,14 +155,13 @@ export class ChannelOutputManager {
       role: 'system',
       text
     })
-    return this.broadcast(message)
+    return this.send(message)
   }
 
   async stop(): Promise<Result<void>> {
     const failures: string[] = []
     if (this.started) {
       this.started = false
-      this.eventBus.off(AppEvent.ChannelMessageDisplayRequested, this.listener)
     }
     this.subscription?.dispose()
     this.subscription = undefined
@@ -212,7 +212,7 @@ export class ChannelOutputManager {
     if (this.outputs.size === 0) {
       return Result.fail('channel output not found')
     }
-    const targetTypes = context?.targets ?? (message.status === 'streaming' ? ['web'] : undefined)
+    const targetTypes = message.status === 'streaming' ? ['web'] : undefined
     const outputs = [...this.outputs.values()].filter((output) => !targetTypes || targetTypes.includes(output.type))
     if (outputs.length === 0) {
       return Result.fail(targetTypes

@@ -5,16 +5,15 @@ import { delimiter, dirname, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Container } from 'inversify'
 import { ChannelOutputManager } from '../src/component/channelo/ChannelOutputManager.js'
-import { ChannelOutput } from '../src/component/channelo/ChannelOutput.js'
+import { ChannelOutput, ChannelOutputContext } from '../src/component/channelo/ChannelOutput.js'
 import { FeishuChannelOutput } from '../src/component/channelo/FeishuChannelOutput.js'
 import { WebChannelOutput } from '../src/component/channelo/WebChannelOutput.js'
 import { Configer } from '../src/component/Configer.js'
 import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
-import { EventBus } from '../src/component/EventBus.js'
 import { FileStore } from '../src/component/FileStore.js'
 import { ThreadRegistry } from '../src/component/ThreadRegistry.js'
 import { ThreadWorkspaceResolver } from '../src/component/ThreadWorkspaceResolver.js'
-import { Agent } from '../src/component/agent/Agent.js'
+import { Agent, AgentInput } from '../src/component/agent/Agent.js'
 import { AgentManager } from '../src/component/agent/AgentManager.js'
 import { CodexClient, CodexClientThread } from '../src/component/agent/CodexClient.js'
 import { CodexMessageStreamer } from '../src/component/agent/CodexMessageStreamer.js'
@@ -22,7 +21,6 @@ import { CodexAgent } from '../src/component/agent/CodexAgent.js'
 import { CommandExecutor, parseCommandInput } from '../src/controller/CommandExecutor.js'
 import { ChannelInput } from '../src/controller/channeli/ChannelInput.js'
 import { ChannelInputManager } from '../src/controller/channeli/ChannelInputManager.js'
-import { AppEvent, ChannelMessageReceivedEvent } from '../src/value/Event.js'
 import { configDescriptor, ConfigSchema, createDefaultConfig, parseCodexioConfig, validateCodexioConfig } from '../src/value/ConfigDefinition.js'
 import { Result } from '../src/value/Result.js'
 import { createMessage, Message } from '../src/value/Message.js'
@@ -587,8 +585,7 @@ describe('core', () => {
   })
 
   it('consumes test commands without sending them to the agent event', async () => {
-    const eventBus = new EventBus()
-    const executor = new CommandExecutor(eventBus)
+    const executor = new CommandExecutor(recordingMessageOutput())
     const result = await executor.receive({
       source: 'feishu',
       message: {
@@ -612,31 +609,29 @@ describe('core', () => {
   })
 
   it('publishes input messages to display and agent manager events', async () => {
-    const eventBus = new EventBus()
     const events: Array<{ type: string, source: string | undefined, sourceMessageId?: string, text: string }> = []
-    eventBus.on(AppEvent.ChannelMessageDisplayRequested, async (event) => {
+    const outputManager = recordingMessageOutput((message, context) => {
       events.push({
         type: 'display',
-        source: event.source,
-        sourceMessageId: event.sourceMessageId,
-        text: event.message.text
+        source: context?.source,
+        sourceMessageId: context?.sourceMessageId,
+        text: message.text
       })
-      return Result.successVoid()
     })
-    eventBus.on(AppEvent.ChannelMessageReceived, async (event) => {
+    const agentManager = recordingAgentManager((event) => {
       events.push({
         type: 'agent',
         source: event.source,
         sourceMessageId: event.sourceMessageId,
         text: event.message.text
       })
-      return Result.successVoid()
     })
     const manager = new ChannelInputManager(
       {} as Configer,
-      eventBus,
       createThreadRegistry(),
-      new CommandExecutor(eventBus),
+      outputManager,
+      agentManager,
+      new CommandExecutor(outputManager),
       disabledInput('web'),
       disabledInput('feishu'),
       disabledInput('email'),
@@ -689,12 +684,13 @@ describe('core', () => {
         }
       }
     } as unknown as Configer
-    const eventBus = new EventBus()
+    const outputManager = recordingMessageOutput()
     const manager = new ChannelInputManager(
       configer,
-      eventBus,
       createThreadRegistry(),
-      new CommandExecutor(eventBus),
+      outputManager,
+      recordingAgentManager(),
+      new CommandExecutor(outputManager),
       disabledInput('web'),
       disabledInput('feishu'),
       disabledInput('email'),
@@ -711,13 +707,14 @@ describe('core', () => {
   })
 
   it('rejects missing source message identity before resolving a thread', async () => {
-    const eventBus = new EventBus()
     const threadRegistry = createThreadRegistry()
+    const outputManager = recordingMessageOutput()
     const manager = new ChannelInputManager(
       {} as Configer,
-      eventBus,
       threadRegistry,
-      new CommandExecutor(eventBus),
+      outputManager,
+      recordingAgentManager(),
+      new CommandExecutor(outputManager),
       disabledInput('web'),
       disabledInput('feishu'),
       disabledInput('email'),
@@ -741,18 +738,17 @@ describe('core', () => {
   })
 
   it('scopes source message identities to their channel thread', async () => {
-    const eventBus = new EventBus()
     const messages: Message[] = []
-    eventBus.on(AppEvent.ChannelMessageDisplayRequested, async () => Result.successVoid())
-    eventBus.on(AppEvent.ChannelMessageReceived, async (event) => {
+    const outputManager = recordingMessageOutput()
+    const agentManager = recordingAgentManager((event) => {
       messages.push(event.message)
-      return Result.successVoid()
     })
     const manager = new ChannelInputManager(
       {} as Configer,
-      eventBus,
       createThreadRegistry(),
-      new CommandExecutor(eventBus),
+      outputManager,
+      agentManager,
+      new CommandExecutor(outputManager),
       disabledInput('web'),
       disabledInput('feishu'),
       disabledInput('email'),
@@ -1972,7 +1968,6 @@ describe('core', () => {
     let codexEnabled = false
     let subscriptionDisposed = false
     let configChanged: (() => Promise<void>) | undefined
-    const eventBus = new EventBus()
     const echo = createRecordingAgent('echo')
     const codex = createRecordingAgent('codex')
     const configer = {
@@ -1994,16 +1989,16 @@ describe('core', () => {
         }
       }
     } as unknown as Configer
-    const manager = new AgentManager(configer, eventBus, codex, echo, new ThreadWorkspaceResolver(configer, testMetadata))
+    const manager = new AgentManager(configer, codex, echo, new ThreadWorkspaceResolver(configer, testMetadata))
     await manager.start()
-    await eventBus.emitAsync(AppEvent.ChannelMessageReceived, channelMessage('first'))
+    await manager.receive(channelMessage('first'))
     expect(echo.messages.map((message) => message.text)).toEqual([
       'first'
     ])
     expect(codex.messages).toEqual([])
     codexEnabled = true
     await configChanged?.()
-    await eventBus.emitAsync(AppEvent.ChannelMessageReceived, channelMessage('second'))
+    await manager.receive(channelMessage('second'))
     expect(codex.messages.map((message) => message.text)).toEqual([
       'second'
     ])
@@ -2013,12 +2008,8 @@ describe('core', () => {
 
   it('buffers codex deltas until completion', async () => {
     const sent: Message[] = []
-    const eventBus = new EventBus()
-    eventBus.on(AppEvent.ChannelMessageDisplayRequested, async (event) => {
-      sent.push(event.message)
-      return Result.successVoid()
-    })
-    const streamer = new CodexMessageStreamer(eventBus)
+    const outputManager = recordingMessageOutput((message) => sent.push(message))
+    const streamer = new CodexMessageStreamer(outputManager)
     const thread = {
       thread: { id: 'io-thread', name: '新对话' },
       agentThreadId: 'codex-thread',
@@ -2045,20 +2036,16 @@ describe('core', () => {
 
   it('routes an unbound Codex thread through its thread id IoThread', async () => {
     const sent: Message[] = []
-    const eventBus = new EventBus()
-    eventBus.on(AppEvent.ChannelMessageDisplayRequested, async (event) => {
-      sent.push(event.message)
-      return Result.successVoid()
-    })
+    const outputManager = recordingMessageOutput((message) => sent.push(message))
     const configer = {
       get: async () => false
     } as unknown as Configer
     const agent = new CodexAgent(
       configer,
-      eventBus,
+      outputManager,
       createThreadRegistry(),
       {} as CodexClient,
-      new CodexMessageStreamer(eventBus)
+      new CodexMessageStreamer(outputManager)
     )
     const completedMessage = {
       thread: {
@@ -2089,19 +2076,15 @@ describe('core', () => {
 
   it('preserves known thread names and applies later Codex title updates', async () => {
     const sent: Message[] = []
-    const eventBus = new EventBus()
-    eventBus.on(AppEvent.ChannelMessageDisplayRequested, async (event) => {
-      sent.push(event.message)
-      return Result.successVoid()
-    })
+    const outputManager = recordingMessageOutput((message) => sent.push(message))
     const registry = createThreadRegistry()
     registry.ensure('io-thread', 'Original prompt')
     const agent = new CodexAgent(
       { get: async () => false } as unknown as Configer,
-      eventBus,
+      outputManager,
       registry,
       {} as CodexClient,
-      new CodexMessageStreamer(eventBus)
+      new CodexMessageStreamer(outputManager)
     )
     agent['bindThread']('io-thread', 'codex-thread')
     await agent['receiveCodexMessage']({
@@ -2130,12 +2113,7 @@ describe('core', () => {
 
   it('does not flush codex deltas at a double newline after a colon', async () => {
     const sent: Message[] = []
-    const eventBus = new EventBus()
-    eventBus.on(AppEvent.ChannelMessageDisplayRequested, async (event) => {
-      sent.push(event.message)
-      return Result.successVoid()
-    })
-    const streamer = new CodexMessageStreamer(eventBus)
+    const streamer = new CodexMessageStreamer(recordingMessageOutput((message) => sent.push(message)))
     const thread = {
       thread: { id: 'io-thread', name: '新对话' },
       agentThreadId: 'codex-thread',
@@ -2157,12 +2135,7 @@ describe('core', () => {
 
   it('flushes codex deltas at a double newline after a sentence end', async () => {
     const sent: Message[] = []
-    const eventBus = new EventBus()
-    eventBus.on(AppEvent.ChannelMessageDisplayRequested, async (event) => {
-      sent.push(event.message)
-      return Result.successVoid()
-    })
-    const streamer = new CodexMessageStreamer(eventBus)
+    const streamer = new CodexMessageStreamer(recordingMessageOutput((message) => sent.push(message)))
     const thread = {
       thread: { id: 'io-thread', name: '新对话' },
       agentThreadId: 'codex-thread',
@@ -2193,12 +2166,7 @@ describe('core', () => {
 
   it('flushes the remaining codex buffer on completion without sentence end punctuation', async () => {
     const sent: Message[] = []
-    const eventBus = new EventBus()
-    eventBus.on(AppEvent.ChannelMessageDisplayRequested, async (event) => {
-      sent.push(event.message)
-      return Result.successVoid()
-    })
-    const streamer = new CodexMessageStreamer(eventBus)
+    const streamer = new CodexMessageStreamer(recordingMessageOutput((message) => sent.push(message)))
     const thread = {
       thread: { id: 'io-thread', name: '新对话' },
       agentThreadId: 'codex-thread',
@@ -2218,16 +2186,14 @@ describe('core', () => {
 
   it('keeps the source channel and message id on codex stream output', async () => {
     const sent: Array<{ source: string | undefined, sourceMessageId?: string, message: Message }> = []
-    const eventBus = new EventBus()
-    eventBus.on(AppEvent.ChannelMessageDisplayRequested, async (event) => {
+    const outputManager = recordingMessageOutput((message, context) => {
       sent.push({
-        source: event.source,
-        sourceMessageId: event.sourceMessageId,
-        message: event.message
+        source: context?.source,
+        sourceMessageId: context?.sourceMessageId,
+        message
       })
-      return Result.successVoid()
     })
-    const streamer = new CodexMessageStreamer(eventBus)
+    const streamer = new CodexMessageStreamer(outputManager)
     await streamer.complete({
       thread: { id: 'io-thread', name: '新对话' },
       agentThreadId: 'codex-thread',
@@ -2255,12 +2221,7 @@ describe('core', () => {
 
   it('replays repeated Codex completion with one canonical identity', async () => {
     const sent: Message[] = []
-    const eventBus = new EventBus()
-    eventBus.on(AppEvent.ChannelMessageDisplayRequested, async (event) => {
-      sent.push(event.message)
-      return Result.successVoid()
-    })
-    const streamer = new CodexMessageStreamer(eventBus)
+    const streamer = new CodexMessageStreamer(recordingMessageOutput((message) => sent.push(message)))
     const thread = {
       thread: { id: 'io-thread', name: '新对话' },
       agentThreadId: 'codex-thread',
@@ -2321,7 +2282,6 @@ async function createRecordingChannelOutputManager(
   const manager = new ChannelOutputManager(
     configer,
     fileStore,
-    new EventBus(),
     threadRegistry,
     output('web'),
     output('feishu'),
@@ -2339,6 +2299,31 @@ function createThreadRegistry(): ThreadRegistry {
     rootPath: testMetadata.rootPath,
     dataPath: join(tmpdir(), `codexio-io-thread-${randomUUID()}`)
   }))
+}
+
+function recordingMessageOutput(
+  receive: (message: Message, context?: ChannelOutputContext) => void = () => undefined
+): ChannelOutputManager {
+  const send = async (message: Message, context?: ChannelOutputContext) => {
+    receive(message, context)
+    return Result.successVoid()
+  }
+  return {
+    send,
+    sendUser: send,
+    sendAgent: send
+  } as unknown as ChannelOutputManager
+}
+
+function recordingAgentManager(
+  receive: (input: AgentInput) => void = () => undefined
+): AgentManager {
+  return {
+    receive: async (input: AgentInput) => {
+      receive(input)
+      return Result.successVoid()
+    }
+  } as unknown as AgentManager
 }
 
 function disabledInput(type: ChannelInput['type']): ChannelInput {
@@ -2363,7 +2348,7 @@ function createRecordingAgent(type: string): Agent & { messages: Message[] } {
   }
 }
 
-function channelMessage(text: string): ChannelMessageReceivedEvent {
+function channelMessage(text: string): AgentInput {
   return {
     source: 'web',
     message: {

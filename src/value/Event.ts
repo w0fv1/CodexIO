@@ -1,17 +1,5 @@
-import { CodexioConfig } from './ConfigDefinition.js'
-import { Message } from './Message.js'
-import { Result } from './Result.js'
-
 export enum AppEvent {
-  StopRequested = 'app.stopRequested',
-  ChannelMessageReceived = 'channel.message.received',
-  ChannelMessageDisplayRequested = 'channel.message.displayRequested'
-}
-
-export type ChannelMessageReceivedEvent = {
-  source: keyof CodexioConfig['channeli']
-  message: Message
-  sourceMessageId?: string
+  StopRequested = 'app.stopRequested'
 }
 
 export type ChannelInputReceiveResult = {
@@ -19,15 +7,6 @@ export type ChannelInputReceiveResult = {
   ioThreadId?: string
 }
 
-export type ChannelMessageDisplayRequestedEvent = {
-  source?: keyof CodexioConfig['channeli']
-  message: Message
-  sourceMessageId?: string
-  targets?: Array<keyof CodexioConfig['channelo']>
-}
-
 export type AppEventMap = {
   [AppEvent.StopRequested]: () => void
-  [AppEvent.ChannelMessageReceived]: (event: ChannelMessageReceivedEvent) => Promise<Result<void>>
-  [AppEvent.ChannelMessageDisplayRequested]: (event: ChannelMessageDisplayRequestedEvent) => Promise<Result<void>>
 }

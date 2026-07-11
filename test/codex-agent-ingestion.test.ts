@@ -3,15 +3,15 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
-import { EventBus } from '../src/component/EventBus.js'
 import { ThreadRegistry } from '../src/component/ThreadRegistry.js'
 import { CodexAgent } from '../src/component/agent/CodexAgent.js'
 import { CodexClient, CodexClientMessage, CodexThreadSnapshot } from '../src/component/agent/CodexClient.js'
 import { CodexClientEventMap } from '../src/component/agent/codex/CodexProtocol.js'
 import { CodexMessageStreamer } from '../src/component/agent/CodexMessageStreamer.js'
 import { WebThreadManager } from '../src/component/channel/WebThreadManager.js'
-import { AppEvent, ChannelMessageDisplayRequestedEvent } from '../src/value/Event.js'
 import { Result } from '../src/value/Result.js'
+import { Message } from '../src/value/Message.js'
+import { ChannelOutputManager } from '../src/component/channelo/ChannelOutputManager.js'
 
 describe('Codex agent ingestion', () => {
   it('serializes the production live listener without losing concurrent completions', async () => {
@@ -33,7 +33,7 @@ describe('Codex agent ingestion', () => {
     await context.agent.stop()
   })
 
-  it('reconciles duplicate snapshots idempotently without sending history to external outputs', async () => {
+  it('delegates snapshots to the canonical output manager without channel overrides', async () => {
     const context = fixture()
     await context.agent.start()
     const snapshot: CodexThreadSnapshot = {
@@ -52,7 +52,7 @@ describe('Codex agent ingestion', () => {
 
     expect(context.web.snapshot().messages).toHaveLength(5)
     expect(context.events).toHaveLength(10)
-    expect(context.events.every((event) => event.targets?.length === 1 && event.targets[0] === 'web')).toBe(true)
+    expect(context.events.every((event) => event.context === undefined || !('targets' in event.context))).toBe(true)
     await context.agent.stop()
   })
 
@@ -81,26 +81,27 @@ function fixture(): {
   agent: CodexAgent
   client: RecordingCodexClient
   web: WebThreadManager
-  events: ChannelMessageDisplayRequestedEvent[]
+  events: Array<{ message: Message, context?: object }>
 } {
-  const eventBus = new EventBus()
   const registry = new ThreadRegistry(new CodexioMetadata({
     dataPath: join(tmpdir(), `codexio-agent-ingestion-${randomUUID()}`)
   }))
   const web = new WebThreadManager(registry)
-  const events: ChannelMessageDisplayRequestedEvent[] = []
-  eventBus.on(AppEvent.ChannelMessageDisplayRequested, async (event) => {
-    events.push(event)
-    web.appendMessage(event.message)
-    return Result.successVoid()
-  })
+  const events: Array<{ message: Message, context?: object }> = []
+  const outputManager = {
+    sendAgent: async (message: Message, context?: object) => {
+      events.push({ message, context })
+      web.appendMessage(message)
+      return Result.successVoid()
+    }
+  } as unknown as ChannelOutputManager
   const client = new RecordingCodexClient()
   const agent = new CodexAgent(
     { get: async () => false } as never,
-    eventBus,
+    outputManager,
     registry,
     client as unknown as CodexClient,
-    new CodexMessageStreamer(eventBus)
+    new CodexMessageStreamer(outputManager)
   )
   return { agent, client, web, events }
 }

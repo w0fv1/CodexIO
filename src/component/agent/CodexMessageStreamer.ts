@@ -1,14 +1,13 @@
 import { inject, injectable } from 'inversify'
-import { AppEvent, ChannelMessageDisplayRequestedEvent } from '../../value/Event.js'
-import { Result } from '../../value/Result.js'
 import { createMessage, deriveMessageId, MessageStatus, MessageThread } from '../../value/Message.js'
-import { EventBus } from '../EventBus.js'
+import { ChannelOutputContext } from '../channelo/ChannelOutput.js'
+import { ChannelOutputManager } from '../channelo/ChannelOutputManager.js'
 
 export type CodexStreamThread = {
   thread: MessageThread
   agentThreadId: string
   turnId: string
-  source?: ChannelMessageDisplayRequestedEvent['source']
+  source?: ChannelOutputContext['source']
   sourceMessageId?: string
   occurredAt?: number
   sequence?: number
@@ -34,7 +33,7 @@ export class CodexMessageStreamer {
   private readonly items = new Map<string, StreamItem>()
 
   constructor(
-    @inject(EventBus) private readonly eventBus: EventBus
+    @inject(ChannelOutputManager) private readonly outputManager: ChannelOutputManager
   ) {}
 
   async append(thread: CodexStreamThread, itemId: string, delta: string): Promise<void> {
@@ -137,20 +136,18 @@ export class CodexMessageStreamer {
       role: 'agent' as const,
       text
     }
-    const results = await this.eventBus.emitAsync(AppEvent.ChannelMessageDisplayRequested, {
+    const result = await this.outputManager.sendAgent(createMessage({
+      id: codexMessageId(thread.agentThreadId, thread.turnId, thread.itemId),
+      occurredAt: thread.occurredAt,
+      sequence: thread.sequence,
+      thread: thread.thread,
+      ...content
+    }), {
       source: thread.source,
-      sourceMessageId: thread.sourceMessageId,
-      message: createMessage({
-        id: codexMessageId(thread.agentThreadId, thread.turnId, thread.itemId),
-        occurredAt: thread.occurredAt,
-        sequence: thread.sequence,
-        thread: thread.thread,
-        ...content
-      })
+      sourceMessageId: thread.sourceMessageId
     })
-    const failures = results.filter((result): result is Result<void> => result.isFailed)
-    if (failures.length > 0) {
-      throw new Error(failures.map((failure) => failure.message).join('\n'))
+    if (result.isFailed) {
+      throw new Error(result.message)
     }
   }
 

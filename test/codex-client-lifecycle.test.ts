@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
-import { EventBus } from '../src/component/EventBus.js'
+import { ChannelOutputManager } from '../src/component/channelo/ChannelOutputManager.js'
 import { ThreadRegistry } from '../src/component/ThreadRegistry.js'
 import { CodexAgent } from '../src/component/agent/CodexAgent.js'
 import { CodexClient, CodexClientMessage } from '../src/component/agent/CodexClient.js'
@@ -331,13 +331,13 @@ describe('Codex agent lifecycle', () => {
     const metadata = new CodexioMetadata({
       dataPath: join(tmpdir(), `codexio-agent-lifecycle-${randomUUID()}`)
     })
-    const eventBus = new EventBus()
+    const outputManager = successfulOutputManager()
     const agent = new CodexAgent(
       { get: async () => false } as never,
-      eventBus,
+      outputManager,
       new ThreadRegistry(metadata),
       client as unknown as CodexClient,
-      new CodexMessageStreamer(eventBus)
+      new CodexMessageStreamer(outputManager)
     )
     const first = agent.receive(receivedEvent('one'))
     const second = agent.receive(receivedEvent('two'))
@@ -359,10 +359,10 @@ describe('Codex agent lifecycle', () => {
     })
     const agent = new CodexAgent(
       { get: async () => false } as never,
-      new EventBus(),
+      successfulOutputManager(),
       new ThreadRegistry(metadata),
       client as unknown as CodexClient,
-      new CodexMessageStreamer(new EventBus())
+      new CodexMessageStreamer(successfulOutputManager())
     )
 
     expect((await agent.receive(receivedEvent('one'))).isFailed).toBe(false)
@@ -371,6 +371,12 @@ describe('Codex agent lifecycle', () => {
     await agent.stop()
   })
 })
+
+function successfulOutputManager(): ChannelOutputManager {
+  return {
+    sendAgent: async () => Result.successVoid()
+  } as unknown as ChannelOutputManager
+}
 
 function createClient(options: {
   observe?: boolean

@@ -1,11 +1,9 @@
 import { inject, injectable } from 'inversify'
-import { AppEvent, ChannelMessageReceivedEvent } from '../../value/Event.js'
 import { Result } from '../../value/Result.js'
 import { Configer, ConfigSubscription } from '../Configer.js'
-import { EventBus } from '../EventBus.js'
 import { Logger } from '../Logger.js'
 import { ThreadWorkspaceResolver } from '../ThreadWorkspaceResolver.js'
-import { Agent } from './Agent.js'
+import { Agent, AgentInput } from './Agent.js'
 import { CodexAgent } from './CodexAgent.js'
 import { EchoAgent } from './EchoAgent.js'
 
@@ -13,14 +11,11 @@ export type AgentManagerStatus = 'idle' | 'online'
 
 @injectable()
 export class AgentManager {
-  private readonly listener = (event: ChannelMessageReceivedEvent) => this.receive(event)
   private statusValue: AgentManagerStatus = 'idle'
-  private started = false
   private subscription?: ConfigSubscription
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
-    @inject(EventBus) private readonly eventBus: EventBus,
     @inject(CodexAgent) private readonly codexAgent: Agent,
     @inject(EchoAgent) private readonly echoAgent: Agent,
     @inject(ThreadWorkspaceResolver) private readonly workspaceResolver: ThreadWorkspaceResolver
@@ -33,10 +28,6 @@ export class AgentManager {
   }
 
   async start(): Promise<Result<void>> {
-    if (!this.started) {
-      this.started = true
-      this.eventBus.on(AppEvent.ChannelMessageReceived, this.listener)
-    }
     if (!this.subscription) {
       this.subscription = this.configer.subscribe([
         'agents',
@@ -64,10 +55,6 @@ export class AgentManager {
   }
 
   async stop(): Promise<Result<void>> {
-    if (this.started) {
-      this.started = false
-      this.eventBus.off(AppEvent.ChannelMessageReceived, this.listener)
-    }
     this.subscription?.dispose()
     this.subscription = undefined
     const result = await this.stopAgents()
@@ -107,7 +94,7 @@ export class AgentManager {
     return Result.successVoid()
   }
 
-  private async receive(event: ChannelMessageReceivedEvent): Promise<Result<void>> {
+  async receive(event: AgentInput): Promise<Result<void>> {
     const started = await this.start()
     if (started.isFailed) {
       return started
