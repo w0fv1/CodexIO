@@ -1,103 +1,85 @@
 import { inject, injectable } from 'inversify'
 import { AppEvent, ChannelMessageDisplayRequestedEvent } from '../../value/Event.js'
 import { Result } from '../../value/Result.js'
+import { createMessage, deriveMessageId, MessageStatus, MessageThread } from '../../value/Message.js'
 import { EventBus } from '../EventBus.js'
-import { Logger } from '../Logger.js'
 
 export type CodexStreamThread = {
-  ioThreadId: string
+  thread: MessageThread
   agentThreadId: string
+  turnId: string
   source?: ChannelMessageDisplayRequestedEvent['source']
   sourceMessageId?: string
+  occurredAt?: number
+  sequence?: number
 }
 
 export type CodexStreamMessage = {
   itemId: string
   text: string
+  sequence?: number
 }
 
 type StreamItem = CodexStreamThread & {
   itemId: string
-  buffer: string
+  text: string
+  publishedLength: number
+  occurredAt: number
   sending: Promise<void>
-  receivedDelta: boolean
   cancelled: boolean
 }
 
 @injectable()
 export class CodexMessageStreamer {
   private readonly items = new Map<string, StreamItem>()
-  private readonly completedItems = new Set<string>()
 
   constructor(
     @inject(EventBus) private readonly eventBus: EventBus
   ) {}
 
   async append(thread: CodexStreamThread, itemId: string, delta: string): Promise<void> {
-    if (this.completedItems.has(this.completedKey(thread.ioThreadId, itemId))) {
-      Logger.warn('codex stream delta ignored after item completed', {
-        ioThreadId: thread.ioThreadId,
-        itemId,
-        length: delta.length
-      })
-      return
-    }
     const item = this.getItem(thread, itemId)
-    item.receivedDelta = true
-    item.buffer += delta
+    item.text += delta
     await this.flushCompletedSegments(item)
   }
 
   async complete(thread: CodexStreamThread, messages: CodexStreamMessage[]): Promise<void> {
-    const activeThreadItems = [...this.items.values()].filter((item) => item.ioThreadId === thread.ioThreadId)
-    const hasCompletedThreadItem = [...this.completedItems].some((key) => key.startsWith(`${thread.ioThreadId}\u0000`))
-    if (messages.length > 0 && activeThreadItems.length === 0 && hasCompletedThreadItem) {
-      this.clearCompletedThreadItems(thread.ioThreadId)
-      return
+    for (const [sequence, message] of messages.entries()) {
+      await this.completeItem({
+        ...thread,
+        sequence: message.sequence ?? sequence
+      }, message.itemId, message.text)
     }
-    const completedItemIds = new Set<string>()
-    for (const message of messages) {
-      const key = this.completedKey(thread.ioThreadId, message.itemId)
-      if (this.completedItems.has(key)) {
-        continue
-      }
-      const item = this.getCompletedItem(thread, message.itemId)
-      if (!item.receivedDelta && item.buffer.length === 0) {
-        item.buffer = message.text
-      }
-      await this.flushRemaining(item)
-      completedItemIds.add(item.itemId)
-      this.completedItems.add(key)
-      this.items.delete(this.itemKey(item.agentThreadId, item.itemId))
-    }
-    for (const item of [...this.items.values()]) {
-      if (item.ioThreadId === thread.ioThreadId && !completedItemIds.has(item.itemId)) {
-        await this.flushRemaining(item)
-        this.completedItems.add(this.completedKey(item.ioThreadId, item.itemId))
-        this.items.delete(this.itemKey(item.agentThreadId, item.itemId))
-      }
-    }
-    this.clearCompletedThreadItems(thread.ioThreadId)
+    this.clearTurn(thread.agentThreadId, thread.turnId)
+  }
+
+  async stageItem(thread: CodexStreamThread, itemId: string, text: string): Promise<void> {
+    const item = this.getItem(thread, itemId)
+    item.sequence = thread.sequence ?? item.sequence
+    item.text = text
+    await this.publish(item, item.text, 'streaming')
   }
 
   async completeItem(thread: CodexStreamThread, itemId: string, text?: string): Promise<void> {
-    const item = this.getCompletedItem(thread, itemId)
-    if (!item.receivedDelta && item.buffer.length === 0 && text !== undefined) {
-      item.buffer = text
+    const item = this.getItem(thread, itemId)
+    item.sequence = thread.sequence ?? item.sequence
+    if (text !== undefined) {
+      item.text = text
     }
-    await this.flushRemaining(item)
-    this.completedItems.add(this.completedKey(item.ioThreadId, item.itemId))
-    this.items.delete(this.itemKey(item.agentThreadId, item.itemId))
+    await this.publish(item, item.text, 'completed')
+    const key = this.itemKey(thread, itemId)
+    if (this.items.get(key) === item) {
+      this.items.delete(key)
+    }
   }
 
-  clearThread(ioThreadId: string): void {
+  clearTurn(agentThreadId: string, turnId: string): void {
     for (const [key, item] of this.items.entries()) {
-      if (item.ioThreadId === ioThreadId) {
+      if (item.agentThreadId === agentThreadId && item.turnId === turnId) {
         item.cancelled = true
         this.items.delete(key)
       }
     }
-    this.clearCompletedThreadItems(ioThreadId)
   }
 
   clear(): void {
@@ -105,11 +87,10 @@ export class CodexMessageStreamer {
       item.cancelled = true
     }
     this.items.clear()
-    this.completedItems.clear()
   }
 
   private getItem(thread: CodexStreamThread, itemId: string): StreamItem {
-    const key = this.itemKey(thread.agentThreadId, itemId)
+    const key = this.itemKey(thread, itemId)
     const existing = this.items.get(key)
     if (existing) {
       return existing
@@ -117,9 +98,11 @@ export class CodexMessageStreamer {
     const item: StreamItem = {
       ...thread,
       itemId,
-      buffer: '',
+      text: '',
+      publishedLength: 0,
+      occurredAt: thread.occurredAt ?? Date.now(),
+      sequence: thread.sequence ?? 0,
       sending: Promise.resolve(),
-      receivedDelta: false,
       cancelled: false
     }
     this.items.set(key, item)
@@ -127,83 +110,57 @@ export class CodexMessageStreamer {
   }
 
   private async flushCompletedSegments(item: StreamItem): Promise<void> {
-    let boundary = findSentenceSegmentBoundary(item.buffer)
+    let boundary = findSentenceSegmentBoundary(item.text.slice(item.publishedLength))
     while (boundary > 0) {
-      const segment = item.buffer.slice(0, boundary)
-      item.buffer = item.buffer.slice(boundary).trimStart()
-      await this.queueSend(item, segment)
-      boundary = findSentenceSegmentBoundary(item.buffer)
+      item.publishedLength += boundary
+      await this.publish(item, item.text.slice(0, item.publishedLength), 'streaming')
+      boundary = findSentenceSegmentBoundary(item.text.slice(item.publishedLength))
     }
   }
 
-  private async flushRemaining(item: StreamItem): Promise<void> {
-    await item.sending
-    const segment = item.buffer
-    item.buffer = ''
-    await this.queueSend(item, segment)
-  }
-
-  private async queueSend(item: StreamItem, text: string): Promise<void> {
-    const segment = text.trim()
-    if (segment.length === 0) {
+  private async publish(item: StreamItem, text: string, status: MessageStatus): Promise<void> {
+    const content = text.trim()
+    if (content.length === 0) {
       return
     }
-    item.sending = item.sending.then(() => this.send(item, segment))
-    await item.sending
+    const operation = item.sending.then(() => this.send(item, content, status))
+    item.sending = operation.then(() => undefined, () => undefined)
+    await operation
   }
 
-  private async send(thread: CodexStreamThread, text: string): Promise<void> {
-    if ('cancelled' in thread && thread.cancelled) {
+  private async send(thread: StreamItem, text: string, status: MessageStatus): Promise<void> {
+    if (thread.cancelled) {
       return
     }
-    const segment = text.trim()
-    if (segment.length === 0) {
-      return
+    const content = {
+      status,
+      role: 'agent' as const,
+      text
     }
     const results = await this.eventBus.emitAsync(AppEvent.ChannelMessageDisplayRequested, {
       source: thread.source,
       sourceMessageId: thread.sourceMessageId,
-      message: {
-        ioThreadId: thread.ioThreadId,
-        role: 'agent',
-        text: segment
-      }
+      message: createMessage({
+        id: codexMessageId(thread.agentThreadId, thread.turnId, thread.itemId),
+        occurredAt: thread.occurredAt,
+        sequence: thread.sequence,
+        thread: thread.thread,
+        ...content
+      })
     })
     const failures = results.filter((result): result is Result<void> => result.isFailed)
-    for (const failure of failures) {
-      Logger.warn('codex agent output failed', {
-        message: failure.message
-      })
+    if (failures.length > 0) {
+      throw new Error(failures.map((failure) => failure.message).join('\n'))
     }
   }
 
-  private itemKey(agentThreadId: string, itemId: string): string {
-    return `${agentThreadId}:${itemId}`
+  private itemKey(thread: CodexStreamThread, itemId: string): string {
+    return `${thread.agentThreadId}\u0000${thread.turnId}\u0000${itemId}`
   }
+}
 
-  private getCompletedItem(thread: CodexStreamThread, itemId: string): StreamItem {
-    const existing = this.items.get(this.itemKey(thread.agentThreadId, itemId))
-    if (existing) {
-      return existing
-    }
-    const threadItems = [...this.items.values()].filter((item) => item.ioThreadId === thread.ioThreadId)
-    if (threadItems.length === 1) {
-      return threadItems[0]
-    }
-    return this.getItem(thread, itemId)
-  }
-
-  private completedKey(ioThreadId: string, itemId: string): string {
-    return `${ioThreadId}\u0000${itemId}`
-  }
-
-  private clearCompletedThreadItems(ioThreadId: string): void {
-    for (const key of [...this.completedItems]) {
-      if (key.startsWith(`${ioThreadId}\u0000`)) {
-        this.completedItems.delete(key)
-      }
-    }
-  }
+export function codexMessageId(agentThreadId: string, turnId: string, itemId: string): string {
+  return deriveMessageId('codex', agentThreadId, turnId, itemId)
 }
 
 function findSentenceSegmentBoundary(text: string): number {

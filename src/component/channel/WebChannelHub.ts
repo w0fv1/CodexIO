@@ -12,6 +12,7 @@ import { WebThreadManager } from './WebThreadManager.js'
 
 const WebSocketInputSchema = z.object({
   webThreadId: z.string().min(1),
+  sourceMessageId: z.string().min(1),
   text: z.string().default(''),
   files: z.array(z.string()).default([])
 })
@@ -37,6 +38,9 @@ export class WebChannelHub {
         event: 'threads',
         threads
       })
+    })
+    this.webThreadManager.on('message', (message) => {
+      this.broadcast(message)
     })
   }
 
@@ -170,6 +174,7 @@ export class WebChannelHub {
           source: 'web',
           id: webThreadId
         },
+        sourceMessageId: parsed.data.sourceMessageId,
         text,
         files
       })
@@ -193,8 +198,7 @@ export class WebChannelHub {
   }
 
   send(message: Message, webThreadId?: string): Result<void> {
-    const data = this.webThreadManager.appendMessage(message, webThreadId)
-    this.broadcast(data)
+    this.webThreadManager.appendMessage(message, webThreadId)
     return Result.successVoid()
   }
 

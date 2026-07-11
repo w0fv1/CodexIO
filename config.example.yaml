@@ -1,5 +1,9 @@
 app:
   id: ''
+  startAtLogin: false
+  workspace:
+    path: workspace
+    perIoThread: false
 server:
   host: 127.0.0.1
   port: 8787
@@ -24,11 +28,10 @@ agents:
     enabled: false
     bundled: false
     command: codex
-    developerInstructions: ''
     requestTimeoutSeconds: 120
-workspace:
-  path: workspace
-  perIoThread: false
+    observe:
+      enabled: false
+      intervalSeconds: 1
 channeli:
   web:
     enabled: true

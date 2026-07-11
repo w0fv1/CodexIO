@@ -16,7 +16,8 @@ import { CodexioApiController } from './controller/CodexioApiController.js'
 import { EventBus } from './component/EventBus.js'
 import { AppEvent } from './value/Event.js'
 import { AgentManager } from './component/agent/AgentManager.js'
-import { IoThreadIdManager } from './component/IoThreadIdManager.js'
+import { ThreadRegistry } from './component/ThreadRegistry.js'
+import { DesktopIntegration } from './component/desktop/DesktopIntegration.js'
 
 @injectable()
 export class CodexioApplication {
@@ -31,7 +32,8 @@ export class CodexioApplication {
     @inject(CodexioApiController) private readonly apiController: CodexioApiController,
     @inject(EventBus) private readonly eventBus: EventBus,
     @inject(AgentManager) private readonly agentManager: AgentManager,
-    @inject(IoThreadIdManager) private readonly ioThreadIdManager: IoThreadIdManager
+    @inject(ThreadRegistry) private readonly threadRegistry: ThreadRegistry,
+    @inject(DesktopIntegration) private readonly desktopIntegration: DesktopIntegration
   ) {
     this.eventBus.on(AppEvent.StopRequested, () => {
       void this.stopAndExit(0)
@@ -42,6 +44,7 @@ export class CodexioApplication {
     await this.configer.init(false)
     await applyRuntimeConfig(this.configer, process.argv)
     await this.configer.validate()
+    await this.desktopIntegration.start()
     Logger.configure({
       logDir: this.codexioMetadata.logPath
     })
@@ -50,7 +53,7 @@ export class CodexioApplication {
       Logger.info('old log files cleaned', cleanedLogs)
     }
     try {
-      await this.ioThreadIdManager.init()
+      await this.threadRegistry.init()
       await this.apiController.start()
       await this.outputManager.start()
       const agentStarted = await this.agentManager.start()
@@ -99,7 +102,7 @@ export class CodexioApplication {
     if (outputStopped.isFailed) {
       Logger.error('channel output stop failed', new Error(outputStopped.message))
     }
-    await this.ioThreadIdManager.flush().catch((error) => {
+    await this.threadRegistry.flush().catch((error) => {
       Logger.error('ioThread state flush failed', error)
     })
     await rm(this.codexioMetadata.serverStatePath, {

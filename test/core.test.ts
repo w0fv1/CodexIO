@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { Container } from 'inversify'
 import { ChannelOutputManager } from '../src/component/channelo/ChannelOutputManager.js'
 import { ChannelOutput } from '../src/component/channelo/ChannelOutput.js'
 import { FeishuChannelOutput } from '../src/component/channelo/FeishuChannelOutput.js'
@@ -11,25 +12,30 @@ import { Configer } from '../src/component/Configer.js'
 import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
 import { EventBus } from '../src/component/EventBus.js'
 import { FileStore } from '../src/component/FileStore.js'
-import { IoThreadIdManager } from '../src/component/IoThreadIdManager.js'
+import { ThreadRegistry } from '../src/component/ThreadRegistry.js'
 import { ThreadWorkspaceResolver } from '../src/component/ThreadWorkspaceResolver.js'
 import { Agent } from '../src/component/agent/Agent.js'
 import { AgentManager } from '../src/component/agent/AgentManager.js'
 import { CodexClient, CodexClientThread } from '../src/component/agent/CodexClient.js'
 import { CodexMessageStreamer } from '../src/component/agent/CodexMessageStreamer.js'
+import { CodexAgent } from '../src/component/agent/CodexAgent.js'
 import { CommandExecutor, parseCommandInput } from '../src/controller/CommandExecutor.js'
 import { ChannelInput } from '../src/controller/channeli/ChannelInput.js'
 import { ChannelInputManager } from '../src/controller/channeli/ChannelInputManager.js'
 import { AppEvent, ChannelMessageReceivedEvent } from '../src/value/Event.js'
-import { ConfigSchema, createDefaultConfig, parseCodexioConfig, validateCodexioConfig } from '../src/value/ConfigDefinition.js'
+import { configDescriptor, ConfigSchema, createDefaultConfig, parseCodexioConfig, validateCodexioConfig } from '../src/value/ConfigDefinition.js'
 import { Result } from '../src/value/Result.js'
-import type { Message } from '../src/value/Message.js'
+import { createMessage, Message } from '../src/value/Message.js'
 import { shouldReceiveFeishuMessage, shouldReceiveFeishuSender } from '../src/value/FeishuMessage.js'
 import { parseMarkdownAttachmentReferences, renderMarkdownHtml } from '../src/util/Markdown.js'
 import { resolveUserPath } from '../src/util/Path.js'
 import { parseNfircoThreadSocketEvent } from '../src/component/channel/NfircoThreadClient.js'
 import { WebThreadManager } from '../src/component/channel/WebThreadManager.js'
 import { applyRuntimeConfig } from '../src/CodexioApplication.js'
+import { LoginItemManager } from '../src/component/desktop/LoginItemManager.js'
+import { DesktopIntegration } from '../src/component/desktop/DesktopIntegration.js'
+import { renderConfigTemplate } from '../src/value/ConfigTemplate.js'
+import { CodexThreadObserver } from '../src/component/agent/codex/CodexThreadObserver.js'
 
 const testMetadata = new CodexioMetadata()
 
@@ -38,15 +44,20 @@ function createTestCodexClient(configer: Configer, metadata = testMetadata): Cod
 }
 
 describe('core', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
   it('creates channel-only default config', () => {
     const config = createDefaultConfig()
     expect(config.app.id).toBe('')
+    expect(config.app.startAtLogin).toBe(false)
     expect(config.server.host).toBe('127.0.0.1')
     expect(config.agents.instruction).toContain('Markdown reference')
     expect(config.agents.instruction).toContain('previews without a file path')
     expect(config.agents.echo.enabled).toBe(true)
     expect(config.agents.codex.bundled).toBe(true)
-    expect(config.workspace.path).toBe('')
+    expect(config.agents.codex.observe.enabled).toBe(false)
+    expect(config.app.workspace.path).toBe('workspace')
     expect(config.proxy.host).toBe('127.0.0.1')
     expect(config.proxy.noProxy).toBe('')
     expect(config.channeli.web?.enabled).toBe(true)
@@ -57,12 +68,364 @@ describe('core', () => {
     expect(config.channelo.web?.enabled).toBe(true)
   })
 
+  it('describes config groups by stable paths', () => {
+    const feishuInput = configDescriptor.groups.find((group) => group.path === 'channeli.feishu')
+    expect(feishuInput).toEqual({
+      path: 'channeli.feishu',
+      title: 'Feishu Input',
+      description: '在已经引入 Codexio 的飞书群聊中，或与 Codexio 私聊时，输入 $bind ${app.id} 即可在飞书中绑定 Codexio。'
+    })
+    expect(configDescriptor.fields.find((field) => field.path === 'channeli.feishu.enabled')?.groupPath).toBe('channeli.feishu')
+  })
+
+  it('renders config references without interpreting markup', () => {
+    expect(renderConfigTemplate('绑定 $bind ${app.id} 到 ${server.host}', {
+      app: {
+        id: '<script>alert(1)</script>'
+      },
+      server: {
+        host: '127.0.0.1'
+      }
+    })).toBe('绑定 $bind <script>alert(1)</script> 到 127.0.0.1')
+    expect(renderConfigTemplate('保留 ${missing.value}', {})).toBe('保留 ${missing.value}')
+  })
+
+  it('applies login item changes only for packaged Windows desktop builds', () => {
+    const calls: unknown[] = []
+    const loginItems = new LoginItemManager({
+      setLoginItemSettings: (settings) => calls.push(settings)
+    }, true, 'win32', 'C:\\Program Files\\Codexio\\Codexio.exe')
+    loginItems.apply(true)
+    loginItems.apply(false)
+    expect(calls).toEqual([
+      {
+        openAtLogin: true,
+        path: 'C:\\Program Files\\Codexio\\Codexio.exe'
+      },
+      {
+        openAtLogin: false,
+        path: 'C:\\Program Files\\Codexio\\Codexio.exe'
+      }
+    ])
+  })
+
+  it('does not register development Electron as a login item', () => {
+    const calls: unknown[] = []
+    const loginItems = new LoginItemManager({
+      setLoginItemSettings: (settings) => calls.push(settings)
+    }, false, 'win32', 'C:\\project\\node_modules\\electron.exe')
+    loginItems.apply(true)
+    expect(calls).toEqual([])
+  })
+
+  it('resolves desktop integration through the application container', () => {
+    const container = new Container({
+      autobind: true,
+      defaultScope: 'Singleton'
+    })
+    const configer = {} as Configer
+    container.bind(Configer).toConstantValue(configer)
+    const integration = container.get(DesktopIntegration)
+    expect(Reflect.get(integration, 'configer')).toBe(configer)
+  })
+
+  it('observes only new completed VS Code agent replies after startup', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-11T00:00:00Z'))
+    const baselineCompletedAt = Math.floor(Date.now() / 1000)
+    let threads = [{
+      id: 'vscode-thread',
+      cwd: 'C:\\repo',
+      updatedAt: baselineCompletedAt
+    }]
+    let turns = [{
+      id: 'old-turn',
+      status: 'completed',
+      completedAt: baselineCompletedAt - 1,
+      items: [{
+        id: 'old-agent',
+        type: 'agentMessage',
+        text: 'old reply'
+      }]
+    }]
+    const snapshots: unknown[] = []
+    const diagnostics: Array<{ event: string, data: Record<string, unknown> }> = []
+    const request = vi.fn(async (method: string) => {
+      if (method === 'thread/list') {
+        return {
+          data: threads,
+          nextCursor: null
+        }
+      }
+      if (method === 'thread/read') {
+        return {
+          thread: {
+            id: 'vscode-thread',
+            name: 'VS Code project',
+            turns
+          }
+        }
+      }
+      throw new Error(method)
+    })
+    const observer = new CodexThreadObserver({ request }, {
+      intervalMs: 1000
+    }, async (snapshot) => {
+      snapshots.push(snapshot)
+    }, undefined, (diagnostic) => diagnostics.push(diagnostic))
+    await observer.start()
+    expect(snapshots).toEqual([])
+    expect(request).not.toHaveBeenCalledWith('thread/read', expect.anything())
+    expect(request).toHaveBeenCalledWith('thread/list', expect.not.objectContaining({
+      cwd: expect.anything()
+    }))
+    turns = [
+      ...turns,
+      {
+        id: 'new-turn',
+        status: 'completed',
+        completedAt: baselineCompletedAt + 1,
+        items: [
+          {
+            id: 'new-user',
+            type: 'userMessage',
+            text: 'new prompt'
+          },
+          {
+            id: 'new-agent',
+            type: 'agentMessage',
+            text: 'new reply'
+          }
+        ]
+      }
+    ]
+    threads = [{
+      ...threads[0],
+      updatedAt: baselineCompletedAt + 1
+    }]
+    await observer['poll']()
+    vi.setSystemTime(new Date('2026-07-11T00:00:02Z'))
+    await observer['poll']()
+    expect(snapshots).toEqual([{
+      thread: {
+        id: 'vscode-thread',
+        name: 'VS Code project'
+      },
+      messages: [{
+        turnId: 'new-turn',
+        itemId: 'new-agent',
+        role: 'assistant',
+        text: 'new reply',
+        completedAt: baselineCompletedAt + 1,
+        sequence: 2
+      }]
+    }])
+    expect(diagnostics).toEqual(expect.arrayContaining([
+      {
+        event: 'baselineEstablished',
+        data: expect.objectContaining({
+          threadCount: 1,
+          intervalMs: 1000
+        })
+      },
+      {
+        event: 'threadRead',
+        data: expect.objectContaining({
+          threadId: 'vscode-thread',
+          turnCount: 2,
+          completedTurnCount: 2,
+          agentMessageCount: 2,
+          snapshotMessageCount: 1
+        })
+      },
+      {
+        event: 'snapshotEmitted',
+        data: expect.objectContaining({
+          threadId: 'vscode-thread',
+          messageCount: 1
+        })
+      }
+    ]))
+    await observer['poll']()
+    expect(snapshots).toHaveLength(1)
+    observer.stop()
+  })
+
+  it('does not observe threads created by Codexio', async () => {
+    const messages: unknown[] = []
+    const request = vi.fn(async (method: string) => {
+      if (method === 'thread/list') {
+        return {
+          data: [{
+            id: 'codexio-thread',
+            cwd: 'C:\\repo',
+            updatedAt: 2
+          }],
+          nextCursor: null
+        }
+      }
+      if (method === 'thread/read') {
+        throw new Error('ignored thread must not be read')
+      }
+      throw new Error(method)
+    })
+    const observer = new CodexThreadObserver({ request }, {
+      intervalMs: 1000
+    }, async (message) => {
+      messages.push(message)
+    })
+    observer.ignoreThread('codexio-thread')
+    await observer.start()
+    await observer['poll']()
+    expect(messages).toEqual([])
+    expect(request).not.toHaveBeenCalledWith('thread/read', expect.anything())
+    observer.stop()
+  })
+
+  it('re-emits a turn that changes from interrupted to completed', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-11T00:00:00Z'))
+    const completedAt = Math.floor(Date.now() / 1000) + 1
+    let updatedAt = completedAt - 1
+    let status = 'interrupted'
+    const messages: unknown[] = []
+    const observer = new CodexThreadObserver({
+      request: async (method: string) => {
+        if (method === 'thread/list') {
+          return {
+            data: [{ id: 'vscode-thread', updatedAt }],
+            nextCursor: null
+          }
+        }
+        if (method === 'thread/read') {
+          return {
+            thread: {
+              id: 'vscode-thread',
+              name: 'VS Code thread',
+              turns: [{
+                id: 'turn',
+                status,
+                ...(status === 'completed' ? { completedAt } : {}),
+                items: status === 'completed'
+                  ? [{ id: 'agent-message', type: 'agentMessage', text: 'reply' }]
+                  : []
+              }]
+            }
+          }
+        }
+        throw new Error(method)
+      }
+    }, {
+      intervalMs: 1000
+    }, async (message) => {
+      messages.push(message)
+    })
+    await observer.start()
+    updatedAt = completedAt
+    await observer['poll']()
+    vi.setSystemTime(new Date('2026-07-11T00:00:02Z'))
+    await observer['poll']()
+    expect(messages).toEqual([])
+    status = 'completed'
+    updatedAt = completedAt + 1
+    await observer['poll']()
+    vi.setSystemTime(new Date('2026-07-11T00:00:04Z'))
+    await observer['poll']()
+    updatedAt = completedAt + 2
+    await observer['poll']()
+    vi.setSystemTime(new Date('2026-07-11T00:00:06Z'))
+    await observer['poll']()
+    expect(messages).toHaveLength(2)
+    expect(messages).toMatchObject([
+      { messages: [{ turnId: 'turn', itemId: 'agent-message' }] },
+      { messages: [{ turnId: 'turn', itemId: 'agent-message' }] }
+    ])
+    observer.stop()
+  })
+
+  it('retries a VS Code reply after a transient thread read failure', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-11T00:00:00Z'))
+    const completedAt = Math.floor(Date.now() / 1000) + 1
+    let listed = false
+    let readAttempts = 0
+    const messages: unknown[] = []
+    const errors: Error[] = []
+    const request = vi.fn(async (method: string) => {
+      if (method === 'thread/list') {
+        return {
+          data: listed
+            ? [{ id: 'vscode-thread', cwd: 'C:\\repo', updatedAt: completedAt }]
+            : [],
+          nextCursor: null
+        }
+      }
+      if (method === 'thread/read') {
+        readAttempts += 1
+        if (readAttempts === 1) {
+          throw new Error('temporary read failure')
+        }
+        return {
+          thread: {
+            id: 'vscode-thread',
+            name: null,
+            turns: [{
+              id: 'new-turn',
+              status: 'completed',
+              completedAt,
+              items: [{ id: 'new-agent', type: 'agentMessage', text: 'new reply' }]
+            }]
+          }
+        }
+      }
+      throw new Error(method)
+    })
+    const observer = new CodexThreadObserver({ request }, {
+      intervalMs: 1000
+    }, async (message) => {
+      messages.push(message)
+    }, (error) => {
+      errors.push(error)
+    })
+    await observer.start()
+    listed = true
+    await expect(observer['poll']()).resolves.toBeUndefined()
+    vi.setSystemTime(new Date('2026-07-11T00:00:02Z'))
+    await expect(observer['poll']()).resolves.toBeUndefined()
+    expect(errors.map((error) => error.message)).toEqual(['temporary read failure'])
+    vi.setSystemTime(new Date('2026-07-11T00:00:03Z'))
+    await observer['poll']()
+    expect(messages).toMatchObject([{
+      thread: {
+        id: 'vscode-thread',
+        name: '新对话'
+      }
+    }])
+    observer.stop()
+  })
+
+  it('does not persist config when a before-change integration fails', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-before-change-'))
+    const configPath = join(dir, 'config.yaml')
+    const configer = new Configer(new CodexioMetadata({
+      dataPath: dir,
+      configPath
+    }))
+    await configer.init()
+    configer.beforeChange('app.startAtLogin', async () => {
+      throw new Error('login item rejected')
+    })
+    await expect(configer.set('app.startAtLogin', true)).rejects.toThrow('login item rejected')
+    expect(await configer.get('app.startAtLogin')).toBe(false)
+  })
+
   it('parses nfirco thread message events', () => {
     expect(parseNfircoThreadSocketEvent({
       type: 'thread.message.created',
       eventId: 'event-1',
       threadUuid: 'thread-1',
       section: 'section-1',
+      title: 'Project thread',
       authorAccessId: 'access-1',
       messageUuid: 'message-1',
       text: 'hello',
@@ -89,6 +452,7 @@ describe('core', () => {
       eventId: 'event-1',
       threadUuid: 'thread-1',
       section: 'section-1',
+      title: 'Project thread',
       authorAccessId: 'access-1',
       messageUuid: 'message-1',
       text: 'hello',
@@ -228,7 +592,7 @@ describe('core', () => {
     const result = await executor.receive({
       source: 'feishu',
       message: {
-        ioThreadId: 'io-thread',
+        thread: { id: 'io-thread', name: '新对话' },
         role: 'user',
         text: '$test'
       },
@@ -271,7 +635,7 @@ describe('core', () => {
     const manager = new ChannelInputManager(
       {} as Configer,
       eventBus,
-      createIoThreadIdManager(),
+      createThreadRegistry(),
       new CommandExecutor(eventBus),
       disabledInput('web'),
       disabledInput('feishu'),
@@ -286,7 +650,16 @@ describe('core', () => {
       sourceMessageId: 'om_1',
       text: 'hello'
     })
+    const repeated = await manager.receive('feishu', {
+      channelThreadId: {
+        source: 'feishu',
+        id: 'chat:thread:omt_1'
+      },
+      sourceMessageId: 'om_1',
+      text: 'hello'
+    })
     expect(result.isFailed).toBe(false)
+    expect(repeated.isFailed).toBe(false)
     expect(events).toEqual([
       {
         type: 'display',
@@ -301,6 +674,72 @@ describe('core', () => {
         text: 'hello'
       }
     ])
+  })
+
+  it('rejects missing source message identity before resolving a thread', async () => {
+    const eventBus = new EventBus()
+    const threadRegistry = createThreadRegistry()
+    const manager = new ChannelInputManager(
+      {} as Configer,
+      eventBus,
+      threadRegistry,
+      new CommandExecutor(eventBus),
+      disabledInput('web'),
+      disabledInput('feishu'),
+      disabledInput('email'),
+      disabledInput('nfirco')
+    )
+
+    const result = await manager.receive('feishu', {
+      channelThreadId: {
+        source: 'feishu',
+        id: 'chat:thread:omt_missing'
+      },
+      sourceMessageId: '   ',
+      text: 'hello'
+    })
+
+    expect(result).toMatchObject({
+      isFailed: true,
+      message: 'sourceMessageId is required'
+    })
+    expect(threadRegistry.getLastActive()).toBeUndefined()
+  })
+
+  it('scopes source message identities to their channel thread', async () => {
+    const eventBus = new EventBus()
+    const messages: Message[] = []
+    eventBus.on(AppEvent.ChannelMessageDisplayRequested, async () => Result.successVoid())
+    eventBus.on(AppEvent.ChannelMessageReceived, async (event) => {
+      messages.push(event.message)
+      return Result.successVoid()
+    })
+    const manager = new ChannelInputManager(
+      {} as Configer,
+      eventBus,
+      createThreadRegistry(),
+      new CommandExecutor(eventBus),
+      disabledInput('web'),
+      disabledInput('feishu'),
+      disabledInput('email'),
+      disabledInput('nfirco')
+    )
+
+    for (const channelThreadId of ['chat:thread:omt_1', 'chat:thread:omt_2']) {
+      const result = await manager.receive('feishu', {
+        channelThreadId: {
+          source: 'feishu',
+          id: channelThreadId
+        },
+        sourceMessageId: 'om_shared',
+        text: 'hello'
+      })
+      expect(result.isFailed).toBe(false)
+    }
+
+    expect(messages).toHaveLength(2)
+    expect(messages[0].id).not.toBe(messages[1].id)
+    expect(messages[0].thread.id).not.toBe(messages[1].thread.id)
   })
 
   it('rejects configs without enabled channel input and output', () => {
@@ -353,6 +792,9 @@ describe('core', () => {
     const dir = await mkdtemp(join(tmpdir(), 'codexio-config-'))
     const configPath = join(dir, 'config.yaml')
     await writeFile(configPath, [
+      'app:',
+      '  workspace:',
+      '    path: workspace',
       'server:',
       '  token: test-token',
       'agents:',
@@ -363,8 +805,6 @@ describe('core', () => {
       '    enabled: true',
       '    bundled: false',
       '    command: codex-dev',
-      'workspace:',
-      '  path: workspace',
       'proxy:',
       '  enabled: true',
       '  host: 127.0.0.1',
@@ -389,7 +829,7 @@ describe('core', () => {
     expect(await configer.get('agents.codex.enabled')).toBe(true)
     expect(await configer.get('agents.codex.bundled')).toBe(false)
     expect(await configer.get('agents.codex.command')).toBe('codex-dev')
-    expect(await configer.get('workspace.path')).toBe('workspace')
+    expect(await configer.get('app.workspace.path')).toBe('workspace')
     expect(await configer.get('proxy.port')).toBe(7891)
     expect(await configer.get('proxy.noProxy')).toBe('next.firco.cn,*.firco.cn')
     expect(await configer.get('channeli.web.enabled')).toBe(true)
@@ -452,7 +892,7 @@ describe('core', () => {
   it('passes configured no proxy hosts to the codex process', async () => {
     const values = new Map<string, unknown>([
       ['agents.codex.bundled', false],
-      ['workspace.path', 'workspace'],
+      ['app.workspace.path', 'workspace'],
       ['proxy.enabled', true],
       ['proxy.host', '127.0.0.1'],
       ['proxy.port', 7890],
@@ -460,7 +900,8 @@ describe('core', () => {
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codex'],
       ['agents.instruction', ''],
-      ['agents.codex.requestTimeoutSeconds', 120]
+      ['agents.codex.requestTimeoutSeconds', 120],
+      ['agents.codex.observe', { enabled: false,  intervalSeconds: 1 }]
     ])
     const client = createTestCodexClient({
       get: async (path: string) => values.get(path)
@@ -479,7 +920,7 @@ describe('core', () => {
   it('uses data workspace and a filesystem codex command by default', async () => {
     const values = new Map<string, unknown>([
       ['agents.codex.bundled', true],
-      ['workspace.path', ''],
+      ['app.workspace.path', ''],
       ['proxy.enabled', false],
       ['proxy.host', '127.0.0.1'],
       ['proxy.port', 7890],
@@ -487,7 +928,8 @@ describe('core', () => {
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codex'],
       ['agents.instruction', ''],
-      ['agents.codex.requestTimeoutSeconds', 120]
+      ['agents.codex.requestTimeoutSeconds', 120],
+      ['agents.codex.observe', { enabled: false,  intervalSeconds: 1 }]
     ])
     const dir = await mkdtemp(join(tmpdir(), 'codexio-default-workspace-'))
     const metadata = new CodexioMetadata({
@@ -526,7 +968,7 @@ describe('core', () => {
     try {
       const values = new Map<string, unknown>([
         ['agents.codex.bundled', false],
-        ['workspace.path', ''],
+        ['app.workspace.path', ''],
         ['proxy.enabled', false],
         ['proxy.host', '127.0.0.1'],
         ['proxy.port', 7890],
@@ -534,7 +976,8 @@ describe('core', () => {
         ['server.host', '127.0.0.1'],
         ['agents.codex.command', 'codex'],
         ['agents.instruction', ''],
-        ['agents.codex.requestTimeoutSeconds', 120]
+        ['agents.codex.requestTimeoutSeconds', 120],
+        ['agents.codex.observe', { enabled: false,  intervalSeconds: 1 }]
       ])
       const metadata = new CodexioMetadata({
         rootPath: testMetadata.rootPath,
@@ -567,8 +1010,12 @@ describe('core', () => {
 
   it('does not resolve the external codex command from its own package bin', async () => {
     const previousPath = process.env.PATH
+    const previousLocalAppData = process.env.LOCALAPPDATA
+    const previousUserProfile = process.env.USERPROFILE
     const rootPath = await mkdtemp(join(tmpdir(), 'codexio-root-'))
     const dataPath = await mkdtemp(join(tmpdir(), 'codexio-data-'))
+    process.env.LOCALAPPDATA = await mkdtemp(join(tmpdir(), 'codexio-localappdata-'))
+    process.env.USERPROFILE = await mkdtemp(join(tmpdir(), 'codexio-userprofile-'))
     const localBin = join(rootPath, 'node_modules', '.bin')
     const systemBin = await mkdtemp(join(tmpdir(), 'codexio-system-bin-'))
     await mkdir(localBin, {
@@ -584,7 +1031,7 @@ describe('core', () => {
     try {
       const values = new Map<string, unknown>([
         ['agents.codex.bundled', false],
-        ['workspace.path', ''],
+        ['app.workspace.path', ''],
         ['proxy.enabled', false],
         ['proxy.host', '127.0.0.1'],
         ['proxy.port', 7890],
@@ -592,7 +1039,8 @@ describe('core', () => {
         ['server.host', '127.0.0.1'],
         ['agents.codex.command', 'codex'],
         ['agents.instruction', ''],
-        ['agents.codex.requestTimeoutSeconds', 120]
+        ['agents.codex.requestTimeoutSeconds', 120],
+        ['agents.codex.observe', { enabled: false,  intervalSeconds: 1 }]
       ])
       const client = createTestCodexClient({
         get: async (path: string) => values.get(path)
@@ -608,13 +1056,30 @@ describe('core', () => {
       } else {
         process.env.PATH = previousPath
       }
+      if (previousLocalAppData === undefined) {
+        delete process.env.LOCALAPPDATA
+      } else {
+        process.env.LOCALAPPDATA = previousLocalAppData
+      }
+      if (previousUserProfile === undefined) {
+        delete process.env.USERPROFILE
+      } else {
+        process.env.USERPROFILE = previousUserProfile
+      }
     }
+  })
+
+  it('requires external Codex when observing VS Code replies', () => {
+    const bundled = createDefaultConfig()
+    bundled.agents.codex.observe.enabled = true
+    expect(() => validateCodexioConfig(bundled)).toThrow('agents.codex.enabled must be true')
+    expect(() => validateCodexioConfig(bundled)).toThrow('agents.codex.bundled must be false')
   })
 
   it('adds Codexio file delivery instructions to new codex threads', async () => {
     const values = new Map<string, unknown>([
       ['agents.codex.bundled', false],
-      ['workspace.path', '~'],
+      ['app.workspace.path', '~'],
       ['proxy.enabled', false],
       ['proxy.host', '127.0.0.1'],
       ['proxy.port', 7890],
@@ -622,7 +1087,8 @@ describe('core', () => {
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codex'],
       ['agents.instruction', 'File rule with Markdown reference'],
-      ['agents.codex.requestTimeoutSeconds', 120]
+      ['agents.codex.requestTimeoutSeconds', 120],
+      ['agents.codex.observe', { enabled: false,  intervalSeconds: 1 }]
     ])
     const client = createTestCodexClient({
       get: async (path: string) => values.get(path)
@@ -640,7 +1106,7 @@ describe('core', () => {
       }
       throw new Error(method)
     }
-    await client['startThread']()
+    await client['startThread']({ id: 'io-thread', name: 'Thread' })
     expect(String(threadStartParams?.developerInstructions)).toContain('Markdown reference')
   })
 
@@ -649,7 +1115,7 @@ describe('core', () => {
     const codexCommand = join(dir, 'bin', 'codex.exe')
     const values = new Map<string, unknown>([
       ['agents.codex.bundled', false],
-      ['workspace.path', '~'],
+      ['app.workspace.path', '~'],
       ['proxy.enabled', false],
       ['proxy.host', '127.0.0.1'],
       ['proxy.port', 7890],
@@ -657,7 +1123,8 @@ describe('core', () => {
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', codexCommand],
       ['agents.instruction', 'Project instruction'],
-      ['agents.codex.requestTimeoutSeconds', 120]
+      ['agents.codex.requestTimeoutSeconds', 120],
+      ['agents.codex.observe', { enabled: false,  intervalSeconds: 1 }]
     ])
     const client = createTestCodexClient({
       get: async (path: string) => values.get(path)
@@ -675,7 +1142,7 @@ describe('core', () => {
       }
       throw new Error(method)
     }
-    await client['startThread']()
+    await client['startThread']({ id: 'io-thread', name: 'Thread' })
     expect(String(threadStartParams?.developerInstructions)).toContain('Project instruction')
     expect(String(threadStartParams?.developerInstructions)).toContain(`Codex executable directory: ${dirname(codexCommand)}`)
   })
@@ -683,7 +1150,7 @@ describe('core', () => {
   it('does not add a codex executable directory instruction for unresolved bare commands', async () => {
     const values = new Map<string, unknown>([
       ['agents.codex.bundled', false],
-      ['workspace.path', '~'],
+      ['app.workspace.path', '~'],
       ['proxy.enabled', false],
       ['proxy.host', '127.0.0.1'],
       ['proxy.port', 7890],
@@ -691,7 +1158,8 @@ describe('core', () => {
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codexio-missing-command'],
       ['agents.instruction', 'Project instruction'],
-      ['agents.codex.requestTimeoutSeconds', 120]
+      ['agents.codex.requestTimeoutSeconds', 120],
+      ['agents.codex.observe', { enabled: false,  intervalSeconds: 1 }]
     ])
     const client = createTestCodexClient({
       get: async (path: string) => values.get(path)
@@ -705,8 +1173,8 @@ describe('core', () => {
     const dir = await mkdtemp(join(tmpdir(), 'codexio-thread-workspace-'))
     const values = new Map<string, unknown>([
       ['agents.codex.bundled', false],
-      ['workspace.path', dir],
-      ['workspace.perIoThread', true],
+      ['app.workspace.path', dir],
+      ['app.workspace.perIoThread', true],
       ['proxy.enabled', false],
       ['proxy.host', '127.0.0.1'],
       ['proxy.port', 7890],
@@ -714,7 +1182,8 @@ describe('core', () => {
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codex'],
       ['agents.instruction', ''],
-      ['agents.codex.requestTimeoutSeconds', 120]
+      ['agents.codex.requestTimeoutSeconds', 120],
+      ['agents.codex.observe', { enabled: false,  intervalSeconds: 1 }]
     ])
     const client = createTestCodexClient({
       get: async (path: string) => values.get(path)
@@ -732,7 +1201,7 @@ describe('core', () => {
       }
       throw new Error(method)
     }
-    await client['startThread']('io-thread')
+    await client['startThread']({ id: 'io-thread', name: 'Thread' })
     expect(threadStartParams?.cwd).toBe(join(dir, 'io-thread'))
   })
 
@@ -790,14 +1259,14 @@ describe('core', () => {
     })
     expect(await output.start()).toBe(true)
     const result = await output.send({
-      ioThreadId: 'external-io-thread',
+      thread: { id: 'external-io-thread', name: '新对话' },
       role: 'agent',
       text: 'external'
     })
     expect(result.isFailed).toBe(false)
-    expect(sent).toEqual([
+    expect(sent).toMatchObject([
       {
-        ioThreadId: 'external-io-thread',
+        thread: { id: 'external-io-thread', name: '新对话' },
         role: 'agent',
         text: 'external'
       }
@@ -805,23 +1274,26 @@ describe('core', () => {
   })
 
   it('stores non-web channel messages in an io thread web view', () => {
-    const manager = new WebThreadManager(createIoThreadIdManager())
-    manager.appendMessage({
-      ioThreadId: 'external-io-thread',
+    const manager = new WebThreadManager(createThreadRegistry())
+    manager.appendMessage(createMessage({
+      id: 'external-user',
+      occurredAt: 1,
+      thread: { id: 'external-io-thread', name: '新对话' },
       role: 'user',
       text: 'hello'
-    })
-    manager.appendMessage({
-      ioThreadId: 'external-io-thread',
+    }))
+    manager.appendMessage(createMessage({
+      id: 'external-agent',
+      occurredAt: 2,
+      thread: { id: 'external-io-thread', name: '新对话' },
       role: 'agent',
       text: 'world'
-    })
+    }))
     expect(manager.snapshot()).toMatchObject({
       threads: [
         {
           id: 'io:external-io-thread',
-          ioThreadId: 'external-io-thread',
-          title: 'hello'
+          thread: { id: 'external-io-thread', name: '新对话' }
         }
       ],
       messages: [
@@ -839,19 +1311,60 @@ describe('core', () => {
     })
   })
 
+  it('upserts repeated web messages by stable message id', () => {
+    const manager = new WebThreadManager(createThreadRegistry())
+    const message = createMessage({
+      id: 'stable-message',
+      thread: { id: 'io-thread', name: 'Thread' },
+      role: 'agent',
+      text: 'reply'
+    })
+    const first = manager.appendMessage(message)
+    const second = manager.appendMessage(message)
+    expect(second.id).toBe(first.id)
+    expect(manager.snapshot().messages).toHaveLength(1)
+  })
+
+  it('updates web thread names from the thread registry', () => {
+    const registry = createThreadRegistry()
+    const original = registry.ensure('external-io-thread', 'Original name')
+    const manager = new WebThreadManager(registry)
+    manager.appendMessage(createMessage({
+      id: 'rename-message',
+      thread: original,
+      role: 'agent',
+      text: 'hello'
+    }))
+    registry.rename(original.id, 'Updated name')
+    expect(manager.snapshot().threads).toMatchObject([{
+      thread: {
+        id: original.id,
+        name: 'Updated name'
+      }
+    }])
+    expect(manager.snapshot().messages).toMatchObject([{
+      thread: {
+        id: original.id,
+        name: 'Updated name'
+      }
+    }])
+  })
+
   it('resolves tilde workspace paths to the user home directory', async () => {
     const parsed = await parseCodexioConfig({
-      workspace: {
-        path: null
+      app: {
+        workspace: {
+          path: null
+        }
       }
     }, 'config.yaml')
-    expect(parsed.workspace.path).toBe('~')
+    expect(parsed.app.workspace.path).toBe('~')
     expect(resolveUserPath('~')).toBe(homedir())
     expect(resolveUserPath('~/work')).toBe(join(homedir(), 'work'))
     expect(resolveUserPath('~\\work')).toBe(join(homedir(), 'work'))
     const values = new Map<string, unknown>([
       ['agents.codex.bundled', false],
-      ['workspace.path', '~'],
+      ['app.workspace.path', '~'],
       ['proxy.enabled', false],
       ['proxy.host', '127.0.0.1'],
       ['proxy.port', 7890],
@@ -859,13 +1372,25 @@ describe('core', () => {
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codex'],
       ['agents.instruction', ''],
-      ['agents.codex.requestTimeoutSeconds', 120]
+      ['agents.codex.requestTimeoutSeconds', 120],
+      ['agents.codex.observe', { enabled: false,  intervalSeconds: 1 }]
     ])
     const client = createTestCodexClient({
       get: async (path: string) => values.get(path)
     } as unknown as Configer)
     const runtimeConfig = await client['readRuntimeConfig']()
     expect(runtimeConfig.processCwd).toBe(homedir())
+  })
+
+  it('resolves relative app workspaces from the Codexio data directory', async () => {
+    const dataPath = await mkdtemp(join(tmpdir(), 'codexio-relative-workspace-'))
+    const resolver = new ThreadWorkspaceResolver({
+      get: async (path: string) => path === 'app.workspace.path' ? 'workspace' : false
+    } as unknown as Configer, new CodexioMetadata({
+      rootPath: testMetadata.rootPath,
+      dataPath
+    }))
+    expect(await resolver.resolveBase()).toBe(join(dataPath, 'workspace'))
   })
 
   it('removes the final newline from rendered markdown html', () => {
@@ -891,27 +1416,27 @@ describe('core', () => {
   })
 
   it('binds one channel thread identity to one io thread', () => {
-    const manager = createIoThreadIdManager()
+    const manager = createThreadRegistry()
     const ioThreadId = 'io-thread'
-    expect(manager.getLastActiveIoThreadId()).toBeUndefined()
+    expect(manager.getLastActive()).toBeUndefined()
     manager.bind(ioThreadId, {
       source: 'feishu',
       id: ' chat:thread:omt_1 '
     })
-    expect(manager.getLastActiveIoThreadId()).toBe(ioThreadId)
-    expect(manager.getIoThreadId({
+    expect(manager.getLastActive()?.id).toBe(ioThreadId)
+    expect(manager.resolve({
       source: 'feishu',
       id: 'chat:thread:omt_1'
-    })).toBe(ioThreadId)
-    expect(manager.getLastActiveIoThreadId()).toBe(ioThreadId)
-    expect(manager.getIoThreadId({
+    }).id).toBe(ioThreadId)
+    expect(manager.getLastActive()?.id).toBe(ioThreadId)
+    expect(manager.resolve({
       source: 'email',
       id: 'chat:thread:omt_1'
-    })).not.toBe(ioThreadId)
+    }).id).not.toBe(ioThreadId)
   })
 
   it('binds multiple channels to one io thread', () => {
-    const manager = createIoThreadIdManager()
+    const manager = createThreadRegistry()
     const ioThreadId = 'io-thread'
     manager.bind(ioThreadId, {
       source: 'feishu',
@@ -921,10 +1446,10 @@ describe('core', () => {
       source: 'email',
       id: 'mailbox:root:message-1'
     })
-    expect(manager.getIoThreadId({
+    expect(manager.resolve({
       source: 'email',
       id: 'mailbox:root:message-1'
-    })).toBe(ioThreadId)
+    }).id).toBe(ioThreadId)
     expect(manager.getChannelThreadIds(ioThreadId)).toEqual([
       {
         source: 'feishu',
@@ -935,23 +1460,23 @@ describe('core', () => {
         id: 'mailbox:root:message-1'
       }
     ])
-    expect(manager.getLastActiveIoThreadId()).toBe(ioThreadId)
+    expect(manager.getLastActive()?.id).toBe(ioThreadId)
   })
 
   it('uses the last active io thread for system messages', async () => {
     const sent: Message[] = []
-    const ioThreadIdManager = createIoThreadIdManager()
-    const manager = await createRecordingChannelOutputManager(sent, ioThreadIdManager)
+    const threadRegistry = createThreadRegistry()
+    const manager = await createRecordingChannelOutputManager(sent, threadRegistry)
     expect((await manager.sendSystem('empty')).isFailed).toBe(true)
-    ioThreadIdManager.bind('io-thread-system', {
+    threadRegistry.bind('io-thread-system', {
       source: 'web',
       id: 'io-thread-system'
     })
     const result = await manager.sendSystem('system message')
     expect(result.isFailed).toBe(false)
-    expect(sent).toEqual([
+    expect(sent).toMatchObject([
       {
-        ioThreadId: 'io-thread-system',
+        thread: { id: 'io-thread-system', name: '新对话' },
         role: 'system',
         text: 'system message'
       }
@@ -959,20 +1484,20 @@ describe('core', () => {
   })
 
   it('creates and binds an io thread when getting a new channel thread id', () => {
-    const manager = createIoThreadIdManager()
-    const ioThreadId = manager.getIoThreadId({
+    const manager = createThreadRegistry()
+    const ioThreadId = manager.resolve({
       source: 'feishu',
       id: 'chat:thread:omt_1'
-    })
+    }).id
     expect(ioThreadId).toBeTruthy()
-    expect(manager.getIoThreadId({
+    expect(manager.resolve({
       source: 'feishu',
       id: 'chat:thread:omt_1'
-    })).toBe(ioThreadId)
+    }).id).toBe(ioThreadId)
   })
 
   it('rejects binding one channel thread id to two io threads', () => {
-    const manager = createIoThreadIdManager()
+    const manager = createThreadRegistry()
     manager.bind('io-thread-a', {
       source: 'feishu',
       id: 'chat:thread:omt_1'
@@ -980,11 +1505,11 @@ describe('core', () => {
     expect(() => manager.bind('io-thread-b', {
       source: 'feishu',
       id: 'chat:thread:omt_1'
-    })).toThrow('ioThread key already bound')
+    })).toThrow('thread key already bound')
   })
 
   it('keeps channel thread ids source scoped', () => {
-    const manager = createIoThreadIdManager()
+    const manager = createThreadRegistry()
     manager.bind('io-thread-feishu', {
       source: 'feishu',
       id: 'same-id'
@@ -993,18 +1518,18 @@ describe('core', () => {
       source: 'email',
       id: 'same-id'
     })
-    expect(manager.getIoThreadId({
+    expect(manager.resolve({
       source: 'feishu',
       id: 'same-id'
-    })).toBe('io-thread-feishu')
-    expect(manager.getIoThreadId({
+    }).id).toBe('io-thread-feishu')
+    expect(manager.resolve({
       source: 'email',
       id: 'same-id'
-    })).toBe('io-thread-email')
+    }).id).toBe('io-thread-email')
   })
 
   it('rejects more than one id of the same channel on one io thread', () => {
-    const manager = createIoThreadIdManager()
+    const manager = createThreadRegistry()
     manager.bind('io-thread', {
       source: 'feishu',
       id: 'chat:thread:omt_1'
@@ -1012,11 +1537,11 @@ describe('core', () => {
     expect(() => manager.bind('io-thread', {
       source: 'feishu',
       id: 'chat:thread:omt_2'
-    })).toThrow('ioThread source already bound')
-    expect(manager.getIoThreadId({
+    })).toThrow('thread source already bound')
+    expect(manager.resolve({
       source: 'feishu',
       id: 'chat:thread:omt_1'
-    })).toBe('io-thread')
+    }).id).toBe('io-thread')
   })
 
   it('restores io thread identities from disk', async () => {
@@ -1025,31 +1550,31 @@ describe('core', () => {
       rootPath: testMetadata.rootPath,
       dataPath: dir
     })
-    const manager = new IoThreadIdManager(metadata)
-    const ioThreadId = manager.getIoThreadId({
+    const manager = new ThreadRegistry(metadata)
+    const ioThreadId = manager.resolve({
       source: 'feishu',
       id: 'chat-1:thread:omt_1'
-    })
+    }, 'Saved thread').id
     manager.bind(ioThreadId, {
       source: 'web',
       id: 'web-thread'
     })
     await manager.flush()
     const persisted = JSON.parse(await readFile(metadata.ioThreadStatePath, 'utf8')) as {
-      lastActiveIoThreadId?: string
+      lastActiveThreadId?: string
     }
-    expect(persisted.lastActiveIoThreadId).toBe(ioThreadId)
-    const restored = new IoThreadIdManager(metadata)
+    expect(persisted.lastActiveThreadId).toBe(ioThreadId)
+    const restored = new ThreadRegistry(metadata)
     await restored.init()
-    expect(restored.getIoThreadId({
+    expect(restored.resolve({
       source: 'feishu',
       id: 'chat-1:thread:omt_1'
-    })).toBe(ioThreadId)
-    expect(restored.getIoThreadId({
+    }).id).toBe(ioThreadId)
+    expect(restored.resolve({
       source: 'web',
       id: 'web-thread'
-    })).toBe(ioThreadId)
-    expect(restored.getLastActiveIoThreadId()).toBe(ioThreadId)
+    }).id).toBe(ioThreadId)
+    expect(restored.getLastActive()?.id).toBe(ioThreadId)
   })
 
   it('rejects duplicated io thread ids in persisted state', async () => {
@@ -1062,10 +1587,11 @@ describe('core', () => {
       recursive: true
     })
     await writeFile(metadata.ioThreadStatePath, JSON.stringify({
-      version: 2,
+      version: 3,
       threads: [
         {
-          ioThreadId: 'io-thread',
+          id: 'io-thread',
+          name: '新对话',
           channelThreadIds: [
             {
               source: 'feishu',
@@ -1076,7 +1602,8 @@ describe('core', () => {
           updatedAt: 1
         },
         {
-          ioThreadId: 'io-thread',
+          id: 'io-thread',
+          name: '新对话',
           channelThreadIds: [
             {
               source: 'feishu',
@@ -1088,8 +1615,8 @@ describe('core', () => {
         }
       ]
     }), 'utf8')
-    const manager = new IoThreadIdManager(metadata)
-    await expect(manager.init()).rejects.toThrow('ioThreadId duplicated in state')
+    const manager = new ThreadRegistry(metadata)
+    await expect(manager.init()).rejects.toThrow('thread id duplicated in state')
   })
 
   it('reports io thread persist failures through flush', async () => {
@@ -1100,8 +1627,8 @@ describe('core', () => {
       rootPath: testMetadata.rootPath,
       dataPath: blockedDataPath
     })
-    const manager = new IoThreadIdManager(metadata)
-    manager.getIoThreadId({
+    const manager = new ThreadRegistry(metadata)
+    manager.resolve({
       source: 'feishu',
       id: 'chat-1:thread:omt_1'
     })
@@ -1111,14 +1638,15 @@ describe('core', () => {
   it('broadcasts channel messages without storing conversation history', async () => {
     const sent: Message[] = []
     const manager = await createRecordingChannelOutputManager(sent)
-    await manager.sendUser({
-      ioThreadId: 'io-thread',
+    await manager.sendUser(createMessage({
+      id: 'user-message',
+      thread: { id: 'io-thread', name: '新对话' },
       role: 'user',
       text: 'hello'
-    }, 'web')
-    expect(sent).toEqual([
+    }), 'web')
+    expect(sent).toMatchObject([
       {
-        ioThreadId: 'io-thread',
+        thread: { id: 'io-thread', name: '新对话' },
         role: 'user',
         text: 'hello'
       }
@@ -1127,17 +1655,18 @@ describe('core', () => {
 
   it('routes channel output to every enabled channel', async () => {
     const sent: Array<{ type: string, message: Message }> = []
-    const manager = await createRecordingChannelOutputManager(sent, createIoThreadIdManager(), [
+    const manager = await createRecordingChannelOutputManager(sent, createThreadRegistry(), [
       'web',
       'feishu',
       'feishuWebhook',
       'email'
     ])
-    await manager.sendAgent({
-      ioThreadId: 'io-thread',
+    await manager.sendAgent(createMessage({
+      id: 'broadcast-agent',
+      thread: { id: 'io-thread', name: '新对话' },
       role: 'agent',
       text: 'hello'
-    }, 'feishu')
+    }), 'feishu')
     await manager.stop()
     expect(sent.map((item) => item.type)).toEqual([
       'web',
@@ -1148,7 +1677,7 @@ describe('core', () => {
   })
 
   it('replies to feishu source messages in the topic thread', async () => {
-    const ioThreadIdManager = createIoThreadIdManager()
+    const threadRegistry = createThreadRegistry()
     const calls: unknown[] = []
     const output = new FeishuChannelOutput({
       get: async (path: string) => {
@@ -1162,7 +1691,7 @@ describe('core', () => {
         }
         return undefined
       }
-    } as unknown as Configer, ioThreadIdManager)
+    } as unknown as Configer, threadRegistry)
     await output.start()
     Reflect.set(output, 'client', {
       im: {
@@ -1191,7 +1720,8 @@ describe('core', () => {
       }
     })
     const first = await output.send({
-      ioThreadId: 'io-thread',
+      id: 'message-1',
+      thread: { id: 'io-thread', name: '新对话' },
       role: 'agent',
       text: 'hello'
     }, {
@@ -1199,14 +1729,15 @@ describe('core', () => {
       sourceMessageId: 'om_user'
     })
     expect(first.isFailed).toBe(false)
-    expect(ioThreadIdManager.getChannelThreadIds('io-thread')).toEqual([
+    expect(threadRegistry.getChannelThreadIds('io-thread')).toEqual([
       {
         source: 'feishu',
         id: 'chat-1:thread:omt_1'
       }
     ])
     const second = await output.send({
-      ioThreadId: 'io-thread',
+      id: 'message-2',
+      thread: { id: 'io-thread', name: '新对话' },
       role: 'agent',
       text: 'again'
     }, {
@@ -1220,7 +1751,8 @@ describe('core', () => {
           message_id: 'om_user'
         },
         data: {
-          reply_in_thread: true
+          reply_in_thread: true,
+          uuid: expect.any(String)
         }
       },
       {
@@ -1228,14 +1760,16 @@ describe('core', () => {
           message_id: 'om_user'
         },
         data: {
-          reply_in_thread: true
+          reply_in_thread: true,
+          uuid: expect.any(String)
         }
       }
     ])
+    expect(Reflect.get(calls[0] as object, 'data').uuid).not.toBe(Reflect.get(calls[1] as object, 'data').uuid)
   })
 
   it('creates a feishu topic for non-feishu output and continues with reply', async () => {
-    const ioThreadIdManager = createIoThreadIdManager()
+    const threadRegistry = createThreadRegistry()
     const calls: unknown[] = []
     const output = new FeishuChannelOutput({
       get: async (path: string) => {
@@ -1249,7 +1783,7 @@ describe('core', () => {
         }
         return undefined
       }
-    } as unknown as Configer, ioThreadIdManager)
+    } as unknown as Configer, threadRegistry)
     await output.start()
     Reflect.set(output, 'client', {
       im: {
@@ -1278,21 +1812,21 @@ describe('core', () => {
       }
     })
     const first = await output.send({
-      ioThreadId: 'io-thread',
+      thread: { id: 'io-thread', name: '新对话' },
       role: 'agent',
       text: 'hello'
     }, {
       source: 'web'
     })
     expect(first.isFailed).toBe(false)
-    expect(ioThreadIdManager.getChannelThreadIds('io-thread')).toEqual([
+    expect(threadRegistry.getChannelThreadIds('io-thread')).toEqual([
       {
         source: 'feishu',
         id: 'chat-1:thread:omt_1'
       }
     ])
     const second = await output.send({
-      ioThreadId: 'io-thread',
+      thread: { id: 'io-thread', name: '新对话' },
       role: 'agent',
       text: 'again'
     }, {
@@ -1324,14 +1858,15 @@ describe('core', () => {
     const imagePath = join(dir, 'agent.png')
     await writeFile(imagePath, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=', 'base64'))
     const sent: Message[] = []
-    const manager = await createRecordingChannelOutputManager(sent, createIoThreadIdManager(), [
+    const manager = await createRecordingChannelOutputManager(sent, createThreadRegistry(), [
       'web'
     ])
-    await manager.sendAgent({
-      ioThreadId: 'io-thread',
+    await manager.sendAgent(createMessage({
+      id: 'absolute-file-agent',
+      thread: { id: 'io-thread', name: '新对话' },
       role: 'agent',
       text: `已生成：![agent](${imagePath.replaceAll('\\', '/')})`
-    })
+    }))
     await manager.stop()
     expect(sent).toHaveLength(1)
     expect(sent[0].files?.[0]).toMatchObject({
@@ -1349,25 +1884,26 @@ describe('core', () => {
     })
     await writeFile(join(threadDir, 'agent.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=', 'base64'))
     const sent: Message[] = []
-    const manager = await createRecordingChannelOutputManager(sent, createIoThreadIdManager(), [
+    const manager = await createRecordingChannelOutputManager(sent, createThreadRegistry(), [
       'web'
     ], {
       subscribe: () => {},
       get: async (path: string) => {
-        if (path === 'workspace.path') {
+        if (path === 'app.workspace.path') {
           return dir
         }
-        if (path === 'workspace.perIoThread') {
+        if (path === 'app.workspace.perIoThread') {
           return true
         }
         return undefined
       }
     } as unknown as Configer)
-    await manager.sendAgent({
-      ioThreadId: 'io-thread',
+    await manager.sendAgent(createMessage({
+      id: 'relative-file-agent',
+      thread: { id: 'io-thread', name: '新对话' },
       role: 'agent',
       text: '已生成：![agent](./agent.png)'
-    })
+    }))
     await manager.stop()
     expect(sent[0].files?.[0]).toMatchObject({
       name: 'agent.png',
@@ -1417,8 +1953,9 @@ describe('core', () => {
     })
     const streamer = new CodexMessageStreamer(eventBus)
     const thread = {
-      ioThreadId: 'io-thread',
-      agentThreadId: 'codex-thread'
+      thread: { id: 'io-thread', name: '新对话' },
+      agentThreadId: 'codex-thread',
+      turnId: 'turn'
     }
     await streamer.append(thread, 'item', '你')
     await streamer.append(thread, 'item', '好')
@@ -1430,13 +1967,98 @@ describe('core', () => {
         text: '你好。'
       }
     ])
-    expect(sent).toEqual([
+    expect(sent).toMatchObject([
       {
-        ioThreadId: 'io-thread',
+        thread: { id: 'io-thread', name: '新对话' },
         role: 'agent',
         text: '你好。'
       }
     ])
+  })
+
+  it('routes an unbound Codex thread through its thread id IoThread', async () => {
+    const sent: Message[] = []
+    const eventBus = new EventBus()
+    eventBus.on(AppEvent.ChannelMessageDisplayRequested, async (event) => {
+      sent.push(event.message)
+      return Result.successVoid()
+    })
+    const configer = {
+      get: async () => false
+    } as unknown as Configer
+    const agent = new CodexAgent(
+      configer,
+      eventBus,
+      createThreadRegistry(),
+      {} as CodexClient,
+      new CodexMessageStreamer(eventBus)
+    )
+    const completedMessage = {
+      thread: {
+        id: 'vscode-thread',
+        name: 'VS Code thread'
+      },
+      turnId: 'vscode-turn',
+      status: 'turnCompleted',
+      role: 'assistant',
+      text: '',
+      messages: [{
+        itemId: 'vscode-agent-message',
+        role: 'assistant',
+        text: 'VS Code reply'
+      }]
+    } as const
+    await agent['receiveCodexMessage'](completedMessage)
+    await agent['receiveCodexMessage'](completedMessage)
+    expect(sent).toHaveLength(2)
+    expect(sent[0]).toMatchObject({
+      id: expect.any(String),
+      thread: { id: 'vscode-thread', name: 'VS Code thread' },
+      role: 'agent',
+      text: 'VS Code reply'
+    })
+    expect(sent[1].id).toBe(sent[0].id)
+  })
+
+  it('preserves known thread names and applies later Codex title updates', async () => {
+    const sent: Message[] = []
+    const eventBus = new EventBus()
+    eventBus.on(AppEvent.ChannelMessageDisplayRequested, async (event) => {
+      sent.push(event.message)
+      return Result.successVoid()
+    })
+    const registry = createThreadRegistry()
+    registry.ensure('io-thread', 'Original prompt')
+    const agent = new CodexAgent(
+      { get: async () => false } as unknown as Configer,
+      eventBus,
+      registry,
+      {} as CodexClient,
+      new CodexMessageStreamer(eventBus)
+    )
+    agent['bindThread']('io-thread', 'codex-thread')
+    await agent['receiveCodexMessage']({
+      thread: {
+        id: 'codex-thread',
+        name: '新对话'
+      },
+      turnId: 'turn',
+      status: 'turnCompleted',
+      role: 'assistant',
+      text: '',
+      messages: [{
+        itemId: 'message',
+        role: 'assistant',
+        text: 'reply'
+      }]
+    })
+    expect(sent[0].thread.name).toBe('Original prompt')
+    agent['receiveCodexThread']({
+      id: 'codex-thread',
+      title: 'Generated title',
+      isWorking: false
+    })
+    expect(registry.get('io-thread')?.name).toBe('Generated title')
   })
 
   it('does not flush codex deltas at a double newline after a colon', async () => {
@@ -1448,17 +2070,18 @@ describe('core', () => {
     })
     const streamer = new CodexMessageStreamer(eventBus)
     const thread = {
-      ioThreadId: 'io-thread',
-      agentThreadId: 'codex-thread'
+      thread: { id: 'io-thread', name: '新对话' },
+      agentThreadId: 'codex-thread',
+      turnId: 'turn'
     }
     await streamer.append(thread, 'item', '根因有两个:\n\n')
     expect(sent).toEqual([])
     await streamer.append(thread, 'item', '第一个原因。')
     expect(sent).toEqual([])
     await streamer.completeItem(thread, 'item')
-    expect(sent).toEqual([
+    expect(sent).toMatchObject([
       {
-        ioThreadId: 'io-thread',
+        thread: { id: 'io-thread', name: '新对话' },
         role: 'agent',
         text: '根因有两个:\n\n第一个原因。'
       }
@@ -1474,28 +2097,29 @@ describe('core', () => {
     })
     const streamer = new CodexMessageStreamer(eventBus)
     const thread = {
-      ioThreadId: 'io-thread',
-      agentThreadId: 'codex-thread'
+      thread: { id: 'io-thread', name: '新对话' },
+      agentThreadId: 'codex-thread',
+      turnId: 'turn'
     }
     await streamer.append(thread, 'item', '服务恢复了。\n\n继续验证。')
-    expect(sent).toEqual([
+    expect(sent).toMatchObject([
       {
-        ioThreadId: 'io-thread',
+        thread: { id: 'io-thread', name: '新对话' },
         role: 'agent',
         text: '服务恢复了。'
       }
     ])
     await streamer.completeItem(thread, 'item')
-    expect(sent).toEqual([
+    expect(sent).toMatchObject([
       {
-        ioThreadId: 'io-thread',
+        thread: { id: 'io-thread', name: '新对话' },
         role: 'agent',
         text: '服务恢复了。'
       },
       {
-        ioThreadId: 'io-thread',
+        thread: { id: 'io-thread', name: '新对话' },
         role: 'agent',
-        text: '继续验证。'
+        text: '服务恢复了。\n\n继续验证。'
       }
     ])
   })
@@ -1509,15 +2133,16 @@ describe('core', () => {
     })
     const streamer = new CodexMessageStreamer(eventBus)
     const thread = {
-      ioThreadId: 'io-thread',
-      agentThreadId: 'codex-thread'
+      thread: { id: 'io-thread', name: '新对话' },
+      agentThreadId: 'codex-thread',
+      turnId: 'turn'
     }
     await streamer.append(thread, 'item', '我改了 ThreadComposer.svelte:\n\n新增 sendDisabled')
     expect(sent).toEqual([])
     await streamer.completeItem(thread, 'item')
-    expect(sent).toEqual([
+    expect(sent).toMatchObject([
       {
-        ioThreadId: 'io-thread',
+        thread: { id: 'io-thread', name: '新对话' },
         role: 'agent',
         text: '我改了 ThreadComposer.svelte:\n\n新增 sendDisabled'
       }
@@ -1537,8 +2162,9 @@ describe('core', () => {
     })
     const streamer = new CodexMessageStreamer(eventBus)
     await streamer.complete({
-      ioThreadId: 'io-thread',
+      thread: { id: 'io-thread', name: '新对话' },
       agentThreadId: 'codex-thread',
+      turnId: 'turn',
       source: 'feishu',
       sourceMessageId: 'om_1'
     }, [
@@ -1547,12 +2173,12 @@ describe('core', () => {
         text: '你好。'
       }
     ])
-    expect(sent).toEqual([
+    expect(sent).toMatchObject([
       {
         source: 'feishu',
         sourceMessageId: 'om_1',
         message: {
-          ioThreadId: 'io-thread',
+          thread: { id: 'io-thread', name: '新对话' },
           role: 'agent',
           text: '你好。'
         }
@@ -1560,7 +2186,7 @@ describe('core', () => {
     ])
   })
 
-  it('does not resend codex item text when the turn completes', async () => {
+  it('replays repeated Codex completion with one canonical identity', async () => {
     const sent: Message[] = []
     const eventBus = new EventBus()
     eventBus.on(AppEvent.ChannelMessageDisplayRequested, async (event) => {
@@ -1569,8 +2195,9 @@ describe('core', () => {
     })
     const streamer = new CodexMessageStreamer(eventBus)
     const thread = {
-      ioThreadId: 'io-thread',
-      agentThreadId: 'codex-thread'
+      thread: { id: 'io-thread', name: '新对话' },
+      agentThreadId: 'codex-thread',
+      turnId: 'turn'
     }
     await streamer.append(thread, 'item', '你好')
     await streamer.completeItem(thread, 'item')
@@ -1580,23 +2207,31 @@ describe('core', () => {
         text: '你好'
       }
     ])
-    expect(sent).toEqual([
+    expect(sent).toHaveLength(2)
+    expect(sent).toMatchObject([
       {
-        ioThreadId: 'io-thread',
+        thread: { id: 'io-thread', name: '新对话' },
+        role: 'agent',
+        text: '你好'
+      },
+      {
+        thread: { id: 'io-thread', name: '新对话' },
         role: 'agent',
         text: '你好'
       }
     ])
+    expect(sent[1].id).toBe(sent[0].id)
+    expect(sent[1].revision).toBe(sent[0].revision)
   })
 })
 
 async function createRecordingChannelOutputManager(
   sent: Message[] | Array<{ type: string, message: Message }>,
-  ioThreadIdManager = createIoThreadIdManager(),
+  threadRegistry = createThreadRegistry(),
   enabledTypes = ['web'],
   configer = {
     subscribe: () => {},
-    get: async (path: string) => path === 'workspace.path' ? '~' : undefined
+    get: async (path: string) => path === 'app.workspace.path' ? '~' : undefined
   } as unknown as Configer
 ): Promise<ChannelOutputManager> {
   const fileStore = new FileStore(testMetadata)
@@ -1620,7 +2255,7 @@ async function createRecordingChannelOutputManager(
     configer,
     fileStore,
     new EventBus(),
-    ioThreadIdManager,
+    threadRegistry,
     output('web'),
     output('feishu'),
     output('feishuWebhook'),
@@ -1632,8 +2267,8 @@ async function createRecordingChannelOutputManager(
   return manager
 }
 
-function createIoThreadIdManager(): IoThreadIdManager {
-  return new IoThreadIdManager(new CodexioMetadata({
+function createThreadRegistry(): ThreadRegistry {
+  return new ThreadRegistry(new CodexioMetadata({
     rootPath: testMetadata.rootPath,
     dataPath: join(tmpdir(), `codexio-io-thread-${randomUUID()}`)
   }))
@@ -1665,7 +2300,7 @@ function channelMessage(text: string): ChannelMessageReceivedEvent {
   return {
     source: 'web',
     message: {
-      ioThreadId: 'io-thread',
+      thread: { id: 'io-thread', name: '新对话' },
       role: 'user',
       text
     }

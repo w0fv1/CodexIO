@@ -42,7 +42,7 @@ export class AgentManager {
       this.configer.subscribe([
         'agents',
         'proxy',
-        'workspace',
+        'app.workspace',
         'server'
       ], async () => {
         const applied = await this.applyConfig()
@@ -103,7 +103,7 @@ export class AgentManager {
     Logger.info('agent receive started', {
       agent: agent.type,
       source: event.source,
-      ioThreadId: event.message.ioThreadId,
+      ioThreadId: event.message.thread.id,
       text: event.message.text,
       files: event.message.files?.length ?? 0
     })

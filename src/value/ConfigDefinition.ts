@@ -3,11 +3,22 @@ import { z } from 'zod'
 
 export type ConfigFieldDescriptor = {
   path: string
-  group: string
+  groupPath: string
   label: string
   description: string
   type: 'boolean' | 'number' | 'string' | 'password' | 'stringList'
   apply: string
+}
+
+export type ConfigGroupDescriptor = {
+  path: string
+  title: string
+  description: string
+}
+
+export type ConfigDescriptor = {
+  groups: ConfigGroupDescriptor[]
+  fields: ConfigFieldDescriptor[]
 }
 
 type ConfigFieldDefinition<S extends z.ZodTypeAny = z.ZodTypeAny> = ConfigFieldDescriptor & {
@@ -18,7 +29,8 @@ type ConfigFieldDefinition<S extends z.ZodTypeAny = z.ZodTypeAny> = ConfigFieldD
 
 type ConfigGroupDefinition<T extends ConfigDefinitionMap = ConfigDefinitionMap> = {
   kind: 'group'
-  label: string
+  title: string
+  description: string
   fields: T
 }
 
@@ -52,17 +64,50 @@ const defaultCodexInstruction = [
 ].join('\n')
 
 export const configDefinition = defineConfig({
-  app: group('App', {
+  app: group({
+    title: 'App'
+  }, {
     id: field({
       label: 'ID',
-      description: '本次 Codexio 启动生成的飞书绑定口令。飞书里使用 $bind <ID> 或 ￥bind <ID> 绑定群聊。',
+      description: '本次 Codexio 启动生成的 appid。',
       type: 'string',
       apply: '重启 Codexio',
       schema: z.string(),
       default: ''
+    }),
+    startAtLogin: field({
+      label: '开机启动',
+      description: '登录 Windows 后自动启动 Codexio。仅 Windows 桌面安装版执行此设置。',
+      type: 'boolean',
+      apply: '立即生效',
+      schema: z.boolean(),
+      default: false
+    }),
+    workspace: group({
+      title: 'Workspace',
+      description: 'Codexio Agent 使用的默认工作区。'
+    }, {
+      path: field({
+        label: 'Path',
+        description: '默认工作目录。相对路径以 Codexio 数据目录为基准。',
+        type: 'string',
+        apply: '重启 Codex Agent',
+        schema: workspacePath,
+        default: 'workspace'
+      }),
+      perIoThread: field({
+        label: 'Per IoThread',
+        description: '为每个 IoThread 使用独立子工作目录。',
+        type: 'boolean',
+        apply: '重启 Codex Agent',
+        schema: z.boolean(),
+        default: false
+      })
     })
   }),
-  server: group('Server', {
+  server: group({
+    title: 'Server'
+  }, {
     host: field({
       label: 'Host',
       description: 'Codexio HTTP 服务监听地址。',
@@ -96,7 +141,9 @@ export const configDefinition = defineConfig({
       default: false
     })
   }),
-  agents: group('Agents', {
+  agents: group({
+    title: 'Agents'
+  }, {
     instruction: field({
       label: 'Instruction',
       description: '注入给 Agent 的共享运行指令。',
@@ -105,7 +152,9 @@ export const configDefinition = defineConfig({
       schema: z.string(),
       default: defaultCodexInstruction
     }),
-    echo: group('Echo Agent', {
+    echo: group({
+      title: 'Echo Agent'
+    }, {
       enabled: field({
         label: 'Enabled',
         description: '启用直接回显用户消息的测试 Agent。',
@@ -115,7 +164,9 @@ export const configDefinition = defineConfig({
         default: true
       })
     }),
-    codex: group('Codex Agent', {
+    codex: group({
+      title: 'Codex Agent'
+    }, {
       enabled: field({
         label: 'Enabled',
         description: '启用 Codex 命令行 Agent。',
@@ -147,28 +198,33 @@ export const configDefinition = defineConfig({
         apply: '重启 Codex Agent',
         schema: positiveInt,
         default: 120
+      }),
+      observe: group({
+        title: 'VS Code Replies',
+        description: '将所有 VS Code Codex 新产生的完整 Agent 回复发送到 Codexio 输出通道。'
+      }, {
+        enabled: field({
+          label: 'Enabled',
+          description: '观察 VS Code Codex 新产生的 Agent 回复，不发送或补发历史消息。',
+          type: 'boolean',
+          apply: '重启 Codex Agent',
+          schema: z.boolean(),
+          default: false
+        }),
+        intervalSeconds: field({
+          label: 'Interval Seconds',
+          description: '检查新 Agent 回复的间隔秒数。',
+          type: 'number',
+          apply: '重启 Codex Agent',
+          schema: positiveInt,
+          default: 1
+        })
       })
     })
   }),
-  workspace: group('Workspace', {
-    path: field({
-      label: 'Path',
-      description: 'Codex Agent 执行任务时使用的工作目录，留空时使用数据目录下的 workspace。',
-      type: 'string',
-      apply: '重启 Codex Agent',
-      schema: workspacePath,
-      default: ''
-    }),
-    perIoThread: field({
-      label: 'Per IoThread',
-      description: '为每个 IoThread 使用独立子工作目录。',
-      type: 'boolean',
-      apply: '重启 Codex Agent',
-      schema: z.boolean(),
-      default: false
-    })
-  }),
-  proxy: group('Proxy', {
+  proxy: group({
+    title: 'Proxy'
+  }, {
     enabled: field({
       label: 'Enabled',
       description: '为 Codex 进程注入 HTTP_PROXY、HTTPS_PROXY 和 NO_PROXY。',
@@ -203,7 +259,9 @@ export const configDefinition = defineConfig({
     })
   }),
   channeli: {
-    web: group('Web Input', {
+    web: group({
+      title: 'Web Input'
+    }, {
       enabled: field({
         label: 'Enabled',
         description: '启用网页对话输入通道。',
@@ -213,7 +271,10 @@ export const configDefinition = defineConfig({
         default: true
       })
     }),
-    feishu: group('Feishu Input', {
+    feishu: group({
+      title: 'Feishu Input',
+      description: '在已经引入 Codexio 的飞书群聊中，或与 Codexio 私聊时，输入 $bind ${app.id} 即可在飞书中绑定 Codexio。'
+    }, {
       enabled: field({
         label: 'Enabled',
         description: '启用飞书 WebSocket 输入通道。',
@@ -271,7 +332,9 @@ export const configDefinition = defineConfig({
         default: []
       })
     }),
-    email: group('Email Input', {
+    email: group({
+      title: 'Email Input'
+    }, {
       enabled: field({
         label: 'Enabled',
         description: '启用邮件输入通道。',
@@ -289,7 +352,9 @@ export const configDefinition = defineConfig({
         default: ''
       }),
       account: {
-        imap: group('Email Input IMAP', {
+        imap: group({
+          title: 'Email Input IMAP'
+        }, {
           host: field({
             label: 'Host',
             description: 'IMAP 服务器地址。',
@@ -357,7 +422,9 @@ export const configDefinition = defineConfig({
         default: 30
       })
     }),
-    nfirco: group('Nfirco Thread Input', {
+    nfirco: group({
+      title: 'Nfirco Thread Input'
+    }, {
       enabled: field({
         label: 'Enabled',
         description: '启用 Nfirco Thread 输入通道。',
@@ -409,7 +476,9 @@ export const configDefinition = defineConfig({
     })
   },
   channelo: {
-    web: group('Web Output', {
+    web: group({
+      title: 'Web Output'
+    }, {
       enabled: field({
         label: 'Enabled',
         description: '启用网页对话输出通道。',
@@ -419,7 +488,9 @@ export const configDefinition = defineConfig({
         default: true
       })
     }),
-    feishu: group('Feishu Output', {
+    feishu: group({
+      title: 'Feishu Output'
+    }, {
       enabled: field({
         label: 'Enabled',
         description: '启用飞书群聊输出通道。',
@@ -453,7 +524,9 @@ export const configDefinition = defineConfig({
         default: ''
       })
     }),
-    feishuWebhook: group('Feishu Webhook Output', {
+    feishuWebhook: group({
+      title: 'Feishu Webhook Output'
+    }, {
       enabled: field({
         label: 'Enabled',
         description: '启用飞书机器人 Webhook 输出通道。',
@@ -471,7 +544,9 @@ export const configDefinition = defineConfig({
         default: ''
       })
     }),
-    email: group('Email Output', {
+    email: group({
+      title: 'Email Output'
+    }, {
       enabled: field({
         label: 'Enabled',
         description: '启用邮件输出通道。',
@@ -489,7 +564,9 @@ export const configDefinition = defineConfig({
         default: ''
       }),
       account: {
-        smtp: group('Email Output SMTP', {
+        smtp: group({
+          title: 'Email Output SMTP'
+        }, {
           host: field({
             label: 'Host',
             description: 'SMTP 服务器地址。',
@@ -541,7 +618,9 @@ export const configDefinition = defineConfig({
         })
       }
     }),
-    nfirco: group('Nfirco Thread Output', {
+    nfirco: group({
+      title: 'Nfirco Thread Output'
+    }, {
       enabled: field({
         label: 'Enabled',
         description: '启用 Nfirco Thread 输出通道。',
@@ -596,21 +675,24 @@ export const configDefinition = defineConfig({
 
 type NormalizedConfigField = ConfigFieldDefinition & {
   path: string
-  group: string
+  groupPath: string
 }
 
 export type CodexioConfig = InferConfig<typeof configDefinition>
 
 const normalizedConfigDefinition = normalizeConfigDefinition(configDefinition)
 
-export const configFieldDescriptors: ConfigFieldDescriptor[] = normalizedConfigDefinition.fields.map(({ path, group, label, description, type, apply }) => ({
-  path,
-  group,
-  label,
-  description,
-  type,
-  apply
-}))
+export const configDescriptor: ConfigDescriptor = {
+  groups: normalizedConfigDefinition.groups,
+  fields: normalizedConfigDefinition.fields.map(({ path, groupPath, label, description, type, apply }) => ({
+    path,
+    groupPath,
+    label,
+    description,
+    type,
+    apply
+  }))
+}
 
 export const ConfigSchema = z.preprocess((value) => deepMergeConfig(defaultConfigObject(), value), createConfigSchema())
 
@@ -636,6 +718,14 @@ export function validateCodexioConfig(config: CodexioConfig): void {
   ].filter((agentConfig) => agentConfig.enabled)
   if (enabledAgents.length === 0) {
     issues.push('one agent must be enabled')
+  }
+  if (config.agents.codex.observe.enabled) {
+    if (!config.agents.codex.enabled) {
+      issues.push('agents.codex.enabled must be true when agents.codex.observe.enabled=true')
+    }
+    if (config.agents.codex.bundled) {
+      issues.push('agents.codex.bundled must be false when agents.codex.observe.enabled=true')
+    }
   }
   const enabledChanneli = Object.entries(config.channeli).filter(([, channelConfig]) => channelConfig?.enabled)
   const enabledChannelo = Object.entries(config.channelo).filter(([, channelConfig]) => channelConfig?.enabled)
@@ -698,19 +788,23 @@ function defineConfig<T extends ConfigDefinitionMap>(definition: T): T {
   return definition
 }
 
-function group<T extends ConfigDefinitionMap>(label: string, fields: T): ConfigGroupDefinition<T> {
+function group<T extends ConfigDefinitionMap>(definition: {
+  title: string
+  description?: string
+}, fields: T): ConfigGroupDefinition<T> {
   return {
     kind: 'group',
-    label,
+    title: definition.title,
+    description: definition.description ?? '',
     fields
   }
 }
 
-function field<S extends z.ZodTypeAny>(definition: Omit<ConfigFieldDefinition<S>, 'kind' | 'path' | 'group'>): ConfigFieldDefinition<S> {
+function field<S extends z.ZodTypeAny>(definition: Omit<ConfigFieldDefinition<S>, 'kind' | 'path' | 'groupPath'>): ConfigFieldDefinition<S> {
   return {
     kind: 'field',
     path: '',
-    group: '',
+    groupPath: '',
     ...definition
   }
 }
@@ -720,39 +814,48 @@ function createConfigSchema(): z.ZodType<CodexioConfig> {
 }
 
 function normalizeConfigDefinition(definition: ConfigDefinitionMap): {
+  groups: ConfigGroupDescriptor[]
   fields: NormalizedConfigField[]
   schemaTree: ConfigObject
   defaultTree: ConfigObject
 } {
+  const groups: ConfigGroupDescriptor[] = []
   const fields: NormalizedConfigField[] = []
   const schemaTree: ConfigObject = {}
   const defaultTree: ConfigObject = {}
-  collectConfigDefinition(definition, [], '', fields, schemaTree, defaultTree)
+  collectConfigDefinition(definition, [], '', groups, fields, schemaTree, defaultTree)
   return {
+    groups,
     fields,
     schemaTree,
     defaultTree
   }
 }
 
-function collectConfigDefinition(node: ConfigDefinitionNode, path: string[], groupName: string, fields: NormalizedConfigField[], schemaTree: ConfigObject, defaultTree: ConfigObject): void {
+function collectConfigDefinition(node: ConfigDefinitionNode, path: string[], groupPath: string, groups: ConfigGroupDescriptor[], fields: NormalizedConfigField[], schemaTree: ConfigObject, defaultTree: ConfigObject): void {
   if (isFieldDefinition(node)) {
     const fullPath = path.join('.')
     fields.push({
       ...node,
       path: fullPath,
-      group: groupName
+      groupPath
     })
     setPath(schemaTree, fullPath, node.schema.default(defaultValue(node.default)))
     setPath(defaultTree, fullPath, defaultValue(node.default))
     return
   }
   if (isGroupDefinition(node)) {
-    collectConfigDefinition(node.fields, path, node.label, fields, schemaTree, defaultTree)
+    const currentGroupPath = path.join('.')
+    groups.push({
+      path: currentGroupPath,
+      title: node.title,
+      description: node.description
+    })
+    collectConfigDefinition(node.fields, path, currentGroupPath, groups, fields, schemaTree, defaultTree)
     return
   }
   for (const [key, child] of Object.entries(node)) {
-    collectConfigDefinition(child, [...path, key], groupName, fields, schemaTree, defaultTree)
+    collectConfigDefinition(child, [...path, key], groupPath, groups, fields, schemaTree, defaultTree)
   }
 }
 

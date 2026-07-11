@@ -1,5 +1,5 @@
 import { mkdir } from 'node:fs/promises'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { inject, injectable } from 'inversify'
 import { resolveUserPath } from '../util/Path.js'
 import { CodexioMetadata } from './CodexioMetadata.js'
@@ -13,14 +13,17 @@ export class ThreadWorkspaceResolver {
   ) {}
 
   async resolveBase(): Promise<string> {
-    const workspacePath = await this.configer.get('workspace.path')
+    const workspacePath = await this.configer.get('app.workspace.path')
     const resolved = typeof workspacePath === 'string' ? resolveUserPath(workspacePath) : ''
-    return resolved.length > 0 ? resolved : join(this.metadata.dataPath, 'workspace')
+    if (!resolved) {
+      return join(this.metadata.dataPath, 'workspace')
+    }
+    return isAbsolute(resolved) ? resolved : join(this.metadata.dataPath, resolved)
   }
 
   async resolve(ioThreadId?: string): Promise<string> {
     const base = await this.resolveBase()
-    const perIoThread = await this.configer.get('workspace.perIoThread')
+    const perIoThread = await this.configer.get('app.workspace.perIoThread')
     const normalizedIoThreadId = ioThreadId?.trim() ?? ''
     if (!perIoThread || normalizedIoThreadId.length === 0) {
       return base

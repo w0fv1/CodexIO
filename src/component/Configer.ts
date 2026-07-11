@@ -21,6 +21,8 @@ export type ConfigSubscription = {
   dispose: () => void
 }
 
+type ConfigBeforeChangeListener = (change: ConfigChange) => void | Promise<void>
+
 type ConfigObject = Record<string, unknown>
 export type ConfigPatch<T> = {
   [K in keyof T]?: T[K] extends ConfigObject ? ConfigPatch<T[K]> : T[K]
@@ -58,6 +60,7 @@ type ConfigSubscriptionEntry = ConfigListenerEntry | ConfigPathListenerEntry | C
 @injectable()
 export class Configer {
   private readonly listeners = new Set<ConfigSubscriptionEntry>()
+  private readonly beforeChangeListeners = new Set<ConfigSubscriptionEntry>()
   readonly path: string
 
   constructor(@inject(CodexioMetadata) private readonly metadata: CodexioMetadata) {
@@ -112,6 +115,17 @@ export class Configer {
   subscribe<P extends CodexioConfigPath>(path: P, listener: SelectedConfigListener<CodexioConfigPathValue<P>>): ConfigSubscription
   subscribe(paths: CodexioConfigPath[], listener: ConfigListener): ConfigSubscription
   subscribe<P extends CodexioConfigPath>(listenerOrPath: ConfigListener | P | CodexioConfigPath[], selectedListener?: ConfigListener | SelectedConfigListener<CodexioConfigPathValue<P>>): ConfigSubscription {
+    return this.addSubscription(this.listeners, listenerOrPath, selectedListener)
+  }
+
+  beforeChange(listener: ConfigBeforeChangeListener): ConfigSubscription
+  beforeChange<P extends CodexioConfigPath>(path: P, listener: SelectedConfigListener<CodexioConfigPathValue<P>>): ConfigSubscription
+  beforeChange(paths: CodexioConfigPath[], listener: ConfigBeforeChangeListener): ConfigSubscription
+  beforeChange<P extends CodexioConfigPath>(listenerOrPath: ConfigBeforeChangeListener | P | CodexioConfigPath[], selectedListener?: ConfigBeforeChangeListener | SelectedConfigListener<CodexioConfigPathValue<P>>): ConfigSubscription {
+    return this.addSubscription(this.beforeChangeListeners, listenerOrPath, selectedListener)
+  }
+
+  private addSubscription<P extends CodexioConfigPath>(subscriptions: Set<ConfigSubscriptionEntry>, listenerOrPath: ConfigListener | P | CodexioConfigPath[], selectedListener?: ConfigListener | SelectedConfigListener<CodexioConfigPathValue<P>>): ConfigSubscription {
     const entry: ConfigSubscriptionEntry = typeof listenerOrPath === 'string'
       ? {
           path: listenerOrPath,
@@ -125,20 +139,23 @@ export class Configer {
         : {
             listener: listenerOrPath as ConfigListener
         }
-    this.listeners.add(entry)
+    subscriptions.add(entry)
     return {
       dispose: () => {
-        this.listeners.delete(entry)
+        subscriptions.delete(entry)
       }
     }
   }
 
   private async saveChange(previous: CodexioConfig, current: CodexioConfig): Promise<ConfigChange> {
     const paths = diffConfigPaths(previous, current)
-    await this.write(current)
     const change = {
       paths
     }
+    if (paths.length > 0) {
+      await this.notifySubscriptions(this.beforeChangeListeners, previous, current, change)
+    }
+    await this.write(current)
     if (paths.length > 0) {
       await this.notify(previous, current, change)
     }
@@ -159,7 +176,11 @@ export class Configer {
   }
 
   private async notify(previous: CodexioConfig, current: CodexioConfig, change: ConfigChange): Promise<void> {
-    for (const entry of this.listeners) {
+    await this.notifySubscriptions(this.listeners, previous, current, change)
+  }
+
+  private async notifySubscriptions(subscriptions: Set<ConfigSubscriptionEntry>, previous: CodexioConfig, current: CodexioConfig, change: ConfigChange): Promise<void> {
+    for (const entry of subscriptions) {
       if ('path' in entry) {
         if (!configPathChanged(change.paths, entry.path)) {
           continue

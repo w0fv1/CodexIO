@@ -1,5 +1,5 @@
 ---
-version: 0.11.0
+version: 0.11.2
 ---
 
 # Codexio
@@ -97,9 +97,10 @@ agents:
   codex:
     enabled: true
     bundled: true
-workspace:
-  path: /workspace
-  perIoThread: true
+app:
+  workspace:
+    path: /workspace
+    perIoThread: true
 ```
 
 首次使用 Codex 时，如果容器内还没有登录态，Web 页面会返回登录地址和验证码。按提示完成登录后，登录态会保存在 `codexio-data` volume 的 `/data/codex`，重启容器不会丢失。
@@ -165,6 +166,18 @@ curl -X POST -H "Authorization: Bearer $CODEXIO_SERVER_TOKEN" http://127.0.0.1:8
 关闭浏览器页面不会退出 Codexio。只要托盘图标还在，Codexio 仍然在后台运行。
 
 如果你希望完全退出，请在托盘图标菜单中选择退出。直接关闭浏览器标签页只会关闭页面，不会关闭后台服务。
+
+### 开机启动
+
+Windows 桌面安装版可以在配置页的 App 分组中勾选“开机启动”。保存后立即生效，取消勾选会移除开机启动项。开发模式、命令行模式和容器模式不会修改 Windows 开机启动项。
+
+### 接收 VS Code Codex 回复
+
+使用外部 Codex 时，可以在配置页的 VS Code Replies 分组中开启观察。Codexio 启动时只建立当前会话基线，不发送历史内容；启动后，所有 VS Code 工作区中新产生的完整 Agent 回复会进入现有输出链路并发送到所有已启用的输出通道。该能力不发送 VS Code 用户输入、流式片段、推理、命令输出或工具执行过程。
+
+开启前必须同时启用 Codex Agent，并关闭 Bundled。Codexio 将使用外部 Codex 和用户默认的 `CODEX_HOME`，从而读取 VS Code Codex 持久化的线程状态。
+
+每条内部消息都携带 thread ID 和名称。Codex 更新会话名称后，Web 页面的会话列表会同步更新。
 
 ### 更新版本
 
@@ -294,6 +307,6 @@ Codexio 默认不把对话记录保存到远程数据库。它主要在本机处
 
 ## 版本说明
 
-当前 README 适用于版本 `0.11.0`。
+当前 README 适用于版本 `0.11.2`。
 
 如果发布页显示的版本和本文顶部的 `version` 不一致，请以发布页版本为准，并下载对应版本的说明。

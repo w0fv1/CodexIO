@@ -1,14 +1,14 @@
-import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { inject, injectable } from 'inversify'
 import { Configer } from '../Configer.js'
-import { IoThreadIdManager } from '../IoThreadIdManager.js'
+import { ThreadRegistry } from '../ThreadRegistry.js'
 import { Logger } from '../Logger.js'
 import { CodexioConfig } from '../../value/ConfigDefinition.js'
 import { Message, MessageFile } from '../../value/Message.js'
 import { Result } from '../../value/Result.js'
 import { createNfircoThread, createNfircoThreadMessage, generateNfircoThreadUploadUrl, normalizeNfircoThreadCredentials, NfircoThreadCredentials } from '../channel/NfircoThreadClient.js'
 import { ChannelOutput, ChannelOutputContext } from './ChannelOutput.js'
+import { deriveExternalDeliveryId } from './ExternalDeliveryIdentity.js'
 
 type NfircoOutputConfig = CodexioConfig['channelo']['nfirco']
 type OutputFile = {
@@ -23,7 +23,7 @@ export class NfircoThreadOutput implements ChannelOutput {
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
-    @inject(IoThreadIdManager) private readonly ioThreadIdManager: IoThreadIdManager
+    @inject(ThreadRegistry) private readonly threadRegistry: ThreadRegistry
   ) {}
 
   async start(): Promise<boolean> {
@@ -52,22 +52,15 @@ export class NfircoThreadOutput implements ChannelOutput {
     if (uploaded.isFailed) {
       return Result.fail(uploaded.message)
     }
-    let threadUuid = this.findThreadUuid(message.ioThreadId)
+    let threadUuid = this.findThreadUuid(message.thread.id)
     if (!threadUuid) {
-      let title = text.replace(/\s+/g, ' ').slice(0, 80).trim()
-      if (title.length === 0 && files.length > 0) {
-        title = files[0].file.name
-      }
-      if (title.length === 0) {
-        title = 'Codexio 会话'
-      }
       const created = await createNfircoThread(
         credentials,
         {
           section: this.config.section.trim(),
-          title,
+          title: message.thread.name,
           text,
-          requestId: `${message.ioThreadId}:thread:${randomUUID()}`,
+          requestId: deriveExternalDeliveryId('nfirco', message, 'thread'),
           fileIds: uploaded.data?.fileIds ?? [],
           imageIds: uploaded.data?.imageIds ?? []
         }
@@ -76,12 +69,12 @@ export class NfircoThreadOutput implements ChannelOutput {
         return Result.fail(created.message)
       }
       threadUuid = created.data.threadUuid
-      this.ioThreadIdManager.bind(message.ioThreadId, {
+      this.threadRegistry.bind(message.thread.id, {
         source: 'nfirco',
         id: threadUuid
       })
       Logger.info('nfirco thread created', {
-        ioThreadId: message.ioThreadId,
+        ioThreadId: message.thread.id,
         threadUuid,
         section: this.config.section.trim()
       })
@@ -92,7 +85,7 @@ export class NfircoThreadOutput implements ChannelOutput {
       threadUuid,
       {
         text,
-        requestId: `${message.ioThreadId}:${message.role}:${randomUUID()}`,
+        requestId: deriveExternalDeliveryId('nfirco', message, 'message'),
         fileIds: uploaded.data?.fileIds ?? [],
         imageIds: uploaded.data?.imageIds ?? []
       }
@@ -102,7 +95,7 @@ export class NfircoThreadOutput implements ChannelOutput {
     }
     Logger.info('nfirco thread message sent', {
       role: message.role,
-      ioThreadId: message.ioThreadId,
+      ioThreadId: message.thread.id,
       threadUuid,
       files: uploaded.data?.fileIds.length ?? 0,
       images: uploaded.data?.imageIds.length ?? 0
@@ -117,7 +110,7 @@ export class NfircoThreadOutput implements ChannelOutput {
   }
 
   private findThreadUuid(ioThreadId: string): string | undefined {
-    const threads = this.ioThreadIdManager.getChannelThreadIds(ioThreadId)
+    const threads = this.threadRegistry.getChannelThreadIds(ioThreadId)
     return threads.find((thread) => thread.source === 'nfirco')?.id
   }
 

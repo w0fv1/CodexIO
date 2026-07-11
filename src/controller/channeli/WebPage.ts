@@ -427,8 +427,18 @@ export const webPageHtml = `<!doctype html>
             thread.messages = []
             thread.unread = 0
           }
-          for (const message of messages || []) {
-            this.appendMessage(message, true)
+          for (const input of messages || []) {
+            const threadId = input.webThreadId || (input.thread && input.thread.id)
+            if (!threadId) {
+              continue
+            }
+            const message = this.normalizeMessage(input)
+            const thread = this.ensureThread(threadId)
+            thread.messages.push(message)
+            thread.updatedAt = Math.max(thread.updatedAt, message.occurredAt)
+          }
+          for (const thread of this.threads) {
+            thread.messages.sort((left, right) => left.occurredAt - right.occurredAt || left.sequence - right.sequence || String(left.id).localeCompare(String(right.id)))
           }
           if (!this.activeThreadId && this.threads.length > 0) {
             this.switchThread(this.threads[0].id)
@@ -445,7 +455,7 @@ export const webPageHtml = `<!doctype html>
             const current = existing.get(input.id)
             return {
               id: input.id,
-              title: typeof input.title === 'string' ? input.title : '',
+              title: input.thread && typeof input.thread.name === 'string' ? input.thread.name : '',
               messages: current ? current.messages : [],
               unread: current ? current.unread : 0,
               isWorking: Boolean(input.isWorking),
@@ -548,7 +558,7 @@ export const webPageHtml = `<!doctype html>
             return
           }
           if (message.event === 'error') {
-            this.append(message.webThreadId || message.ioThreadId, 'error', message.message || 'Request failed')
+            this.append(message.webThreadId || (message.thread && message.thread.id), 'error', message.message || 'Request failed')
             return
           }
           if (message.event !== 'message') {
@@ -569,6 +579,7 @@ export const webPageHtml = `<!doctype html>
             return
           }
           const payload = {
+            sourceMessageId: crypto.randomUUID(),
             text: value,
             files: this.draftFiles.map((file) => file.id)
           }
@@ -586,6 +597,10 @@ export const webPageHtml = `<!doctype html>
         append(threadId, type, text, html, files) {
           const message = {
             id: this.nextId++,
+            revision: 'local',
+            occurredAt: Date.now(),
+            sequence: 0,
+            status: 'completed',
             type,
             text,
             html,
@@ -596,7 +611,7 @@ export const webPageHtml = `<!doctype html>
           }
           const thread = this.ensureThread(threadId)
           thread.messages.push(message)
-          thread.updatedAt = Date.now()
+          thread.updatedAt = message.occurredAt
           if (thread.id !== this.activeThreadId) {
             thread.unread += 1
             return
@@ -608,23 +623,46 @@ export const webPageHtml = `<!doctype html>
             })
           }
         },
-        appendMessage(input, historical) {
-          const threadId = input.webThreadId || input.threadId || input.ioThreadId
-          if (!threadId) {
-            return
-          }
-          const message = {
+        normalizeMessage(input) {
+          return {
             id: input.id || this.nextId++,
+            revision: input.revision,
+            occurredAt: Number.isFinite(Number(input.occurredAt)) ? Number(input.occurredAt) : Date.now(),
+            sequence: Number.isInteger(input.sequence) ? input.sequence : 0,
+            status: input.status || 'completed',
             type: input.role,
             text: input.text || '',
             html: input.html || null,
             files: input.files || []
           }
+        },
+        appendMessage(input, historical) {
+          const threadId = input.webThreadId || (input.thread && input.thread.id)
+          if (!threadId) {
+            return
+          }
+          const message = this.normalizeMessage(input)
           const thread = this.ensureThread(threadId)
-          thread.messages.push(message)
-          thread.updatedAt = Number.isFinite(Number(input.createdAt)) ? Number(input.createdAt) : Date.now()
+          const existingIndex = thread.messages.findIndex((item) => item.id === message.id)
+          const inserted = existingIndex < 0
+          if (existingIndex >= 0) {
+            const existing = thread.messages[existingIndex]
+            if (existing.revision === message.revision) {
+              return
+            }
+            if (existing.status === 'completed' && message.status === 'streaming') {
+              return
+            }
+            thread.messages.splice(existingIndex, 1, message)
+          } else {
+            thread.messages.push(message)
+          }
+          thread.messages.sort((left, right) => left.occurredAt - right.occurredAt || left.sequence - right.sequence || String(left.id).localeCompare(String(right.id)))
+          thread.updatedAt = Math.max(thread.updatedAt, message.occurredAt)
           if (!historical && thread.id !== this.activeThreadId) {
-            thread.unread += 1
+            if (inserted) {
+              thread.unread += 1
+            }
             return
           }
           if (thread.id === this.activeThreadId) {

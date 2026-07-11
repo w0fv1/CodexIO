@@ -1,5 +1,8 @@
 app:
   id: container
+  workspace:
+    path: /workspace
+    perIoThread: true
 server:
   host: 0.0.0.0
   port: 8787
@@ -24,11 +27,7 @@ agents:
     enabled: true
     bundled: true
     command: codex
-    developerInstructions: ''
     requestTimeoutSeconds: 180
-workspace:
-  path: /workspace
-  perIoThread: true
 channeli:
   web:
     enabled: true

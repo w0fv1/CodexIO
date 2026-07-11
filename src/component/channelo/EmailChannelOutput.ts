@@ -6,6 +6,7 @@ import { Result } from '../../value/Result.js'
 import { Logger } from '../Logger.js'
 import { Configer } from '../Configer.js'
 import { ChannelOutput, ChannelOutputContext } from './ChannelOutput.js'
+import { deriveExternalDeliveryId } from './ExternalDeliveryIdentity.js'
 
 type EmailChannelOutputConfig = CodexioConfig['channelo']['email']
 
@@ -86,6 +87,7 @@ export class EmailChannelOutput implements ChannelOutput {
         length: text.length
       })
       await this.smtp.sendMail({
+        messageId: `<${deriveExternalDeliveryId('email', message)}@codexio.local>`,
         from,
         to: recipient,
         subject,

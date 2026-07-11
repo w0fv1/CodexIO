@@ -149,6 +149,8 @@ export class EmailChannelInput implements ChannelInput {
           }
           const result = await receiver.receive('email', {
             channelThreadId,
+            threadName: parsed.subject ?? undefined,
+            sourceMessageId: parsed.messageId?.trim() || `${mailbox}:uid:${message.uid}`,
             text
           })
           if (result.isFailed) {
@@ -156,6 +158,7 @@ export class EmailChannelInput implements ChannelInput {
               uid: message.uid,
               message: result.message
             })
+            continue
           }
         }
         await imap.messageFlagsAdd([message.uid], ['\\Seen'], {

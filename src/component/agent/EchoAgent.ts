@@ -1,6 +1,7 @@
 import { inject, injectable } from 'inversify'
 import { AppEvent, ChannelMessageReceivedEvent } from '../../value/Event.js'
 import { Result } from '../../value/Result.js'
+import { createMessage, deriveMessageId } from '../../value/Message.js'
 import { EventBus } from '../EventBus.js'
 import { Logger } from '../Logger.js'
 import { Agent } from './Agent.js'
@@ -24,19 +25,21 @@ export class EchoAgent implements Agent {
   async receive(event: ChannelMessageReceivedEvent): Promise<Result<void>> {
     Logger.info('echo agent received channel message', {
       source: event.source,
-      ioThreadId: event.message.ioThreadId,
+      ioThreadId: event.message.thread.id,
       text: event.message.text,
       files: event.message.files?.length ?? 0
     })
     const resultList = await this.eventBus.emitAsync(AppEvent.ChannelMessageDisplayRequested, {
       source: event.source,
       sourceMessageId: event.sourceMessageId,
-      message: {
-        ioThreadId: event.message.ioThreadId,
+      message: createMessage({
+        id: deriveMessageId('echo', event.message.id),
+        occurredAt: Math.max(Date.now(), event.message.occurredAt + 1),
+        thread: event.message.thread,
         role: 'agent',
         text: event.message.text,
         files: event.message.files
-      }
+      })
     })
     const failures = resultList.filter((item) => item.isFailed)
     if (failures.length > 0) {

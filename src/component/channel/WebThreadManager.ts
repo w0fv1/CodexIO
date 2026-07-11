@@ -1,14 +1,12 @@
-import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { inject, injectable } from 'inversify'
 import { renderMarkdownHtml, shouldRenderMarkdown } from '../../util/Markdown.js'
-import { Message, MessageFile } from '../../value/Message.js'
-import { IoThreadIdManager } from '../IoThreadIdManager.js'
+import { Message, MessageFile, MessageThread } from '../../value/Message.js'
+import { ThreadRegistry } from '../ThreadRegistry.js'
 
 export type WebThread = {
   id: string
-  ioThreadId: string
-  title: string
+  thread: MessageThread
   isWorking: boolean
   updatedAt: number
 }
@@ -17,10 +15,13 @@ export type WebThreadMessage = {
   event: 'message'
   id: string
   role: Message['role']
-  ioThreadId: string
+  thread: MessageThread
   webThreadId: string
   text: string
-  createdAt: number
+  revision: Message['revision']
+  occurredAt: number
+  sequence: number
+  status: Message['status']
   html?: string
   files?: MessageFile[]
 }
@@ -32,17 +33,37 @@ export type WebThreadSnapshot = {
 
 type WebThreadManagerEventMap = {
   threads: (threads: WebThread[]) => void
+  message: (message: WebThreadMessage) => void
 }
 
 @injectable()
 export class WebThreadManager {
   private readonly threads = new Map<string, WebThread>()
-  private readonly messages: WebThreadMessage[] = []
+  private readonly messages = new Map<string, WebThreadMessage>()
   private readonly events = new EventEmitter()
 
   constructor(
-    @inject(IoThreadIdManager) private readonly ioThreadIdManager: IoThreadIdManager
-  ) {}
+    @inject(ThreadRegistry) private readonly threadRegistry: ThreadRegistry
+  ) {
+    this.threadRegistry.on('renamed', (thread) => {
+      let changed = false
+      for (const webThread of this.threads.values()) {
+        if (webThread.thread.id === thread.id && webThread.thread.name !== thread.name) {
+          webThread.thread = { ...thread }
+          changed = true
+        }
+      }
+      for (const message of this.messages.values()) {
+        if (message.thread.id === thread.id && message.thread.name !== thread.name) {
+          message.thread = { ...thread }
+          changed = true
+        }
+      }
+      if (changed) {
+        this.emitThreads()
+      }
+    })
+  }
 
   on<K extends keyof WebThreadManagerEventMap>(event: K, listener: WebThreadManagerEventMap[K]): () => void {
     this.events.on(event, listener)
@@ -51,44 +72,48 @@ export class WebThreadManager {
     }
   }
 
-  createWebThread(webThreadId: string, ioThreadId: string): WebThread {
-    const existing = this.threads.get(webThreadId)
-    if (existing) {
-      return existing
-    }
-    const now = Date.now()
-    const thread = {
-      id: webThreadId,
-      ioThreadId,
-      title: '',
-      isWorking: false,
-      updatedAt: now
-    } satisfies WebThread
-    this.threads.set(webThreadId, thread)
-    this.emitThreads()
-    return thread
-  }
-
   appendMessage(message: Message, webThreadId?: string): WebThreadMessage {
-    const targetWebThreadId = webThreadId?.trim() || this.displayThreadId(message.ioThreadId)
-    const thread = this.createWebThread(targetWebThreadId, message.ioThreadId)
-    const data = this.toMessage(message, targetWebThreadId)
-    this.messages.push(data)
-    thread.updatedAt = data.createdAt
-    if (!thread.title && message.role === 'user') {
-      const title = message.text.replace(/\s+/g, ' ').trim()
-      if (title.length > 0) {
-        thread.title = title.slice(0, 40)
+    const existing = this.messages.get(message.id)
+    if (existing) {
+      if (existing.revision === message.revision) {
+        return existing
+      }
+      if (existing.status === 'completed' && message.status === 'streaming') {
+        return existing
       }
     }
+    const targetWebThreadId = existing?.webThreadId ?? (webThreadId?.trim() || this.displayThreadId(message.thread.id))
+    let thread = this.threads.get(targetWebThreadId)
+    if (!thread) {
+      thread = {
+        id: targetWebThreadId,
+        thread: this.threadRegistry.get(message.thread.id) ?? { ...message.thread },
+        isWorking: false,
+        updatedAt: message.occurredAt
+      }
+      this.threads.set(targetWebThreadId, thread)
+    }
+    const data = this.toMessage({
+      ...message,
+      thread: thread.thread
+    }, targetWebThreadId)
+    this.messages.set(message.id, data)
+    thread.updatedAt = Math.max(thread.updatedAt, message.occurredAt)
     this.emitThreads()
+    this.events.emit('message', data)
     return data
   }
 
   snapshot(): WebThreadSnapshot {
     return {
       threads: this.listThreads(),
-      messages: [...this.messages].sort((left, right) => left.createdAt - right.createdAt)
+      messages: [...this.messages.values()]
+        .sort((left, right) => left.occurredAt - right.occurredAt || left.sequence - right.sequence || left.id.localeCompare(right.id))
+        .map((message) => ({
+          ...message,
+          thread: { ...message.thread },
+          files: message.files?.map((file) => ({ ...file }))
+        }))
     }
   }
 
@@ -101,22 +126,28 @@ export class WebThreadManager {
         return right.updatedAt - left.updatedAt
       })
       .map((thread) => ({
-        ...thread
+        ...thread,
+        thread: {
+          ...thread.thread
+        }
       }))
   }
 
   private toMessage(message: Message, webThreadId: string): WebThreadMessage {
     const data: WebThreadMessage = {
       event: 'message',
-      id: randomUUID(),
+      id: message.id,
       role: message.role,
-      ioThreadId: message.ioThreadId,
+      thread: { ...message.thread },
       webThreadId,
       text: message.text,
-      createdAt: Date.now()
+      revision: message.revision,
+      occurredAt: message.occurredAt,
+      sequence: message.sequence,
+      status: message.status
     }
     if (message.files && message.files.length > 0) {
-      data.files = message.files
+      data.files = message.files.map((file) => ({ ...file }))
     }
     if (message.role !== 'user' && shouldRenderMarkdown(message.text)) {
       data.html = renderMarkdownHtml(message.text)
@@ -125,7 +156,7 @@ export class WebThreadManager {
   }
 
   private displayThreadId(ioThreadId: string): string {
-    return this.ioThreadIdManager.getChannelThreadIds(ioThreadId)
+    return this.threadRegistry.getChannelThreadIds(ioThreadId)
       .find((item) => item.source === 'web')?.id ?? `io:${ioThreadId}`
   }
 

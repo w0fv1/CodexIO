@@ -23,6 +23,7 @@ export type ChannelMessageDisplayRequestedEvent = {
   source?: keyof CodexioConfig['channeli']
   message: Message
   sourceMessageId?: string
+  targets?: Array<keyof CodexioConfig['channelo']>
 }
 
 export type AppEventMap = {

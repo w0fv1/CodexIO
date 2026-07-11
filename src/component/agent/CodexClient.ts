@@ -1,9 +1,6 @@
 import { EventEmitter } from 'node:events'
-import { existsSync, readdirSync, statSync } from 'node:fs'
-import { createRequire } from 'node:module'
 import { createInterface } from 'node:readline'
-import { delimiter } from 'node:path'
-import { dirname, extname, isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute } from 'node:path'
 import { inject, injectable } from 'inversify'
 import { execa } from 'execa'
 import { Configer } from '../Configer.js'
@@ -11,11 +8,32 @@ import { CodexioMetadata } from '../CodexioMetadata.js'
 import { Logger } from '../Logger.js'
 import { ThreadWorkspaceResolver } from '../ThreadWorkspaceResolver.js'
 import { createProcessEnv } from '../../util/ProcessEnvironment.js'
-import { MessageFile } from '../../value/Message.js'
 import { Result } from '../../value/Result.js'
+import { MessageThread } from '../../value/Message.js'
+import { CodexRuntimeConfig, CodexRuntimeResolver } from './codex/CodexRuntimeResolver.js'
+import { CodexSessionSupervisor } from './codex/CodexSessionSupervisor.js'
+import { CodexLiveItemTracker } from './codex/CodexLiveItemTracker.js'
+import { CodexObserverLifecycle } from './codex/CodexObserverLifecycle.js'
+import {
+  CodexClientEventMap,
+  CodexClientCompletedMessage,
+  CodexClientInput,
+  CodexClientLoginEvent,
+  CodexClientMessage,
+  CodexClientThread,
+  CodexClientTurn,
+  CodexThreadSnapshot
+} from './codex/CodexProtocol.js'
 
-const bundledCodexRelativePath = join('resources', 'app.asar.unpacked', 'node_modules', '@openai', 'codex-win32-x64', 'vendor', 'x86_64-pc-windows-msvc', 'bin', 'codex.exe')
-const require = createRequire(import.meta.url)
+export type {
+  CodexClientCompletedMessage,
+  CodexClientInput,
+  CodexClientLoginEvent,
+  CodexClientMessage,
+  CodexClientThread,
+  CodexClientTurn,
+  CodexThreadSnapshot
+} from './codex/CodexProtocol.js'
 
 type RpcMessage = {
   id?: number
@@ -28,75 +46,23 @@ type RpcMessage = {
   }
 }
 
-export type CodexClientThread = {
-  id: string
-  title: string
-  isWorking: boolean
-  deleted?: boolean
-}
-
-export type CodexClientInput = {
-  ioThreadId: string
-  threadId?: string
-  text: string
-  files?: MessageFile[]
-}
-
-export type CodexClientTurn = {
-  threadId: string
-  turnId: string
-}
-
-export type CodexClientCompletedMessage = {
-  itemId: string
-  role: 'assistant'
-  text: string
-}
-
-export type CodexClientMessage = {
-  threadId: string
-  turnId: string
-  itemId?: string
-  status: 'started' | 'delta' | 'completed' | 'failed'
-  role: 'assistant'
-  text: string
-  messages: CodexClientCompletedMessage[]
-}
-
-export type CodexClientLoginEvent = {
-  verificationUrl: string
-  userCode: string
-  loginCompleted: boolean
-}
-
-export type CodexClientEventMap = {
-  thread: (thread: CodexClientThread) => void
-  message: (message: CodexClientMessage) => void
-  login: (login: CodexClientLoginEvent) => void
-  error: (error: Error) => void
-}
-
-type CodexClientRuntimeConfig = {
-  bundled: boolean
-  command: string
-  args: string[]
-  processCwd: string
-  codexHomePath?: string
-  proxyUrl?: string
-  noProxyHosts: string[]
-  instruction: string
-  requestTimeoutMs: number
-}
-
 type CodexChildExit = {
   exitCode?: number
   signal?: string
   stderr?: unknown
 }
 
-type CodexCommand = {
-  command: string
-  args: string[]
+type CodexPendingRequest = {
+  resolve: (value: unknown) => void
+  reject: (error: Error) => void
+  timeout: NodeJS.Timeout
+}
+
+type CodexSession = {
+  generation: number
+  child: ReturnType<typeof execa>
+  pendingRequests: Map<number, CodexPendingRequest>
+  closePromise?: Promise<void>
 }
 
 @injectable()
@@ -104,17 +70,19 @@ export class CodexClient {
   private readonly events = new EventEmitter()
   private readonly threads = new Map<string, CodexClientThread>()
   private readonly turnIdByThreadId = new Map<string, string>()
+  private readonly liveItems = new CodexLiveItemTracker()
   private readonly workspaceResolver: ThreadWorkspaceResolver
-  private child?: ReturnType<typeof execa>
+  private readonly runtimeResolver: CodexRuntimeResolver
+  private readonly supervisor: CodexSessionSupervisor
+  private readonly observerLifecycle: CodexObserverLifecycle
+  private session?: CodexSession
   private nextRequestId = 1
+  private generation = 0
   private started = false
+  private startPromise?: Promise<Result<void>>
+  private stopPromise?: Promise<Result<void>>
   private loginStarted = false
   private loginEvent?: CodexClientLoginEvent
-  private pendingRequests = new Map<number, {
-    resolve: (value: unknown) => void
-    reject: (error: Error) => void
-    timeout: NodeJS.Timeout
-  }>()
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
@@ -122,6 +90,25 @@ export class CodexClient {
     @inject(ThreadWorkspaceResolver) workspaceResolver: ThreadWorkspaceResolver
   ) {
     this.workspaceResolver = workspaceResolver
+    this.runtimeResolver = new CodexRuntimeResolver(configer, metadata, workspaceResolver)
+    this.supervisor = new CodexSessionSupervisor({
+      generation: () => this.generation,
+      canRecover: () => !this.started && !this.session && !this.startPromise,
+      recover: () => {
+        void this.ensureStarted()
+      }
+    })
+    this.observerLifecycle = new CodexObserverLifecycle({
+      request: (method, params) => this.request(method, params),
+      emit: (snapshot) => this.emitSnapshot(snapshot),
+      fail: (error) => {
+        const session = this.session
+        if (session) {
+          this.failSession(session, error)
+        }
+      },
+      generation: () => this.generation
+    })
   }
 
   on<K extends keyof CodexClientEventMap>(event: K, listener: CodexClientEventMap[K]): () => void {
@@ -131,108 +118,201 @@ export class CodexClient {
     }
   }
 
-  async start(): Promise<Result<void>> {
-    if (this.started) {
-      return Result.successVoid()
-    }
-    try {
-      const config = await this.readRuntimeConfig()
-      await this.workspaceResolver.ensureBase()
-      const env = createProcessEnv(
-        config.codexHomePath,
-        config.codexHomePath ? `${config.codexHomePath}/config.toml` : undefined,
-        config.proxyUrl,
-        config.noProxyHosts,
-        {},
-        config.bundled
-      )
-      Logger.info('codex client starting', {
-        cwd: config.processCwd,
-        bundled: config.bundled,
-        command: config.command,
-        args: config.args
-      })
-      const child = execa(config.command, config.args, {
-        cwd: config.processCwd,
-        env,
-        stdin: 'pipe',
-        stdout: 'pipe',
-        stderr: 'pipe',
-        reject: false
-      })
-      this.child = child
-      if (!child.stdout || !child.stdin) {
-        return Result.fail('codex app-server stdio not available')
-      }
-      createInterface({
-        input: child.stdout
-      }).on('line', (line) => this.receiveLine(line))
-      child.stderr?.on('data', (data: Buffer) => {
-        const text = data.toString('utf8')
-        Logger.warn('codex app-server stderr', {
-          text
-        })
-        const error = readCodexStderrError(text)
-        if (error) {
-          this.emitError(error)
-        }
-      })
-      void child.then((result) => {
-        Logger.info('codex app-server exited', {
-          exitCode: result.exitCode,
-          signal: result.signal
-        })
-        this.handleChildClosed(child, new Error(formatChildExit(result)))
-      }).catch((error) => {
-        Logger.error('codex app-server failed', error)
-        this.handleChildClosed(child, error instanceof Error ? error : new Error(String(error)))
-      })
-      await this.request('initialize', {
-        clientInfo: {
-          name: 'codexio',
-          title: 'Codexio',
-          version: this.metadata.readVersion()
-        },
-        capabilities: {
-          experimentalApi: true,
-          requestAttestation: false
-        }
-      }, config.requestTimeoutMs)
-      child.stdin.write(`${JSON.stringify({
-        method: 'initialized',
-        params: {}
-      })}\n`)
-      this.started = true
-      Logger.info('codex client ready')
-      return Result.successVoid()
-    } catch (error) {
-      await this.stop()
-      return failFromError(error)
-    }
+  start(): Promise<Result<void>> {
+    this.supervisor.requestStart()
+    return this.ensureStarted()
   }
 
-  async stop(): Promise<Result<void>> {
+  private ensureStarted(): Promise<Result<void>> {
+    if (this.started && this.session) {
+      return Promise.resolve(Result.successVoid())
+    }
+    if (this.startPromise) {
+      return this.startPromise
+    }
+    const generation = this.generation + 1
+    this.generation = generation
+    const stopping = this.stopPromise
+    let session: CodexSession | undefined
+    const startPromise = (async (): Promise<Result<void>> => {
+      if (stopping) {
+        await stopping
+      }
+      if (generation !== this.generation) {
+        return Result.fail('codex client start superseded')
+      }
+      try {
+        const config = await this.readRuntimeConfig()
+        await this.workspaceResolver.ensureBase()
+        if (generation !== this.generation) {
+          return Result.fail('codex client start superseded')
+        }
+        const env = createProcessEnv(
+          config.codexHomePath,
+          config.codexHomePath ? `${config.codexHomePath}/config.toml` : undefined,
+          config.proxyUrl,
+          config.noProxyHosts,
+          {},
+          config.bundled
+        )
+        Logger.info('codex client starting', {
+          cwd: config.processCwd,
+          bundled: config.bundled,
+          command: config.command,
+          args: config.args,
+          generation
+        })
+        const child = execa(config.command, config.args, {
+          cwd: config.processCwd,
+          env,
+          stdin: 'pipe',
+          stdout: 'pipe',
+          stderr: 'pipe',
+          reject: false
+        })
+        const createdSession: CodexSession = {
+          generation,
+          child,
+          pendingRequests: new Map()
+        }
+        session = createdSession
+        if (generation !== this.generation) {
+          await this.terminateSession(createdSession)
+          return Result.fail('codex client start superseded')
+        }
+        this.session = createdSession
+        if (!child.stdout || !child.stdin) {
+          throw new Error('codex app-server stdio not available')
+        }
+        createInterface({
+          input: child.stdout
+        }).on('line', (line) => this.receiveLine(createdSession, line))
+        child.stderr?.on('data', (data: Buffer) => {
+          if (this.session !== createdSession) {
+            return
+          }
+          const text = data.toString('utf8')
+          Logger.warn('codex app-server stderr', {
+            text,
+            generation
+          })
+          const error = readCodexStderrError(text)
+          if (error) {
+            this.emitError(error)
+          }
+        })
+        void child.then((result) => {
+          Logger.info('codex app-server exited', {
+            exitCode: result.exitCode,
+            signal: result.signal,
+            generation
+          })
+          this.handleChildClosed(createdSession, new Error(formatChildExit(result)))
+        }).catch((error) => {
+          Logger.error('codex app-server failed', error)
+          this.handleChildClosed(
+            createdSession,
+            error instanceof Error ? error : new Error(String(error))
+          )
+        })
+        await this.request('initialize', {
+          clientInfo: {
+            name: 'codexio',
+            title: 'Codexio',
+            version: this.metadata.readVersion()
+          },
+          capabilities: {
+            experimentalApi: true,
+            requestAttestation: false
+          }
+        }, config.requestTimeoutMs, createdSession)
+        if (this.session !== createdSession || generation !== this.generation) {
+          throw new Error('codex client start superseded')
+        }
+        child.stdin.write(`${JSON.stringify({
+          method: 'initialized',
+          params: {}
+        })}\n`)
+        this.started = true
+        this.supervisor.sessionReady(generation)
+        this.observerLifecycle.start(config.observe)
+        Logger.info('codex client ready', {
+          generation
+        })
+        return Result.successVoid()
+      } catch (error) {
+        const reason = error instanceof Error ? error : new Error(String(error))
+        if (session) {
+          this.rejectPending(session, reason)
+          if (this.session === session) {
+            this.session = undefined
+            this.started = false
+            this.liveItems.clear()
+            this.supervisor.sessionEnded()
+            this.resetLogin()
+          }
+          await this.terminateSession(session)
+        }
+        return failFromError(error)
+      }
+    })()
+    this.startPromise = startPromise
+    void startPromise.then((result) => {
+      if (this.startPromise === startPromise) {
+        this.startPromise = undefined
+      }
+      if (result.isFailed || !this.started || !this.session) {
+        this.supervisor.scheduleRecovery(result.isFailed
+          ? result.message
+          : 'codex app-server ended during startup')
+      }
+    }, (error) => {
+      if (this.startPromise === startPromise) {
+        this.startPromise = undefined
+      }
+      this.supervisor.scheduleRecovery(error instanceof Error ? error.message : String(error))
+    })
+    return startPromise
+  }
+
+  stop(): Promise<Result<void>> {
+    this.supervisor.requestStop()
+    this.generation += 1
+    this.startPromise = undefined
+    if (this.stopPromise) {
+      return this.stopPromise
+    }
     const stopped = new Error('codex client stopped')
-    this.rejectPending(stopped)
-    this.failLogin(stopped)
+    const session = this.session
+    this.session = undefined
+    if (session) {
+      this.rejectPending(session, stopped)
+    }
+    this.resetLogin()
     this.started = false
     this.loginStarted = false
     this.loginEvent = undefined
     this.turnIdByThreadId.clear()
+    this.liveItems.clear()
     this.threads.clear()
-    const child = this.child
-    this.child = undefined
-    if (!child) {
+    this.observerLifecycle.stop()
+    const stopPromise = (async (): Promise<Result<void>> => {
+      if (session) {
+        await this.terminateSession(session)
+      }
       return Result.successVoid()
-    }
-    child.kill('SIGTERM')
-    await Promise.race([
-      child.catch(() => {}),
-      new Promise<void>((resolve) => {
-        setTimeout(resolve, 2000)
-      })
-    ])
-    return Result.successVoid()
+    })()
+    this.stopPromise = stopPromise
+    void stopPromise.then(() => {
+      if (this.stopPromise === stopPromise) {
+        this.stopPromise = undefined
+      }
+    }, () => {
+      if (this.stopPromise === stopPromise) {
+        this.stopPromise = undefined
+      }
+    })
+    return stopPromise
   }
 
   async login(): Promise<Result<boolean>> {
@@ -287,7 +367,7 @@ export class CodexClient {
     try {
       const threadId = normalizedThreadId.length > 0 && this.threads.has(normalizedThreadId)
         ? normalizedThreadId
-        : (await this.startThread(input.ioThreadId)).id
+        : (await this.startThread(input.thread)).id
       const turnInput = this.toTurnInput(input)
       const activeTurnId = this.turnIdByThreadId.get(threadId)
       if (activeTurnId) {
@@ -319,9 +399,10 @@ export class CodexClient {
       }
       this.turnIdByThreadId.set(threadId, turnId)
       this.emitMessage({
-        threadId: result.threadId,
+        thread: this.messageThread(result.threadId),
         turnId,
         status: 'started',
+        role: 'assistant',
         text: '',
         messages: []
       })
@@ -331,9 +412,9 @@ export class CodexClient {
     }
   }
 
-  private async startThread(ioThreadId: string): Promise<CodexClientThread> {
+  private async startThread(messageThread: MessageThread): Promise<CodexClientThread> {
     const config = await this.readRuntimeConfig()
-    const cwd = await this.workspaceResolver.ensure(ioThreadId)
+    const cwd = await this.workspaceResolver.ensure(messageThread.id)
     const codexExecutablePath = config.bundled && config.args[0] && isAbsolute(config.args[0])
       ? config.args[0]
       : config.command
@@ -360,29 +441,43 @@ export class CodexClient {
     if (!thread) {
       throw new Error('codex thread id not found')
     }
+    if (!thread.title.trim()) {
+      thread.title = messageThread.name
+    }
     this.upsertThread(thread)
+    this.observerLifecycle.ignoreThread(thread.id)
     return thread
   }
 
-  private async request(method: string, params?: unknown, timeoutMs?: number): Promise<unknown> {
-    if (!this.child?.stdin) {
+  private async request(
+    method: string,
+    params?: unknown,
+    timeoutMs?: number,
+    targetSession = this.session
+  ): Promise<unknown> {
+    if (!targetSession?.child.stdin || this.session !== targetSession) {
       throw new Error('codex client not started')
     }
     const id = this.nextRequestId
     this.nextRequestId += 1
     const timeout = timeoutMs ?? (await this.readRuntimeConfig()).requestTimeoutMs
+    if (this.session !== targetSession) {
+      throw new Error('codex client stopped')
+    }
     const result = new Promise<unknown>((resolve, reject) => {
       const timeoutHandle = setTimeout(() => {
-        this.pendingRequests.delete(id)
-        reject(new Error(`codex app-server request timed out: ${method}`))
+        targetSession.pendingRequests.delete(id)
+        const error = new Error(`codex app-server request timed out: ${method}`)
+        reject(error)
+        this.failSession(targetSession, error)
       }, timeout)
-      this.pendingRequests.set(id, {
+      targetSession.pendingRequests.set(id, {
         resolve,
         reject,
         timeout: timeoutHandle
       })
     })
-    this.child.stdin.write(`${JSON.stringify({
+    targetSession.child.stdin.write(`${JSON.stringify({
       method,
       id,
       params
@@ -390,7 +485,10 @@ export class CodexClient {
     return result
   }
 
-  private receiveLine(line: string): void {
+  private receiveLine(session: CodexSession, line: string): void {
+    if (this.session !== session) {
+      return
+    }
     let message: RpcMessage
     try {
       message = JSON.parse(line) as RpcMessage
@@ -402,11 +500,11 @@ export class CodexClient {
       return
     }
     if (typeof message.id === 'number') {
-      const pending = this.pendingRequests.get(message.id)
+      const pending = session.pendingRequests.get(message.id)
       if (!pending) {
         return
       }
-      this.pendingRequests.delete(message.id)
+      session.pendingRequests.delete(message.id)
       clearTimeout(pending.timeout)
       if (message.error) {
         pending.reject(new Error(message.error.message))
@@ -470,13 +568,28 @@ export class CodexClient {
         const threadId = readString(data, 'threadId')
         const turnId = readString(data.turn, 'id')
         if (threadId && turnId) {
+          this.liveItems.clearThread(threadId)
           this.turnIdByThreadId.set(threadId, turnId)
           this.emitMessage({
-            threadId,
+            thread: this.messageThread(threadId),
             turnId,
             status: 'started',
+            role: 'assistant',
             text: '',
             messages: []
+          })
+        }
+        return
+      }
+      case 'item/started': {
+        const threadId = readString(data, 'threadId')
+        const turnId = readString(data, 'turnId') ?? (threadId ? this.turnIdByThreadId.get(threadId) : undefined)
+        const item = data.item
+        const itemId = readString(data, 'itemId') ?? readString(item, 'id')
+        if (threadId && turnId && itemId) {
+          this.liveItems.startItem(threadId, turnId, itemId, {
+            phase: readString(item, 'phase') ?? undefined,
+            startedAt: readNumber(data, 'startedAtMs')
           })
         }
         return
@@ -486,13 +599,18 @@ export class CodexClient {
         const itemId = readString(data, 'itemId')
         const delta = readString(data, 'delta')
         const turnId = readString(data, 'turnId') ?? (threadId ? this.turnIdByThreadId.get(threadId) : undefined)
-        if (threadId && turnId && itemId && delta) {
+        const itemState = threadId && turnId && itemId
+          ? this.liveItems.getItem(threadId, turnId, itemId)
+          : undefined
+        if (threadId && turnId && itemId && delta && itemState?.phase !== 'commentary') {
           this.emitMessage({
-            threadId,
+            thread: this.messageThread(threadId),
             turnId,
             itemId,
             status: 'delta',
+            role: 'assistant',
             text: delta,
+            occurredAt: itemState?.startedAt,
             messages: []
           })
         }
@@ -505,18 +623,25 @@ export class CodexClient {
         const type = readString(item, 'type')
         const text = readString(item, 'text') ?? ''
         const turnId = readString(data, 'turnId') ?? (threadId ? this.turnIdByThreadId.get(threadId) : undefined)
-        if (threadId && turnId && itemId && (!type || type === 'agentMessage')) {
+        const itemState = threadId && turnId && itemId
+          ? this.liveItems.getItem(threadId, turnId, itemId)
+          : undefined
+        const phase = readString(item, 'phase') ?? itemState?.phase
+        if (threadId && turnId && itemId && phase !== 'commentary' && (!type || type === 'agentMessage')) {
           this.emitMessage({
-            threadId,
+            thread: this.messageThread(threadId),
             turnId,
             itemId,
-            status: 'completed',
+            status: 'itemCompleted',
+            role: 'assistant',
             text: '',
+            occurredAt: readNumber(data, 'completedAtMs'),
             messages: [
               {
                 itemId,
                 role: 'assistant',
-                text
+                text,
+                sequence: 0
               }
             ]
           })
@@ -531,6 +656,7 @@ export class CodexClient {
       case 'thread/closed': {
         const threadId = readString(data, 'threadId')
         if (threadId) {
+          this.liveItems.clearThread(threadId)
           this.removeThread(threadId)
         }
         return
@@ -545,12 +671,14 @@ export class CodexClient {
         const turnId = threadId ? this.turnIdByThreadId.get(threadId) : undefined
         if (threadId && turnId) {
           this.emitMessage({
-            threadId,
+            thread: this.messageThread(threadId),
             turnId,
             status: 'failed',
+            role: 'assistant',
             text: readString(error, 'message') ?? 'codex notification error',
             messages: []
           })
+          this.liveItems.clearTurn(threadId, turnId)
           this.turnIdByThreadId.delete(threadId)
         }
         this.emitError(new Error(readString(error, 'message') ?? 'codex notification error'))
@@ -577,20 +705,26 @@ export class CodexClient {
     const messages = items.flatMap((item, index): CodexClientCompletedMessage[] => {
         const type = readString(item, 'type')
         const text = readString(item, 'text')
-        if (type === 'agentMessage' && text && text.trim().length > 0) {
+        const itemId = readString(item, 'id') ?? `completed-${turnId}-${index}`
+        const phase = readString(item, 'phase') ?? this.liveItems.getItem(threadId, turnId, itemId)?.phase
+        if (type === 'agentMessage' && phase !== 'commentary' && text && text.trim().length > 0) {
           return [{
-            itemId: readString(item, 'id') ?? `completed-${turnId}-${index}`,
+            itemId,
             role: 'assistant',
-            text
+            text,
+            sequence: index
           }]
         }
         return []
       })
+    this.liveItems.clearTurn(threadId, turnId)
     this.emitMessage({
-      threadId,
+      thread: this.messageThread(threadId),
       turnId,
-      status: 'completed',
+      status: 'turnCompleted',
+      role: 'assistant',
       text: '',
+      occurredAt: readEpochSecondsAsMilliseconds(turn, 'completedAt'),
       messages
     })
   }
@@ -632,11 +766,8 @@ export class CodexClient {
     }
   }
 
-  private emitMessage(message: Omit<CodexClientMessage, 'role'>): void {
-    this.events.emit('message', {
-      ...message,
-      role: 'assistant'
-    })
+  private emitMessage(message: CodexClientMessage): void {
+    this.events.emit('message', message)
   }
 
   private upsertThread(thread: CodexClientThread): void {
@@ -646,6 +777,20 @@ export class CodexClient {
     }
     this.threads.set(thread.id, thread)
     this.events.emit('thread', thread)
+  }
+
+  private async emitSnapshot(snapshot: CodexThreadSnapshot): Promise<void> {
+    const listeners = this.events.listeners('snapshot') as CodexClientEventMap['snapshot'][]
+    for (const listener of listeners) {
+      await listener(snapshot)
+    }
+  }
+
+  private messageThread(threadId: string): CodexClientMessage['thread'] {
+    return {
+      id: threadId,
+      name: this.threads.get(threadId)?.title.trim() || '新对话'
+    }
   }
 
   private removeThread(threadId: string): void {
@@ -676,211 +821,84 @@ export class CodexClient {
     ].some((value) => values.includes(value))
   }
 
-  private async readRuntimeConfig(): Promise<CodexClientRuntimeConfig> {
-    const [
-      bundled,
-      proxyEnabled,
-      proxyHost,
-      proxyPort,
-      proxyNoProxy,
-      serverHost,
-      codexCommand,
-      instruction,
-      requestTimeoutSeconds
-    ] = await Promise.all([
-      this.configer.get('agents.codex.bundled'),
-      this.configer.get('proxy.enabled'),
-      this.configer.get('proxy.host'),
-      this.configer.get('proxy.port'),
-      this.configer.get('proxy.noProxy'),
-      this.configer.get('server.host'),
-      this.configer.get('agents.codex.command'),
-      this.configer.get('agents.instruction'),
-      this.configer.get('agents.codex.requestTimeoutSeconds')
-    ])
-    const command = bundled
-      ? bundledCodexCommand()
-      : externalCodexCommand(codexCommand, this.metadata.rootPath)
-    const cwd = await this.workspaceResolver.resolveBase()
-    return {
-      bundled,
-      command: command.command,
-      args: command.args,
-      processCwd: cwd.length > 0 ? cwd : join(this.metadata.dataPath, 'workspace'),
-      codexHomePath: bundled ? this.metadata.codexHomePath : undefined,
-      proxyUrl: proxyEnabled ? `http://${proxyHost}:${proxyPort}` : undefined,
-      noProxyHosts: [
-        'localhost',
-        '127.0.0.1',
-        '::1',
-        serverHost,
-        ...proxyNoProxy.split(',').map((item) => item.trim()).filter((item) => item.length > 0)
-      ],
-      instruction,
-      requestTimeoutMs: requestTimeoutSeconds * 1000
-    }
+  private async readRuntimeConfig(): Promise<CodexRuntimeConfig> {
+    return this.runtimeResolver.resolve()
   }
 
-  private rejectPending(error: Error): void {
-    for (const pending of this.pendingRequests.values()) {
+  private rejectPending(session: CodexSession, error: Error): void {
+    for (const pending of session.pendingRequests.values()) {
       clearTimeout(pending.timeout)
       pending.reject(error)
     }
-    this.pendingRequests.clear()
+    session.pendingRequests.clear()
   }
 
   private emitError(error: unknown): void {
     this.events.emit('error', error instanceof Error ? error : new Error(String(error)))
   }
 
-  private handleChildClosed(child: ReturnType<typeof execa>, error: Error): void {
-    if (this.child === child) {
-      this.child = undefined
+  private handleChildClosed(session: CodexSession, error: Error): void {
+    this.rejectPending(session, error)
+    if (this.session !== session) {
+      return
     }
-    this.rejectPending(error)
-    this.failLogin(error)
+    this.session = undefined
+    this.started = false
+    this.liveItems.clear()
+    this.supervisor.sessionEnded()
+    this.resetLogin()
+    this.supervisor.scheduleRecovery(error.message)
   }
 
-  private failLogin(error: Error): void {
-    if (this.loginStarted) {
-      this.loginStarted = false
-      this.emitError(error)
+  private failSession(session: CodexSession, error: Error): void {
+    this.rejectPending(session, error)
+    if (this.session !== session) {
+      return
     }
+    this.session = undefined
+    this.started = false
+    this.liveItems.clear()
+    this.supervisor.sessionEnded()
+    this.resetLogin()
+    void this.terminateSession(session).then(() => {
+      this.supervisor.scheduleRecovery(error.message)
+    }, (terminationError) => {
+      Logger.error('codex app-server termination failed', terminationError)
+      this.supervisor.scheduleRecovery(error.message)
+    })
   }
-}
 
-function bundledCodexCommand(): CodexCommand {
-  const packagedPath = join(dirname(process.execPath), bundledCodexRelativePath)
-  if (existsSync(packagedPath)) {
-    return {
-      command: packagedPath,
-      args: [
-        'app-server'
-      ]
+  private terminateSession(session: CodexSession): Promise<void> {
+    if (session.closePromise) {
+      return session.closePromise
     }
-  }
-  const codexScriptPath = require.resolve('@openai/codex/bin/codex.js')
-  return {
-    command: process.execPath,
-    args: [
-      codexScriptPath,
-      'app-server'
-    ]
-  }
-}
-
-function externalCodexCommand(commandValue: string, rootPath: string): CodexCommand {
-  const command = resolveExternalCommand(commandValue.trim().length > 0 ? commandValue.trim() : 'codex', rootPath)
-  return {
-    command,
-    args: [
-      'app-server'
-    ]
-  }
-}
-
-function resolveExternalCommand(command: string, rootPath: string): string {
-  if (!isBareCommand(command)) {
-    return command
-  }
-  for (const directory of externalCommandDirectories(command, rootPath)) {
-    for (const executableName of executableNames(command)) {
-      const executablePath = join(directory, executableName)
-      if (existsSync(executablePath)) {
-        return executablePath
+    const closePromise = (async () => {
+      session.child.kill('SIGTERM')
+      let timeout: NodeJS.Timeout | undefined
+      const exited = await Promise.race([
+        session.child.then(() => true, () => true),
+        new Promise<boolean>((resolve) => {
+          timeout = setTimeout(() => resolve(false), 2000)
+        })
+      ])
+      if (timeout) {
+        clearTimeout(timeout)
       }
-    }
+      if (!exited) {
+        Logger.warn('codex app-server termination timed out', {
+          generation: session.generation
+        })
+        session.child.kill('SIGKILL')
+      }
+    })()
+    session.closePromise = closePromise
+    return closePromise
   }
-  return command
-}
 
-function isBareCommand(command: string): boolean {
-  return !isAbsolute(command) && !command.includes('/') && !command.includes('\\')
-}
-
-function executableNames(command: string): string[] {
-  if (process.platform !== 'win32' || extname(command).length > 0) {
-    return [
-      command
-    ]
+  private resetLogin(): void {
+    this.loginStarted = false
+    this.loginEvent = undefined
   }
-  const extensions = (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD')
-    .split(';')
-    .map((item) => item.trim().toLowerCase())
-    .filter((item) => item.length > 0)
-  return [
-    command,
-    ...extensions.map((extension) => `${command}${extension}`)
-  ]
-}
-
-function externalCommandDirectories(command: string, rootPath: string): string[] {
-  const pathDirectories = (process.env.PATH ?? '')
-    .split(delimiter)
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0)
-  const localBinDirectories = new Set([
-    join(rootPath, 'node_modules', '.bin'),
-    resolve(rootPath, 'node_modules', '.bin'),
-    join(dirname(process.execPath), 'resources', 'app.asar.unpacked', 'node_modules', '.bin'),
-    resolve(dirname(process.execPath), 'resources', 'app.asar.unpacked', 'node_modules', '.bin')
-  ].map((item) => process.platform === 'win32' ? item.toLowerCase() : item))
-  const externalPathDirectories = pathDirectories.filter((item) => {
-    const path = process.platform === 'win32' ? resolve(item).toLowerCase() : resolve(item)
-    return !localBinDirectories.has(path)
-  })
-  if (!['codex', 'codex.exe'].includes(command.toLowerCase())) {
-    return externalPathDirectories
-  }
-  return uniquePaths([
-    ...codexCliDirectories(),
-    ...externalPathDirectories
-  ])
-}
-
-function codexCliDirectories(): string[] {
-  return [
-    ...vscodeCodexExtensionDirectories(),
-    ...openaiCodexBinDirectories()
-  ]
-}
-
-function openaiCodexBinDirectories(): string[] {
-  const root = process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'OpenAI', 'Codex', 'bin') : ''
-  if (!root || !existsSync(root)) {
-    return []
-  }
-  return readdirSync(root, {
-    withFileTypes: true
-  })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => join(root, entry.name))
-    .sort((left, right) => modifiedTime(right) - modifiedTime(left))
-}
-
-function vscodeCodexExtensionDirectories(): string[] {
-  const root = process.env.USERPROFILE ? join(process.env.USERPROFILE, '.vscode', 'extensions') : ''
-  if (!root || !existsSync(root)) {
-    return []
-  }
-  return readdirSync(root, {
-    withFileTypes: true
-  })
-    .filter((entry) => entry.isDirectory() && entry.name.toLowerCase().startsWith('openai.chatgpt-'))
-    .map((entry) => join(root, entry.name, 'bin', 'windows-x86_64'))
-    .sort((left, right) => modifiedTime(right) - modifiedTime(left))
-}
-
-function modifiedTime(path: string): number {
-  try {
-    return statSync(path).mtimeMs
-  } catch {
-    return 0
-  }
-}
-
-function uniquePaths(paths: string[]): string[] {
-  return Array.from(new Set(paths))
 }
 
 function readString(value: unknown, key: string): string | null {
@@ -889,6 +907,22 @@ function readString(value: unknown, key: string): string | null {
   }
   const item = (value as Record<string, unknown>)[key]
   return typeof item === 'string' ? item : null
+}
+
+function readEpochSecondsAsMilliseconds(value: unknown, key: string): number | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+  const item = (value as Record<string, unknown>)[key]
+  return typeof item === 'number' ? item * 1000 : undefined
+}
+
+function readNumber(value: unknown, key: string): number | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+  const item = (value as Record<string, unknown>)[key]
+  return typeof item === 'number' ? item : undefined
 }
 
 function collectValues(value: unknown): string[] {

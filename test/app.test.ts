@@ -27,9 +27,10 @@ import { FeishuChannelOutput } from '../src/component/channelo/FeishuChannelOutp
 import { FeishuWebhookChannelOutput } from '../src/component/channelo/FeishuWebhookChannelOutput.js'
 import { EmailChannelOutput } from '../src/component/channelo/EmailChannelOutput.js'
 import { NfircoThreadOutput } from '../src/component/channelo/NfircoThreadOutput.js'
+import { deriveExternalDeliveryId } from '../src/component/channelo/ExternalDeliveryIdentity.js'
 import { EventBus } from '../src/component/EventBus.js'
 import { AppEvent } from '../src/value/Event.js'
-import { IoThreadIdManager } from '../src/component/IoThreadIdManager.js'
+import { ThreadRegistry } from '../src/component/ThreadRegistry.js'
 import { ThreadWorkspaceResolver } from '../src/component/ThreadWorkspaceResolver.js'
 import { EchoAgent } from '../src/component/agent/EchoAgent.js'
 import { AgentManager } from '../src/component/agent/AgentManager.js'
@@ -37,6 +38,7 @@ import { CodexAgent } from '../src/component/agent/CodexAgent.js'
 import { CodexClient } from '../src/component/agent/CodexClient.js'
 import { CodexMessageStreamer } from '../src/component/agent/CodexMessageStreamer.js'
 import { CommandExecutor } from '../src/controller/CommandExecutor.js'
+import { createMessage } from '../src/value/Message.js'
 
 const testToken = 'test-message-token'
 const testMetadata = new CodexioMetadata()
@@ -123,6 +125,9 @@ describe('server', () => {
 
   it('serves config field descriptions on the config page', () => {
     expect(configPageHtml).toContain('field.description')
+    expect(configPageHtml).toContain('group.description')
+    expect(configPageHtml).toContain('renderTemplate(binding.template, current)')
+    expect(configPageHtml).toContain('binding.element.textContent')
     expect(configPageHtml).toContain('refreshExternalConfig')
     expect(configPageHtml).toContain('配置已在外部更新')
   })
@@ -134,10 +139,18 @@ describe('server', () => {
       isFailed: boolean
       data: {
         config: Record<string, unknown>
-        descriptor: Array<{
-          path: string
-          description: string
-        }>
+        descriptor: {
+          groups: Array<{
+            path: string
+            title: string
+            description: string
+          }>
+          fields: Array<{
+            path: string
+            groupPath: string
+            description: string
+          }>
+        }
       }
     }
     expect(result.isFailed).toBe(false)
@@ -147,11 +160,15 @@ describe('server', () => {
       'channeli',
       'channelo',
       'proxy',
-      'server',
-      'workspace'
+      'server'
     ])
-    for (const field of result.data.descriptor) {
+    expect(result.data.descriptor.groups.find((group) => group.path === 'channeli.feishu')).toMatchObject({
+      title: 'Feishu Input',
+      description: expect.stringContaining('${app.id}')
+    })
+    for (const field of result.data.descriptor.fields) {
       expect(field.description.trim().length).toBeGreaterThan(0)
+      expect(result.data.descriptor.groups.some((group) => group.path === field.groupPath)).toBe(true)
       const value = field.path.split('.').reduce<unknown>((current, key) => {
         if (!current || typeof current !== 'object' || Array.isArray(current)) {
           return undefined
@@ -189,6 +206,7 @@ describe('server', () => {
     const messages = recordWebSocket(socket)
     socket.send(JSON.stringify({
       webThreadId: 'web-thread',
+      sourceMessageId: 'web-message',
       text: 'hello'
     }))
     await waitForWebSocketMessages(messages, 2)
@@ -196,16 +214,39 @@ describe('server', () => {
       event: 'message',
       role: 'user',
       webThreadId: 'web-thread',
-      ioThreadId: expect.any(String),
+      thread: { id: expect.any(String), name: 'hello' },
       text: 'hello'
     })
     expect(messages[1]).toMatchObject({
       event: 'message',
       role: 'agent',
       webThreadId: 'web-thread',
-      ioThreadId: expect.any(String),
+      thread: { id: expect.any(String), name: 'hello' },
       text: 'hello'
     })
+    await closeWebSocket(socket)
+    await closeTestServer(listener)
+  })
+
+  it('projects a repeated Web request only once from receive to display', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    const socket = await openWebSocket(baseUrl)
+    const messages = recordWebSocket(socket)
+    const payload = JSON.stringify({
+      webThreadId: 'web-thread-idempotent',
+      sourceMessageId: 'web-message-idempotent',
+      text: 'hello'
+    })
+
+    socket.send(payload)
+    socket.send(payload)
+    await waitForWebSocketMessages(messages, 2)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    expect(messages.map((message) => `${message.role}:${message.text}`)).toEqual([
+      'user:hello',
+      'agent:hello'
+    ])
     await closeWebSocket(socket)
     await closeTestServer(listener)
   })
@@ -216,6 +257,7 @@ describe('server', () => {
     const messages = recordWebSocket(socket)
     socket.send(JSON.stringify({
       webThreadId: 'web-thread-history',
+      sourceMessageId: 'web-message-history',
       text: 'message'
     }))
     await waitForWebSocketMessages(messages, 2)
@@ -226,8 +268,7 @@ describe('server', () => {
       threads: [
         {
           id: 'web-thread-history',
-          ioThreadId: expect.any(String),
-          title: 'message'
+          thread: { id: expect.any(String), name: 'message' }
         }
       ],
       messages: [
@@ -235,14 +276,14 @@ describe('server', () => {
           event: 'message',
           role: 'user',
           webThreadId: 'web-thread-history',
-          ioThreadId: expect.any(String),
+          thread: { id: expect.any(String), name: 'message' },
           text: 'message'
         },
         {
           event: 'message',
           role: 'agent',
           webThreadId: 'web-thread-history',
-          ioThreadId: expect.any(String),
+          thread: { id: expect.any(String), name: 'message' },
           text: 'message'
         }
       ]
@@ -260,6 +301,7 @@ describe('server', () => {
     const secondMessages = recordWebSocket(second)
     first.send(JSON.stringify({
       webThreadId: 'web-thread-shared',
+      sourceMessageId: 'web-message-shared',
       text: 'shared input'
     }))
     await waitForWebSocketMessages(firstMessages, 2)
@@ -268,28 +310,28 @@ describe('server', () => {
       event: 'message',
       role: 'user',
       webThreadId: 'web-thread-shared',
-      ioThreadId: expect.any(String),
+      thread: { id: expect.any(String), name: 'shared input' },
       text: 'shared input'
     })
     expect(secondMessages[0]).toMatchObject({
       event: 'message',
       role: 'user',
       webThreadId: 'web-thread-shared',
-      ioThreadId: expect.any(String),
+      thread: { id: expect.any(String), name: 'shared input' },
       text: 'shared input'
     })
     expect(firstMessages[1]).toMatchObject({
       event: 'message',
       role: 'agent',
       webThreadId: 'web-thread-shared',
-      ioThreadId: expect.any(String),
+      thread: { id: expect.any(String), name: 'shared input' },
       text: 'shared input'
     })
     expect(secondMessages[1]).toMatchObject({
       event: 'message',
       role: 'agent',
       webThreadId: 'web-thread-shared',
-      ioThreadId: expect.any(String),
+      thread: { id: expect.any(String), name: 'shared input' },
       text: 'shared input'
     })
     await closeWebSocket(first)
@@ -797,8 +839,9 @@ describe('server', () => {
     const dir = await mkdtemp(join(tmpdir(), 'codexio-nfirco-output-'))
     const configPath = join(dir, 'config.yaml')
     await writeFile(configPath, [
-      'workspace:',
-      `  path: ${JSON.stringify(dir)}`,
+      'app:',
+      '  workspace:',
+      `    path: ${JSON.stringify(dir)}`,
       'channelo:',
       '  nfirco:',
       '    enabled: true',
@@ -818,21 +861,23 @@ describe('server', () => {
       name: 'agent.png',
       mime: 'image/png'
     })
-    const ioThreadIdManager = createIoThreadIdManager()
-    ioThreadIdManager.bind('io-thread', {
+    const threadRegistry = createThreadRegistry()
+    threadRegistry.bind('io-thread', {
       source: 'nfirco',
       id: 'thread-1'
     })
-    const output = new NfircoThreadOutput(new Configer(metadata), ioThreadIdManager)
+    const output = new NfircoThreadOutput(new Configer(metadata), threadRegistry)
     expect(await output.start()).toBe(true)
-    const result = await output.send({
-      ioThreadId: 'io-thread',
+    const message = createMessage({
+      id: 'nfirco-existing-message',
+      thread: { id: 'io-thread', name: '看图' },
       role: 'agent',
       text: '看图',
       files: [
         file
       ]
-    }, {
+    })
+    const result = await output.send(message, {
       source: 'nfirco'
     })
     expect(result.isFailed).toBe(false)
@@ -840,6 +885,7 @@ describe('server', () => {
     expect(uploadHeaders?.authorization).toBe(nfircoAuthorization)
     expect(messageHeaders?.authorization).toBe(nfircoAuthorization)
     expect(messageBody).toMatchObject({
+      requestId: deriveExternalDeliveryId('nfirco', message, 'message'),
       text: '看图',
       fileIds: [],
       imageIds: [
@@ -927,8 +973,9 @@ describe('server', () => {
     const dir = await mkdtemp(join(tmpdir(), 'codexio-nfirco-create-output-'))
     const configPath = join(dir, 'config.yaml')
     await writeFile(configPath, [
-      'workspace:',
-      `  path: ${JSON.stringify(dir)}`,
+      'app:',
+      '  workspace:',
+      `    path: ${JSON.stringify(dir)}`,
       'channelo:',
       '  nfirco:',
       '    enabled: true',
@@ -948,24 +995,28 @@ describe('server', () => {
       name: 'agent.png',
       mime: 'image/png'
     })
-    const ioThreadIdManager = createIoThreadIdManager()
-    const output = new NfircoThreadOutput(new Configer(metadata), ioThreadIdManager)
+    const threadRegistry = createThreadRegistry()
+    const output = new NfircoThreadOutput(new Configer(metadata), threadRegistry)
     expect(await output.start()).toBe(true)
-    const createResult = await output.send({
-      ioThreadId: 'io-thread',
+    const createMessageInput = createMessage({
+      id: 'nfirco-create-message',
+      thread: { id: 'io-thread', name: '看图' },
       role: 'agent',
       text: '看图',
       files: [
         file
       ]
-    }, {
+    })
+    const createResult = await output.send(createMessageInput, {
       source: 'feishu'
     })
-    const messageResult = await output.send({
-      ioThreadId: 'io-thread',
+    const followupMessage = createMessage({
+      id: 'nfirco-followup-message',
+      thread: { id: 'io-thread', name: '看图' },
       role: 'agent',
       text: '继续'
-    }, {
+    })
+    const messageResult = await output.send(followupMessage, {
       source: 'feishu'
     })
     expect(createResult.isFailed).toBe(false)
@@ -974,6 +1025,7 @@ describe('server', () => {
     expect(threadHeaders?.authorization).toBe(nfircoAuthorization)
     expect(messageHeaders?.authorization).toBe(nfircoAuthorization)
     expect(createdThreadBody).toMatchObject({
+      requestId: deriveExternalDeliveryId('nfirco', createMessageInput, 'thread'),
       section: 'section-1',
       title: '看图',
       text: '看图',
@@ -983,9 +1035,10 @@ describe('server', () => {
       ]
     })
     expect(messageBody).toMatchObject({
+      requestId: deriveExternalDeliveryId('nfirco', followupMessage, 'message'),
       text: '继续'
     })
-    expect(ioThreadIdManager.getChannelThreadIds('io-thread')).toEqual([
+    expect(threadRegistry.getChannelThreadIds('io-thread')).toEqual([
       {
         source: 'nfirco',
         id: 'thread-created'
@@ -1043,24 +1096,24 @@ async function createTestCodexioApp(configer: Configer): Promise<{
   })
   const eventBus = new EventBus()
   const fileStore = new FileStore(metadata)
-  const ioThreadIdManager = createIoThreadIdManager()
+  const threadRegistry = createThreadRegistry()
   const workspaceResolver = new ThreadWorkspaceResolver(configer, metadata)
   const codexClient = new CodexClient(configer, metadata, workspaceResolver)
-  const webThreadManager = new WebThreadManager(ioThreadIdManager)
+  const webThreadManager = new WebThreadManager(threadRegistry)
   const webHub = new WebChannelHub(fileStore, webThreadManager)
   const webInput = new WebChannelInput(configer, webHub)
   const webOutput = new WebChannelOutput(configer, webHub)
   const feishuInput = new FeishuChannelInput(configer)
-  const feishuOutput = new FeishuChannelOutput(configer, ioThreadIdManager)
+  const feishuOutput = new FeishuChannelOutput(configer, threadRegistry)
   const emailInput = new EmailChannelInput(configer)
   const emailOutput = new EmailChannelOutput(configer)
   const nfircoInput = new NfircoThreadInput(configer, fileStore)
-  const nfircoOutput = new NfircoThreadOutput(configer, ioThreadIdManager)
+  const nfircoOutput = new NfircoThreadOutput(configer, threadRegistry)
   const outputManager = new ChannelOutputManager(
     configer,
     fileStore,
     eventBus,
-    ioThreadIdManager,
+    threadRegistry,
     webOutput,
     feishuOutput,
     new FeishuWebhookChannelOutput(configer),
@@ -1068,10 +1121,10 @@ async function createTestCodexioApp(configer: Configer): Promise<{
     nfircoOutput,
     workspaceResolver
   )
-  const codexAgent = new CodexAgent(configer, eventBus, ioThreadIdManager, codexClient, new CodexMessageStreamer(eventBus))
+  const codexAgent = new CodexAgent(configer, eventBus, threadRegistry, codexClient, new CodexMessageStreamer(eventBus))
   const echoAgent = new EchoAgent(eventBus)
   const agentManager = new AgentManager(configer, eventBus, codexAgent, echoAgent, workspaceResolver)
-  const inputManager = new ChannelInputManager(configer, eventBus, ioThreadIdManager, new CommandExecutor(eventBus), webInput, feishuInput, emailInput, nfircoInput)
+  const inputManager = new ChannelInputManager(configer, eventBus, threadRegistry, new CommandExecutor(eventBus), webInput, feishuInput, emailInput, nfircoInput)
   const apiController = new CodexioApiController(configer, outputManager, fileStore, webHub, eventBus, metadata)
   await outputManager.start()
   await agentManager.start()
@@ -1189,8 +1242,8 @@ async function closeWebSocket(socket: WebSocket): Promise<void> {
   })
 }
 
-function createIoThreadIdManager(): IoThreadIdManager {
-  return new IoThreadIdManager(new CodexioMetadata({
+function createThreadRegistry(): ThreadRegistry {
+  return new ThreadRegistry(new CodexioMetadata({
     rootPath: testMetadata.rootPath,
     dataPath: join(tmpdir(), `codexio-io-thread-${randomUUID()}`)
   }))

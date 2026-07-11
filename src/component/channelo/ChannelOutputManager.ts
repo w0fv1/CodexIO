@@ -1,7 +1,8 @@
 import { inject, injectable } from 'inversify'
 import { basename, isAbsolute, join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { Result } from '../../value/Result.js'
-import { Message, MessageFile } from '../../value/Message.js'
+import { createMessage, Message, MessageFile } from '../../value/Message.js'
 import { AppEvent, ChannelMessageDisplayRequestedEvent } from '../../value/Event.js'
 import { parseMarkdownAttachmentReferences } from '../../util/Markdown.js'
 import { ChannelOutput, ChannelOutputContext } from './ChannelOutput.js'
@@ -9,8 +10,10 @@ import { FileStore } from '../FileStore.js'
 import { Logger } from '../Logger.js'
 import { Configer } from '../Configer.js'
 import { EventBus } from '../EventBus.js'
-import { IoThreadIdManager } from '../IoThreadIdManager.js'
+import { ThreadRegistry } from '../ThreadRegistry.js'
 import { ThreadWorkspaceResolver } from '../ThreadWorkspaceResolver.js'
+import { KeyedSerialQueue } from '../KeyedSerialQueue.js'
+import { MessageInbox } from '../MessageInbox.js'
 import { EmailChannelOutput } from './EmailChannelOutput.js'
 import { FeishuChannelOutput } from './FeishuChannelOutput.js'
 import { FeishuWebhookChannelOutput } from './FeishuWebhookChannelOutput.js'
@@ -21,18 +24,20 @@ import { WebChannelOutput } from './WebChannelOutput.js'
 export class ChannelOutputManager {
   private readonly listener = (event: ChannelMessageDisplayRequestedEvent) => this.send(event.message, {
     source: event.source,
-    sourceMessageId: event.sourceMessageId
+    sourceMessageId: event.sourceMessageId,
+    targets: event.targets
   })
   private readonly availableOutputs: ChannelOutput[]
   private readonly outputs = new Map<string, ChannelOutput>()
-  private readonly outputQueues = new Map<string, Promise<void>>()
+  private readonly deliveryQueue = new KeyedSerialQueue()
+  private deliveryInbox = new MessageInbox<void>()
   private started = false
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
     @inject(FileStore) private readonly fileStore: FileStore,
     @inject(EventBus) private readonly eventBus: EventBus,
-    @inject(IoThreadIdManager) private readonly ioThreadIdManager: IoThreadIdManager,
+    @inject(ThreadRegistry) private readonly threadRegistry: ThreadRegistry,
     @inject(WebChannelOutput) web: ChannelOutput,
     @inject(FeishuChannelOutput) feishu: ChannelOutput,
     @inject(FeishuWebhookChannelOutput) feishuWebhook: ChannelOutput,
@@ -73,7 +78,7 @@ export class ChannelOutputManager {
     if (message.role === 'agent') {
       return this.sendAgent(message, context)
     }
-    return this.sendSystem(message.text, message.ioThreadId)
+    return this.sendSystem(message.text, message.thread.id)
   }
 
   async sendUser(message: Message, context?: ChannelOutputContext): Promise<Result<void>>
@@ -85,17 +90,24 @@ export class ChannelOutputManager {
     }
     Logger.info('user message received', {
       source: context?.source ?? null,
-      ioThreadId: message.ioThreadId,
+      ioThreadId: message.thread.id,
       text: message.text,
       files: message.files?.length ?? 0
     })
-    const stored: Message = {
-      ...message,
-      role: 'user'
-    }
+    const stored = createMessage({
+      id: message.id,
+      occurredAt: message.occurredAt,
+      sequence: message.sequence,
+      status: message.status,
+      thread: message.thread,
+      role: 'user',
+      text: message.text,
+      files: message.files
+    })
     return this.broadcast(stored, {
       source: context?.source,
-      sourceMessageId: context?.sourceMessageId
+      sourceMessageId: context?.sourceMessageId,
+      targets: context?.targets
     })
   }
 
@@ -107,13 +119,20 @@ export class ChannelOutputManager {
     if (prepared.text.trim().length === 0 && (!prepared.files || prepared.files.length === 0)) {
       return Result.fail('text or file is required')
     }
-    const stored: Message = {
-      ...prepared,
-      role: 'agent'
-    }
+    const stored = createMessage({
+      id: prepared.id,
+      occurredAt: prepared.occurredAt,
+      sequence: prepared.sequence,
+      status: prepared.status,
+      thread: prepared.thread,
+      role: 'agent',
+      text: prepared.text,
+      files: prepared.files
+    })
     return this.broadcast(stored, {
       source: context?.source,
-      sourceMessageId: context?.sourceMessageId
+      sourceMessageId: context?.sourceMessageId,
+      targets: context?.targets
     })
   }
 
@@ -121,15 +140,18 @@ export class ChannelOutputManager {
     if (text.trim().length === 0) {
       return Result.fail('text is required')
     }
-    const targetIoThreadId = ioThreadId?.trim() || this.ioThreadIdManager.getLastActiveIoThreadId()
-    if (!targetIoThreadId) {
+    const targetThread = ioThreadId?.trim()
+      ? this.threadRegistry.get(ioThreadId)
+      : this.threadRegistry.getLastActive()
+    if (!targetThread) {
       return Result.fail('active ioThreadId not found')
     }
-    const message = {
-      ioThreadId: targetIoThreadId,
+    const message = createMessage({
+      id: randomUUID(),
+      thread: targetThread,
       role: 'system',
       text
-    } satisfies Message
+    })
     return this.broadcast(message)
   }
 
@@ -162,6 +184,7 @@ export class ChannelOutputManager {
       }
     }
     this.outputs.clear()
+    this.deliveryInbox = new MessageInbox<void>()
     for (const output of this.availableOutputs) {
       try {
         if (await output.start()) {
@@ -183,12 +206,19 @@ export class ChannelOutputManager {
     if (this.outputs.size === 0) {
       return Result.fail('channel output not found')
     }
-    const outputs = [...this.outputs.values()]
+    const targetTypes = context?.targets ?? (message.status === 'streaming' ? ['web'] : undefined)
+    const outputs = [...this.outputs.values()].filter((output) => !targetTypes || targetTypes.includes(output.type))
     if (outputs.length === 0) {
-      return Result.fail('channel output not found')
+      return Result.fail(targetTypes
+        ? `channel output not found: ${targetTypes.join(', ')}`
+        : 'channel output not found')
     }
-    for (const output of outputs) {
-      this.enqueueOutput(output, message, context)
+    const results = await Promise.all(outputs.map((output) => this.enqueueOutput(output, message, context)))
+    const failures = results.flatMap((result, index) => result.isFailed
+      ? [`${outputs[index].type}: ${result.message}`]
+      : [])
+    if (failures.length > 0) {
+      return Result.fail(failures.join('\n'))
     }
     return Result.successVoid()
   }
@@ -202,7 +232,7 @@ export class ChannelOutputManager {
     for (const file of message.files ?? []) {
       files.set(file.id, file)
     }
-    const workspacePath = await this.workspaceResolver.resolve(message.ioThreadId)
+    const workspacePath = await this.workspaceResolver.resolve(message.thread.id)
     for (const reference of parsed.files) {
       try {
         const resolved = this.fileStore.resolveUrl(reference.path)
@@ -245,9 +275,10 @@ export class ChannelOutputManager {
     }
   }
 
-  private enqueueOutput(output: ChannelOutput, message: Message, context?: ChannelOutputContext): void {
-    const previous = this.outputQueues.get(output.type) ?? Promise.resolve()
-    const task = previous.catch(() => {}).then(async () => {
+  private enqueueOutput(output: ChannelOutput, message: Message, context?: ChannelOutputContext): Promise<Result<void>> {
+    const key = `${output.type}\u0000${message.thread.id}`
+    const deliveryId = `${output.type}\u0000${message.id}`
+    return this.deliveryQueue.run(key, () => this.deliveryInbox.run(deliveryId, message.revision, async () => {
       try {
         const result = await output.send(message, context)
         if (result.isFailed) {
@@ -256,23 +287,19 @@ export class ChannelOutputManager {
             message: result.message
           })
         }
+        return result
       } catch (error) {
         const failed = Result.fromError(error)
         Logger.warn('channel output failed', {
           type: output.type,
           message: failed.message
         })
+        return failed
       }
-    })
-    this.outputQueues.set(output.type, task)
-    void task.finally(() => {
-      if (this.outputQueues.get(output.type) === task) {
-        this.outputQueues.delete(output.type)
-      }
-    })
+    }))
   }
 
   private async flushOutputs(): Promise<void> {
-    await Promise.allSettled(this.outputQueues.values())
+    await this.deliveryQueue.drain()
   }
 }

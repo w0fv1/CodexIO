@@ -5,6 +5,7 @@ import { ChannelOutput, ChannelOutputContext } from './ChannelOutput.js'
 import { Result } from '../../value/Result.js'
 import { Logger } from '../Logger.js'
 import { Configer } from '../Configer.js'
+import { deriveExternalDeliveryId } from './ExternalDeliveryIdentity.js'
 
 type FeishuWebhookChannelConfig = CodexioConfig['channelo']['feishuWebhook']
 
@@ -47,7 +48,8 @@ export class FeishuWebhookChannelOutput implements ChannelOutput {
       const response = await fetch(this.config.url, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'Idempotency-Key': deriveExternalDeliveryId('feishuWebhook', message)
         },
         body: JSON.stringify({
           msg_type: 'text',

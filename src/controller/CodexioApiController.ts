@@ -10,7 +10,7 @@ import { inject, injectable } from 'inversify'
 import { ChannelOutputManager } from '../component/channelo/ChannelOutputManager.js'
 import { Logger } from '../component/Logger.js'
 import { FileStore } from '../component/FileStore.js'
-import { configFieldDescriptors } from '../value/ConfigDefinition.js'
+import { configDescriptor } from '../value/ConfigDefinition.js'
 import { Configer } from '../component/Configer.js'
 import { configPageHtml } from './ConfigPage.js'
 import { Result } from '../value/Result.js'
@@ -230,12 +230,11 @@ export class CodexioApiController {
             app: await this.configer.get('app'),
             server: await this.configer.get('server'),
             agents: await this.configer.get('agents'),
-            workspace: await this.configer.get('workspace'),
             proxy: await this.configer.get('proxy'),
             channeli: await this.configer.get('channeli'),
             channelo: await this.configer.get('channelo')
           },
-          descriptor: configFieldDescriptors
+          descriptor: configDescriptor
         }))
       } catch (error) {
         Logger.error('api config read failed', error)

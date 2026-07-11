@@ -7,6 +7,7 @@ export type ChannelType = keyof CodexioConfig['channelo']
 export type ChannelOutputContext = {
   source?: keyof CodexioConfig['channeli']
   sourceMessageId?: string
+  targets?: ChannelType[]
 }
 
 export interface ChannelOutput {

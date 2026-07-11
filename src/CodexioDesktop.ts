@@ -6,6 +6,8 @@ import { setTimeout as wait } from 'node:timers/promises'
 import electron from 'electron'
 import type { NativeImage, Tray as ElectronTray } from 'electron'
 import { CodexioUpdater } from './CodexioUpdater.js'
+import { LoginItemManager } from './component/desktop/LoginItemManager.js'
+import { DesktopResponse, isDesktopRequest } from './value/DesktopMessage.js'
 
 type ServerState = {
   pid: number
@@ -33,6 +35,7 @@ class CodexioDesktop {
   private statePath = ''
   private serverPath = ''
   private serverFailureNotified = false
+  private readonly loginItems = new LoginItemManager(app, app.isPackaged, process.platform, process.execPath)
   private readonly notifications = new Set<electron.Notification>()
 
   async start(): Promise<void> {
@@ -179,9 +182,25 @@ class CodexioDesktop {
       stdio: [
         'ignore',
         'pipe',
-        'pipe'
+        'pipe',
+        'ipc'
       ],
       windowsHide: true
+    })
+    this.server.on('message', (message) => {
+      if (!isDesktopRequest(message)) {
+        return
+      }
+      const response: DesktopResponse = {
+        type: 'desktop.response',
+        id: message.id
+      }
+      try {
+        this.loginItems.apply(message.value)
+      } catch (error) {
+        response.error = normalizeErrorMessage(error)
+      }
+      this.server?.send?.(response)
     })
     this.server.stdout?.on('data', (data) => {
       this.log(`server stdout: ${data.toString('utf8').trimEnd()}`)

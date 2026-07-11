@@ -8,8 +8,9 @@ import { Result } from '../../value/Result.js'
 import { Logger } from '../Logger.js'
 import { Configer } from '../Configer.js'
 import { isImageFile } from '../FileStore.js'
-import { IoThreadIdManager } from '../IoThreadIdManager.js'
+import { ThreadRegistry } from '../ThreadRegistry.js'
 import { ChannelOutput, ChannelOutputContext } from './ChannelOutput.js'
+import { deriveExternalDeliveryId } from './ExternalDeliveryIdentity.js'
 
 type FeishuChannelOutputConfig = CodexioConfig['channelo']['feishu']
 type FeishuCreateMessagePayload = {
@@ -20,6 +21,7 @@ type FeishuCreateMessagePayload = {
     receive_id: string
     msg_type: string
     content: string
+    uuid?: string
   }
 }
 type FeishuCreateMessageClient = {
@@ -40,6 +42,7 @@ type FeishuCreateMessageClient = {
             msg_type: string
             content: string
             reply_in_thread: true
+            uuid?: string
           }
         }) => Promise<{
           data?: {
@@ -62,7 +65,7 @@ export class FeishuChannelOutput implements ChannelOutput {
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
-    @inject(IoThreadIdManager) private readonly ioThreadIdManager: IoThreadIdManager
+    @inject(ThreadRegistry) private readonly threadRegistry: ThreadRegistry
   ) {}
 
   async start(): Promise<boolean> {
@@ -195,9 +198,10 @@ export class FeishuChannelOutput implements ChannelOutput {
           })
         })
       }
-      let replyMessageId = context?.sourceMessageId?.trim() || this.replyMessageIdByIoThreadId.get(message.ioThreadId)
+      let replyMessageId = context?.sourceMessageId?.trim() || this.replyMessageIdByIoThreadId.get(message.thread.id)
       const messageClient = this.client as unknown as FeishuCreateMessageClient
-      for (const outgoingMessage of outgoingMessages) {
+      for (const [index, outgoingMessage] of outgoingMessages.entries()) {
+        const uuid = deriveExternalDeliveryId('feishu', message, String(index))
         if (replyMessageId) {
           const replied = await messageClient.im.v1.message.reply({
             path: {
@@ -206,16 +210,17 @@ export class FeishuChannelOutput implements ChannelOutput {
             data: {
               msg_type: outgoingMessage.msgType,
               content: outgoingMessage.content,
-              reply_in_thread: true
+              reply_in_thread: true,
+              uuid
             }
           })
           const createdMessageId = replied.data?.message_id?.trim()
           if (createdMessageId) {
-            this.replyMessageIdByIoThreadId.set(message.ioThreadId, createdMessageId)
+            this.replyMessageIdByIoThreadId.set(message.thread.id, createdMessageId)
           }
           const repliedThreadId = replied.data?.thread_id?.trim()
-          if (repliedThreadId && !this.feishuThreadId(message.ioThreadId)) {
-            this.ioThreadIdManager.bind(message.ioThreadId, {
+          if (repliedThreadId && !this.feishuThreadId(message.thread.id)) {
+            this.threadRegistry.bind(message.thread.id, {
               source: 'feishu',
               id: `${this.chatId}:thread:${repliedThreadId}`
             })
@@ -229,20 +234,21 @@ export class FeishuChannelOutput implements ChannelOutput {
           data: {
             receive_id: this.chatId,
             msg_type: outgoingMessage.msgType,
-            content: outgoingMessage.content
+            content: outgoingMessage.content,
+            uuid
           }
         })
         const createdMessageId = created.data?.message_id?.trim()
         if (createdMessageId) {
           replyMessageId = createdMessageId
-          this.replyMessageIdByIoThreadId.set(message.ioThreadId, createdMessageId)
+          this.replyMessageIdByIoThreadId.set(message.thread.id, createdMessageId)
         }
-        if (!this.feishuThreadId(message.ioThreadId)) {
+        if (!this.feishuThreadId(message.thread.id)) {
           const createdThreadId = created?.data?.thread_id?.trim()
           if (!createdThreadId) {
             throw new Error('feishu thread_id missing')
           }
-          this.ioThreadIdManager.bind(message.ioThreadId, {
+          this.threadRegistry.bind(message.thread.id, {
             source: 'feishu',
             id: `${this.chatId}:thread:${createdThreadId}`
           })
@@ -284,7 +290,7 @@ export class FeishuChannelOutput implements ChannelOutput {
   }
 
   private feishuThreadId(ioThreadId: string): string | undefined {
-    const channelThreadId = this.ioThreadIdManager.getChannelThreadIds(ioThreadId)
+    const channelThreadId = this.threadRegistry.getChannelThreadIds(ioThreadId)
       .find((item) => item.source === 'feishu' && item.id.includes(':thread:'))
     return channelThreadId?.id.split(':thread:').at(1)?.trim()
   }

@@ -52,6 +52,7 @@ export type NfircoThreadMessageEvent = {
   eventId: string
   threadUuid: string
   section?: string
+  title?: string
   authorAccessId?: string
   messageUuid: string
   text: string
@@ -64,6 +65,7 @@ export type NfircoThreadCreatedEvent = {
   eventId: string
   threadUuid: string
   section?: string
+  title?: string
   authorAccessId?: string
   text: string
   files: NfircoThreadAttachment[]
@@ -182,6 +184,7 @@ export function parseNfircoThreadSocketEvent(value: unknown): NfircoThreadSocket
   const threadUuid = typeof record.threadUuid === 'string' ? record.threadUuid.trim() : ''
   const text = typeof record.text === 'string' ? record.text : ''
   const authorAccessId = readString(record.authorAccessId)
+  const title = readString(record.title)
   const files = readAttachments(record.files)
   const images = readAttachments(record.images)
   if (threadUuid.length === 0 || (text.trim().length === 0 && files.length === 0 && images.length === 0)) {
@@ -193,6 +196,7 @@ export function parseNfircoThreadSocketEvent(value: unknown): NfircoThreadSocket
       eventId: typeof record.eventId === 'string' && record.eventId.trim().length > 0 ? record.eventId.trim() : threadUuid,
       threadUuid,
       section: typeof record.section === 'string' && record.section.trim().length > 0 ? record.section.trim() : undefined,
+      ...(title ? { title } : {}),
       ...(authorAccessId ? { authorAccessId } : {}),
       text,
       files,
@@ -208,6 +212,7 @@ export function parseNfircoThreadSocketEvent(value: unknown): NfircoThreadSocket
     eventId: typeof record.eventId === 'string' && record.eventId.trim().length > 0 ? record.eventId.trim() : messageUuid,
     threadUuid,
     section: typeof record.section === 'string' && record.section.trim().length > 0 ? record.section.trim() : undefined,
+    ...(title ? { title } : {}),
     ...(authorAccessId ? { authorAccessId } : {}),
     messageUuid,
     text,

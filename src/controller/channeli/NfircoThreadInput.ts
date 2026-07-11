@@ -19,7 +19,6 @@ export class NfircoThreadInput implements ChannelInput {
   private config?: NfircoInputConfig
   private reconnectTimer?: ReturnType<typeof setTimeout>
   private stopped = true
-  private handledEventIds = new Set<string>()
   private reconnectDelayMs = 1000
   private receiveQueue = Promise.resolve()
 
@@ -34,7 +33,6 @@ export class NfircoThreadInput implements ChannelInput {
       return false
     }
     this.receiver = receiver
-    this.handledEventIds.clear()
     this.stopped = false
     await this.connect().catch((error) => {
       Logger.warn('nfirco thread initial connect failed', {
@@ -56,7 +54,6 @@ export class NfircoThreadInput implements ChannelInput {
     this.socket = undefined
     this.receiver = undefined
     this.config = undefined
-    this.handledEventIds.clear()
     this.receiveQueue = Promise.resolve()
     return Result.successVoid()
   }
@@ -146,10 +143,6 @@ export class NfircoThreadInput implements ChannelInput {
     if (!isNfircoThreadInputEvent(event)) {
       return
     }
-    if (this.handledEventIds.has(event.eventId)) {
-      return
-    }
-    this.handledEventIds.add(event.eventId)
     if (this.isSelfEvent(event.authorAccessId)) {
       Logger.info('nfirco thread self event ignored', {
         type: event.type,
@@ -191,6 +184,8 @@ export class NfircoThreadInput implements ChannelInput {
         source: 'nfirco',
         id: event.threadUuid
       },
+      threadName: event.title,
+      sourceMessageId: event.eventId,
       text: event.text,
       files
     })

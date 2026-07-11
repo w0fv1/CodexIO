@@ -1,3 +1,5 @@
+import { renderConfigTemplate } from '../value/ConfigTemplate.js'
+
 export const configPageHtml = String.raw`
 <!doctype html>
 <html lang="zh-CN">
@@ -39,8 +41,9 @@ export const configPageHtml = String.raw`
     const exportConfig = document.getElementById('exportConfig')
     const importFile = document.getElementById('importFile')
     let config = {}
-    let descriptors = []
+    let descriptor = { groups: [], fields: [] }
     let values = {}
+    let templateBindings = []
     let configSnapshot = ''
     let loading = false
     let editing = false
@@ -57,12 +60,29 @@ export const configPageHtml = String.raw`
     }
     const sameValue = (left, right) => JSON.stringify(left) === JSON.stringify(right)
     const configText = (value) => JSON.stringify(value)
+    const renderTemplate = ${renderConfigTemplate.toString()}
+    const templateConfig = () => {
+      const current = JSON.parse(JSON.stringify(config))
+      for (const [path, value] of Object.entries(values)) {
+        setValue(current, path, value)
+      }
+      return current
+    }
+    const refreshTemplates = () => {
+      const current = templateConfig()
+      for (const binding of templateBindings) {
+        binding.element.textContent = renderTemplate(binding.template, current)
+      }
+    }
+    const bindTemplate = (element, template) => {
+      templateBindings.push({ element, template })
+    }
     const showStatus = (message, tone = 'info') => {
       status.className = 'rounded-md border px-4 py-3 text-sm ' + (tone === 'error' ? 'border-red-900 bg-red-950 text-red-200' : 'border-slate-800 bg-slate-900 text-slate-300')
       status.textContent = message
     }
     const markDirty = () => {
-      const changed = descriptors.some((field) => !sameValue(values[field.path], getValue(config, field.path)))
+      const changed = descriptor.fields.some((field) => !sameValue(values[field.path], getValue(config, field.path)))
       save.disabled = !changed
       dirty.textContent = changed ? '有未保存修改' : '没有未保存修改'
       editing = changed
@@ -81,22 +101,25 @@ export const configPageHtml = String.raw`
     }
     const render = () => {
       form.innerHTML = ''
-      const groups = [...new Set(descriptors.map((item) => item.group))]
-      for (const group of groups) {
+      templateBindings = []
+      for (const group of descriptor.groups) {
         const section = document.createElement('section')
         section.className = 'rounded-lg border border-slate-800 bg-slate-900/60 p-4'
-        section.innerHTML = '<div class="mb-4 flex flex-wrap items-center justify-between gap-3"><h2 class="text-base font-medium text-slate-100"></h2></div><div data-fields class="grid gap-4 md:grid-cols-2"></div>'
-        section.querySelector('h2').textContent = group
+        section.innerHTML = '<div class="mb-4 grid gap-1"><h2 class="text-base font-medium text-slate-100"></h2><p data-description class="text-sm leading-6 text-slate-400"></p></div><div data-fields class="grid gap-4 md:grid-cols-2"></div>'
+        bindTemplate(section.querySelector('h2'), group.title)
+        const groupDescription = section.querySelector('[data-description]')
+        bindTemplate(groupDescription, group.description)
+        groupDescription.hidden = group.description.length === 0
         const grid = section.querySelector('[data-fields]')
-        for (const field of descriptors.filter((item) => item.group === group)) {
+        for (const field of descriptor.fields.filter((item) => item.groupPath === group.path)) {
           const row = document.createElement('label')
           row.className = 'grid gap-2'
           const label = document.createElement('span')
           label.className = 'text-sm text-slate-300'
-          label.textContent = field.label
+          bindTemplate(label, field.label)
           const description = document.createElement('span')
           description.className = 'text-xs leading-5 text-slate-500'
-          description.textContent = field.description
+          bindTemplate(description, field.description)
           const input = document.createElement(field.type === 'stringList' ? 'textarea' : 'input')
           input.dataset.path = field.path
           input.className = 'rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-blue-500'
@@ -117,16 +140,19 @@ export const configPageHtml = String.raw`
           input.addEventListener('input', () => {
             values[field.path] = inputValue(input, field.type)
             markDirty()
+            refreshTemplates()
           })
           input.addEventListener('change', () => {
             values[field.path] = inputValue(input, field.type)
             markDirty()
+            refreshTemplates()
           })
           row.append(label, description, input)
           grid.append(row)
         }
         form.append(section)
       }
+      refreshTemplates()
       markDirty()
     }
     const load = async () => {
@@ -143,7 +169,7 @@ export const configPageHtml = String.raw`
         }
         config = result.data.config
         configSnapshot = configText(config)
-        descriptors = result.data.descriptor
+        descriptor = result.data.descriptor
         render()
       } catch (error) {
         showStatus(error instanceof Error ? error.message : String(error), 'error')
@@ -173,7 +199,7 @@ export const configPageHtml = String.raw`
         }
         config = result.data.config
         configSnapshot = nextSnapshot
-        descriptors = result.data.descriptor
+        descriptor = result.data.descriptor
         render()
         showStatus('配置已自动刷新')
       } catch (error) {
@@ -184,7 +210,7 @@ export const configPageHtml = String.raw`
     }
     save.addEventListener('click', async () => {
       const patch = {}
-      for (const field of descriptors) {
+      for (const field of descriptor.fields) {
         const current = values[field.path]
         if (!sameValue(current, getValue(config, field.path))) {
           setValue(patch, field.path, current)

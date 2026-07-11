@@ -2,13 +2,14 @@ import { CodexioConfig } from '../../value/ConfigDefinition.js'
 import { ChannelInputReceiveResult } from '../../value/Event.js'
 import { MessageFile } from '../../value/Message.js'
 import { Result } from '../../value/Result.js'
-import { ChannelThreadId } from '../../component/IoThreadIdManager.js'
+import { ChannelThreadId } from '../../component/ThreadRegistry.js'
 
 export type ChannelType = keyof CodexioConfig['channeli']
 
 export type ChannelInputMessage = {
   channelThreadId: ChannelThreadId
-  sourceMessageId?: string
+  threadName?: string
+  sourceMessageId: string
   text: string
   files?: MessageFile[]
   mentioned?: boolean
