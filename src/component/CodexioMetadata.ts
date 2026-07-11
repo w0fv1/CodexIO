@@ -3,6 +3,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { injectable } from 'inversify'
 import { CodexioReleaseMetadata } from '../value/CodexioReleaseMetadata.js'
+import { pid } from 'node:process'
 
 export type CodexioMetadataOptions = {
   rootPath?: string
@@ -37,7 +38,7 @@ export class CodexioMetadata {
     this.codexHomePath = join(this.dataPath, 'codex')
     this.logPath = join(this.dataPath, 'log')
     this.filePath = join(this.dataPath, 'file')
-    this.serverStatePath = join(this.dataPath, 'state', 'server.json')
+    this.serverStatePath = join(this.dataPath, 'state', `server-${pid}.json`)
     this.ioThreadStatePath = join(this.dataPath, 'state', 'io-thread.json')
   }
 

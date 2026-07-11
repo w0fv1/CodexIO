@@ -12,7 +12,7 @@ export async function resolveAvailableServerPort(host: string, preferredPort: nu
   throw new Error(`no available server port found from ${preferredPort}`)
 }
 
-export function isServerPortAvailable(host: string, port: number): Promise<boolean> {
+function isServerPortAvailable(host: string, port: number): Promise<boolean> {
   return new Promise((resolveAvailable, reject) => {
     const probe = createNetServer()
     probe.once('error', (error: NodeJS.ErrnoException) => {

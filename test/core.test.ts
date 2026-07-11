@@ -31,7 +31,7 @@ import { parseMarkdownAttachmentReferences, renderMarkdownHtml } from '../src/ut
 import { resolveUserPath } from '../src/util/Path.js'
 import { parseNfircoThreadSocketEvent } from '../src/component/channel/NfircoThreadClient.js'
 import { WebThreadManager } from '../src/component/channel/WebThreadManager.js'
-import { applyRuntimeConfig } from '../src/CodexioApplication.js'
+import { ServerRuntime } from '../src/component/ServerRuntime.js'
 import { LoginItemManager } from '../src/component/desktop/LoginItemManager.js'
 import { DesktopIntegration } from '../src/component/desktop/DesktopIntegration.js'
 import { renderConfigTemplate } from '../src/value/ConfigTemplate.js'
@@ -676,6 +676,40 @@ describe('core', () => {
     ])
   })
 
+  it('owns channel input config subscriptions for exactly one lifecycle', async () => {
+    let subscriptions = 0
+    let disposals = 0
+    const configer = {
+      subscribe: () => {
+        subscriptions += 1
+        return {
+          dispose: () => {
+            disposals += 1
+          }
+        }
+      }
+    } as unknown as Configer
+    const eventBus = new EventBus()
+    const manager = new ChannelInputManager(
+      configer,
+      eventBus,
+      createThreadRegistry(),
+      new CommandExecutor(eventBus),
+      disabledInput('web'),
+      disabledInput('feishu'),
+      disabledInput('email'),
+      disabledInput('nfirco')
+    )
+    await manager.start()
+    await manager.start()
+    expect(subscriptions).toBe(1)
+    await manager.stop()
+    expect(disposals).toBe(1)
+    await manager.start()
+    expect(subscriptions).toBe(2)
+    await manager.stop()
+  })
+
   it('rejects missing source message identity before resolving a thread', async () => {
     const eventBus = new EventBus()
     const threadRegistry = createThreadRegistry()
@@ -862,7 +896,7 @@ describe('core', () => {
     expect(await readFile(configPath, 'utf8')).toBe(text)
   })
 
-  it('enables auto port from runtime args', async () => {
+  it('keeps command-line runtime overrides out of persistent config', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'codexio-runtime-config-'))
     const configPath = join(dir, 'config.yaml')
     await writeFile(configPath, [
@@ -880,13 +914,12 @@ describe('core', () => {
       rootPath: testMetadata.rootPath,
       configPath
     }))
-    await applyRuntimeConfig(configer, [
-      'node',
-      'CodexioApplication.js',
-      '--auto-port'
-    ])
-    expect(await configer.get('server.autoPort')).toBe(true)
-    expect((await configer.get('app.id')).length).toBeGreaterThan(0)
+    const runtime = new ServerRuntime({
+      forceAutoPort: true
+    })
+    expect(runtime.forceAutoPort).toBe(true)
+    expect(await configer.get('server.autoPort')).toBe(false)
+    expect((await readFile(configPath, 'utf8'))).toContain('autoPort: false')
   })
 
   it('passes configured no proxy hosts to the codex process', async () => {
@@ -1256,7 +1289,7 @@ describe('core', () => {
         sent.push(message)
         return Result.successVoid()
       }
-    })
+    }, new ServerRuntime())
     expect(await output.start()).toBe(true)
     const result = await output.send({
       thread: { id: 'external-io-thread', name: '新对话' },
@@ -1481,6 +1514,30 @@ describe('core', () => {
         text: 'system message'
       }
     ])
+  })
+
+  it('owns channel output config subscriptions for exactly one lifecycle', async () => {
+    let subscriptions = 0
+    let disposals = 0
+    const configer = {
+      subscribe: () => {
+        subscriptions += 1
+        return {
+          dispose: () => {
+            disposals += 1
+          }
+        }
+      },
+      get: async (path: string) => path === 'app.workspace.path' ? '~' : undefined
+    } as unknown as Configer
+    const manager = await createRecordingChannelOutputManager([], createThreadRegistry(), ['web'], configer)
+    await manager.start()
+    expect(subscriptions).toBe(1)
+    await manager.stop()
+    expect(disposals).toBe(1)
+    await manager.start()
+    expect(subscriptions).toBe(2)
+    await manager.stop()
   })
 
   it('creates and binds an io thread when getting a new channel thread id', () => {
@@ -1887,7 +1944,7 @@ describe('core', () => {
     const manager = await createRecordingChannelOutputManager(sent, createThreadRegistry(), [
       'web'
     ], {
-      subscribe: () => {},
+      subscribe: () => ({ dispose: () => undefined }),
       get: async (path: string) => {
         if (path === 'app.workspace.path') {
           return dir
@@ -1913,6 +1970,8 @@ describe('core', () => {
 
   it('routes channel messages to echo by default and codex when enabled', async () => {
     let codexEnabled = false
+    let subscriptionDisposed = false
+    let configChanged: (() => Promise<void>) | undefined
     const eventBus = new EventBus()
     const echo = createRecordingAgent('echo')
     const codex = createRecordingAgent('codex')
@@ -1926,7 +1985,14 @@ describe('core', () => {
         }
         return undefined
       },
-      subscribe: () => {}
+      subscribe: (_paths: unknown, listener: () => Promise<void>) => {
+        configChanged = listener
+        return {
+          dispose: () => {
+            subscriptionDisposed = true
+          }
+        }
+      }
     } as unknown as Configer
     const manager = new AgentManager(configer, eventBus, codex, echo, new ThreadWorkspaceResolver(configer, testMetadata))
     await manager.start()
@@ -1936,12 +2002,13 @@ describe('core', () => {
     ])
     expect(codex.messages).toEqual([])
     codexEnabled = true
-    await manager.applyConfig()
+    await configChanged?.()
     await eventBus.emitAsync(AppEvent.ChannelMessageReceived, channelMessage('second'))
     expect(codex.messages.map((message) => message.text)).toEqual([
       'second'
     ])
     await manager.stop()
+    expect(subscriptionDisposed).toBe(true)
   })
 
   it('buffers codex deltas until completion', async () => {
@@ -2230,7 +2297,7 @@ async function createRecordingChannelOutputManager(
   threadRegistry = createThreadRegistry(),
   enabledTypes = ['web'],
   configer = {
-    subscribe: () => {},
+    subscribe: () => ({ dispose: () => undefined }),
     get: async (path: string) => path === 'app.workspace.path' ? '~' : undefined
   } as unknown as Configer
 ): Promise<ChannelOutputManager> {

@@ -1,6 +1,6 @@
 import { spawn, ChildProcess } from 'node:child_process'
 import { appendFileSync, existsSync } from 'node:fs'
-import { copyFile, mkdir, readFile, rm } from 'node:fs/promises'
+import { copyFile, mkdir, readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { setTimeout as wait } from 'node:timers/promises'
 import electron from 'electron'
@@ -45,7 +45,6 @@ class CodexioDesktop {
     this.dataRoot = app.getPath('userData')
     this.configPath = join(this.dataRoot, 'config.yaml')
     this.logPath = join(this.dataRoot, 'log', 'desktop.log')
-    this.statePath = join(this.dataRoot, 'state', 'server.json')
     this.serverPath = join(this.appRoot, 'dist', 'CodexioApplication.js')
     await mkdir(dirname(this.logPath), {
       recursive: true
@@ -81,9 +80,6 @@ class CodexioDesktop {
     })
     await mkdir(dirname(this.configPath), {
       recursive: true
-    })
-    await rm(this.statePath, {
-      force: true
     })
     this.createTray()
     this.updater.notifyUpdatedLaunch()
@@ -187,6 +183,10 @@ class CodexioDesktop {
       ],
       windowsHide: true
     })
+    if (!this.server.pid) {
+      throw new Error('Codexio server pid not found')
+    }
+    this.statePath = join(this.dataRoot, 'state', `server-${this.server.pid}.json`)
     this.server.on('message', (message) => {
       if (!isDesktopRequest(message)) {
         return

@@ -134,7 +134,7 @@ export const configDefinition = defineConfig({
     }),
     autoPort: field({
       label: 'Auto Port',
-      description: '端口被占用时自动寻找可用端口，并写回实际端口。',
+      description: '端口被占用时从首选端口开始递增寻找可用端口，不修改首选端口配置。',
       type: 'boolean',
       apply: '重启 Codexio',
       schema: z.boolean(),

@@ -1,5 +1,5 @@
 import { inject, injectable } from 'inversify'
-import { Configer } from '../../component/Configer.js'
+import { Configer, ConfigSubscription } from '../../component/Configer.js'
 import { EventBus } from '../../component/EventBus.js'
 import { Logger } from '../../component/Logger.js'
 import { MessageInbox } from '../../component/MessageInbox.js'
@@ -19,6 +19,8 @@ export class ChannelInputManager implements ChannelInputReceiver {
   private readonly availableInputs: ChannelInput[]
   private readonly inputs = new Map<string, ChannelInput>()
   private readonly inbox = new MessageInbox<ChannelInputReceiveResult>()
+  private subscription?: ConfigSubscription
+  private started = false
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
@@ -39,7 +41,11 @@ export class ChannelInputManager implements ChannelInputReceiver {
   }
 
   async start(): Promise<void> {
-    this.configer.subscribe('channeli', async () => {
+    if (this.started) {
+      return
+    }
+    this.started = true
+    this.subscription = this.configer.subscribe('channeli', async () => {
       const applied = await this.applyConfig()
       if (applied.isFailed) {
         Logger.error('channel input config apply failed', new Error(applied.message))
@@ -111,6 +117,9 @@ export class ChannelInputManager implements ChannelInputReceiver {
   }
 
   async stop(): Promise<Result<void>> {
+    this.started = false
+    this.subscription?.dispose()
+    this.subscription = undefined
     const failures: string[] = []
     for (const input of this.inputs.values()) {
       const result = await input.stop()
@@ -118,13 +127,14 @@ export class ChannelInputManager implements ChannelInputReceiver {
         failures.push(result.message)
       }
     }
+    this.inputs.clear()
     if (failures.length > 0) {
       return Result.fail(failures.join('\n'))
     }
     return Result.successVoid()
   }
 
-  async applyConfig(): Promise<Result<void>> {
+  private async applyConfig(): Promise<Result<void>> {
     const failures: string[] = []
     for (const input of this.inputs.values()) {
       const result = await input.stop()

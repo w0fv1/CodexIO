@@ -20,6 +20,7 @@ import { resolveAvailableServerPort } from '../util/Network.js'
 import { EventBus } from '../component/EventBus.js'
 import { AppEvent } from '../value/Event.js'
 import { CodexioMetadata } from '../component/CodexioMetadata.js'
+import { ServerRuntime } from '../component/ServerRuntime.js'
 
 const FileParamsSchema = z.object({
   id: z.string().min(1)
@@ -57,14 +58,15 @@ export class CodexioApiController {
     @inject(FileStore) private readonly fileStore: FileStore,
     @inject(WebChannelHub) private readonly webChannel: WebChannelHub,
     @inject(EventBus) private readonly eventBus: EventBus,
-    @inject(CodexioMetadata) private readonly metadata: CodexioMetadata
+    @inject(CodexioMetadata) private readonly metadata: CodexioMetadata,
+    @inject(ServerRuntime) private readonly serverRuntime: ServerRuntime
   ) {
   }
 
   async start(): Promise<HttpServer> {
     const host = await this.configer.get('server.host')
     const configuredPort = await this.configer.get('server.port')
-    const port = await this.configer.get('server.autoPort')
+    const port = this.serverRuntime.forceAutoPort || await this.configer.get('server.autoPort')
       ? await resolveAvailableServerPort(host, configuredPort)
       : configuredPort
     if (port !== configuredPort) {
@@ -72,10 +74,10 @@ export class CodexioApiController {
         configuredPort,
         port
       })
-      await this.configer.set('server.port', port)
     }
     const listener = this.listen(port, host)
     await this.waitForListening(listener)
+    this.serverRuntime.bind({ host, port })
     Logger.info('codexio server listening', {
       host,
       port
@@ -96,9 +98,19 @@ export class CodexioApiController {
     this.listener = listener
     this.closing = false
     this.webChannel.attach(listener)
+    listener.once('listening', () => {
+      const address = listener.address()
+      if (address && typeof address !== 'string') {
+        this.serverRuntime.bind({
+          host: address.address,
+          port: address.port
+        })
+      }
+    })
     listener.once('close', () => {
       if (this.listener === listener) {
         this.listener = undefined
+        this.serverRuntime.clear()
       }
     })
     return listener

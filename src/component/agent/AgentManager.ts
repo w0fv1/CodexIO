@@ -1,7 +1,7 @@
 import { inject, injectable } from 'inversify'
 import { AppEvent, ChannelMessageReceivedEvent } from '../../value/Event.js'
 import { Result } from '../../value/Result.js'
-import { Configer } from '../Configer.js'
+import { Configer, ConfigSubscription } from '../Configer.js'
 import { EventBus } from '../EventBus.js'
 import { Logger } from '../Logger.js'
 import { ThreadWorkspaceResolver } from '../ThreadWorkspaceResolver.js'
@@ -16,7 +16,7 @@ export class AgentManager {
   private readonly listener = (event: ChannelMessageReceivedEvent) => this.receive(event)
   private statusValue: AgentManagerStatus = 'idle'
   private started = false
-  private subscribed = false
+  private subscription?: ConfigSubscription
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
@@ -37,9 +37,8 @@ export class AgentManager {
       this.started = true
       this.eventBus.on(AppEvent.ChannelMessageReceived, this.listener)
     }
-    if (!this.subscribed) {
-      this.subscribed = true
-      this.configer.subscribe([
+    if (!this.subscription) {
+      this.subscription = this.configer.subscribe([
         'agents',
         'proxy',
         'app.workspace',
@@ -65,11 +64,34 @@ export class AgentManager {
   }
 
   async stop(): Promise<Result<void>> {
-    const failures: string[] = []
     if (this.started) {
       this.started = false
       this.eventBus.off(AppEvent.ChannelMessageReceived, this.listener)
     }
+    this.subscription?.dispose()
+    this.subscription = undefined
+    const result = await this.stopAgents()
+    this.statusValue = 'idle'
+    return result
+  }
+
+  private async applyConfig(): Promise<Result<void>> {
+    const stopped = await this.stopAgents()
+    if (stopped.isFailed) {
+      return stopped
+    }
+    const agent = await this.getActiveAgent()
+    await this.ensureWorkspace()
+    const started = await agent.start()
+    if (started.isFailed) {
+      return started
+    }
+    this.statusValue = 'online'
+    return Result.successVoid()
+  }
+
+  private async stopAgents(): Promise<Result<void>> {
+    const failures: string[] = []
     for (const agent of [
       this.codexAgent,
       this.echoAgent
@@ -79,19 +101,10 @@ export class AgentManager {
         failures.push(`${agent.type}: ${stopped.message}`)
       }
     }
-    this.statusValue = 'idle'
     if (failures.length > 0) {
       return Result.fail(failures.join('\n'))
     }
     return Result.successVoid()
-  }
-
-  async applyConfig(): Promise<Result<void>> {
-    const stopped = await this.stop()
-    if (stopped.isFailed) {
-      return stopped
-    }
-    return this.start()
   }
 
   private async receive(event: ChannelMessageReceivedEvent): Promise<Result<void>> {

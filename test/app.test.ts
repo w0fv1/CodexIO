@@ -1,4 +1,4 @@
-import { IncomingHttpHeaders, Server as HttpServer } from 'node:http'
+import { createServer, IncomingHttpHeaders, Server as HttpServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -39,6 +39,7 @@ import { CodexClient } from '../src/component/agent/CodexClient.js'
 import { CodexMessageStreamer } from '../src/component/agent/CodexMessageStreamer.js'
 import { CommandExecutor } from '../src/controller/CommandExecutor.js'
 import { createMessage } from '../src/value/Message.js'
+import { ServerRuntime } from '../src/component/ServerRuntime.js'
 
 const testToken = 'test-message-token'
 const testMetadata = new CodexioMetadata()
@@ -130,6 +131,56 @@ describe('server', () => {
     expect(configPageHtml).toContain('binding.element.textContent')
     expect(configPageHtml).toContain('refreshExternalConfig')
     expect(configPageHtml).toContain('配置已在外部更新')
+  })
+
+  it('uses the next available runtime port without rewriting the configured port', async () => {
+    const configuredPort = await resolveAvailableServerPort('127.0.0.1', 8787)
+    const blocker = createServer()
+    await new Promise<void>((resolve, reject) => {
+      blocker.once('listening', resolve)
+      blocker.once('error', reject)
+      blocker.listen(configuredPort, '127.0.0.1')
+    })
+    const runtime = new ServerRuntime()
+    const configer = {
+      get: async (path: string) => {
+        if (path === 'server.host') {
+          return '127.0.0.1'
+        }
+        if (path === 'server.port') {
+          return configuredPort
+        }
+        if (path === 'server.autoPort') {
+          return true
+        }
+        throw new Error(`unexpected config path: ${path}`)
+      },
+      set: async () => {
+        throw new Error('server port must not be persisted')
+      }
+    } as unknown as Configer
+    const webChannel = {
+      attach: () => undefined,
+      stop: () => undefined
+    } as unknown as WebChannelHub
+    const controller = new CodexioApiController(
+      configer,
+      {} as ChannelOutputManager,
+      {} as FileStore,
+      webChannel,
+      new EventBus(),
+      testMetadata,
+      runtime
+    )
+    try {
+      const listener = await controller.start()
+      const address = listener.address()
+      expect(address && typeof address !== 'string' ? address.port : undefined).toBe(configuredPort + 1)
+      expect(runtime.requireEndpoint().port).toBe(configuredPort + 1)
+    } finally {
+      await controller.stop()
+      await new Promise<void>((resolve) => blocker.close(() => resolve()))
+    }
   })
 
   it('returns all described config fields to the config page', async () => {
@@ -1101,8 +1152,9 @@ async function createTestCodexioApp(configer: Configer): Promise<{
   const codexClient = new CodexClient(configer, metadata, workspaceResolver)
   const webThreadManager = new WebThreadManager(threadRegistry)
   const webHub = new WebChannelHub(fileStore, webThreadManager)
+  const serverRuntime = new ServerRuntime()
   const webInput = new WebChannelInput(configer, webHub)
-  const webOutput = new WebChannelOutput(configer, webHub)
+  const webOutput = new WebChannelOutput(configer, webHub, serverRuntime)
   const feishuInput = new FeishuChannelInput(configer)
   const feishuOutput = new FeishuChannelOutput(configer, threadRegistry)
   const emailInput = new EmailChannelInput(configer)
@@ -1125,7 +1177,7 @@ async function createTestCodexioApp(configer: Configer): Promise<{
   const echoAgent = new EchoAgent(eventBus)
   const agentManager = new AgentManager(configer, eventBus, codexAgent, echoAgent, workspaceResolver)
   const inputManager = new ChannelInputManager(configer, eventBus, threadRegistry, new CommandExecutor(eventBus), webInput, feishuInput, emailInput, nfircoInput)
-  const apiController = new CodexioApiController(configer, outputManager, fileStore, webHub, eventBus, metadata)
+  const apiController = new CodexioApiController(configer, outputManager, fileStore, webHub, eventBus, metadata, serverRuntime)
   await outputManager.start()
   await agentManager.start()
   await inputManager.start()

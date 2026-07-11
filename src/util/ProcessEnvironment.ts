@@ -39,7 +39,7 @@ export function createProcessEnv(homePath?: string, shellEnvironmentPath?: strin
   return env
 }
 
-export function syncShellEnvironmentConfig(path: string, proxyUrl?: string, noProxy = '', variables: Record<string, string> = {}): void {
+function syncShellEnvironmentConfig(path: string, proxyUrl?: string, noProxy = '', variables: Record<string, string> = {}): void {
   const set: Record<string, string> = proxyUrl ? {
     HTTP_PROXY: proxyUrl,
     http_proxy: proxyUrl,

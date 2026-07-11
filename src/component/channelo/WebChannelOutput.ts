@@ -5,6 +5,7 @@ import { Logger } from '../Logger.js'
 import { Message } from '../../value/Message.js'
 import { Result } from '../../value/Result.js'
 import { ChannelOutput } from './ChannelOutput.js'
+import { ServerRuntime } from '../ServerRuntime.js'
 
 type WebChannelSender = {
   send(message: Message): Result<void>
@@ -16,7 +17,8 @@ export class WebChannelOutput implements ChannelOutput {
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
-    @inject(WebChannelHub) private readonly hub: WebChannelSender
+    @inject(WebChannelHub) private readonly hub: WebChannelSender,
+    @inject(ServerRuntime) private readonly serverRuntime: ServerRuntime
   ) {}
 
   async start(): Promise<boolean> {
@@ -24,8 +26,8 @@ export class WebChannelOutput implements ChannelOutput {
     if (!webConfig?.enabled) {
       return false
     }
-    const host = await this.configer.get('server.host')
-    const port = await this.configer.get('server.port')
+    const host = this.serverRuntime.endpoint?.host ?? await this.configer.get('server.host')
+    const port = this.serverRuntime.endpoint?.port ?? await this.configer.get('server.port')
     Logger.info('web channel ready', {
       host,
       port,

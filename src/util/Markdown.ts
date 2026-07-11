@@ -1,7 +1,7 @@
 import { marked } from 'marked'
 import sanitizeHtml from 'sanitize-html'
 
-export type MarkdownFileReference = {
+type MarkdownFileReference = {
   label: string
   path: string
 }
@@ -10,7 +10,7 @@ export type MarkdownAttachmentReference = MarkdownFileReference & {
   image: boolean
 }
 
-export type MarkdownFileReferenceParseResult = {
+type MarkdownFileReferenceParseResult = {
   text: string
   files: MarkdownFileReference[]
 }
@@ -66,7 +66,7 @@ export function shouldRenderMarkdown(text: string): boolean {
   ].some((marker) => text.includes(marker))
 }
 
-export function parseMarkdownFileReferences(markdown: string): MarkdownFileReferenceParseResult {
+function parseMarkdownFileReferences(markdown: string): MarkdownFileReferenceParseResult {
   const result = parseMarkdownAttachmentReferences(markdown)
   return {
     text: result.text,

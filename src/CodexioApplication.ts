@@ -18,6 +18,7 @@ import { AppEvent } from './value/Event.js'
 import { AgentManager } from './component/agent/AgentManager.js'
 import { ThreadRegistry } from './component/ThreadRegistry.js'
 import { DesktopIntegration } from './component/desktop/DesktopIntegration.js'
+import { ServerRuntime } from './component/ServerRuntime.js'
 
 @injectable()
 export class CodexioApplication {
@@ -33,7 +34,8 @@ export class CodexioApplication {
     @inject(EventBus) private readonly eventBus: EventBus,
     @inject(AgentManager) private readonly agentManager: AgentManager,
     @inject(ThreadRegistry) private readonly threadRegistry: ThreadRegistry,
-    @inject(DesktopIntegration) private readonly desktopIntegration: DesktopIntegration
+    @inject(DesktopIntegration) private readonly desktopIntegration: DesktopIntegration,
+    @inject(ServerRuntime) private readonly serverRuntime: ServerRuntime
   ) {
     this.eventBus.on(AppEvent.StopRequested, () => {
       void this.stopAndExit(0)
@@ -42,7 +44,7 @@ export class CodexioApplication {
 
   async start(): Promise<void> {
     await this.configer.init(false)
-    await applyRuntimeConfig(this.configer, process.argv)
+    await this.configer.set('app.id', randomBytes(6).toString('base64url'))
     await this.configer.validate()
     await this.desktopIntegration.start()
     Logger.configure({
@@ -66,8 +68,7 @@ export class CodexioApplication {
       })
       await writeFile(this.codexioMetadata.serverStatePath, JSON.stringify({
         pid,
-        host: await this.configer.get('server.host'),
-        port: await this.configer.get('server.port'),
+        ...this.serverRuntime.requireEndpoint(),
         startedAt: new Date().toISOString()
       }, null, 2), 'utf8')
       process.once('SIGINT', () => this.requestStop())
@@ -108,6 +109,7 @@ export class CodexioApplication {
     await rm(this.codexioMetadata.serverStatePath, {
       force: true
     })
+    this.serverRuntime.clear()
     await Logger.flush()
     return Result.successVoid()
   }
@@ -131,19 +133,15 @@ export class CodexioApplication {
   }
 }
 
-export async function applyRuntimeConfig(configer: Configer, args: string[]): Promise<void> {
-  await configer.set('app.id', randomBytes(6).toString('base64url'))
-  if (args.includes('--auto-port')) {
-    await configer.set('server.autoPort', true)
-  }
-}
-
 const container = new Container({
   autobind: true,
   defaultScope: 'Singleton'
 })
 container.bind(CodexioMetadata).toConstantValue(new CodexioMetadata({
   configPath: process.argv.find((_, index, args) => args[index - 1] === '--config')
+}))
+container.bind(ServerRuntime).toConstantValue(new ServerRuntime({
+  forceAutoPort: process.argv.includes('--auto-port')
 }))
 const application = container.get(CodexioApplication)
 

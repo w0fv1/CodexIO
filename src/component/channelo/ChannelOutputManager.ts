@@ -8,7 +8,7 @@ import { parseMarkdownAttachmentReferences } from '../../util/Markdown.js'
 import { ChannelOutput, ChannelOutputContext } from './ChannelOutput.js'
 import { FileStore } from '../FileStore.js'
 import { Logger } from '../Logger.js'
-import { Configer } from '../Configer.js'
+import { Configer, ConfigSubscription } from '../Configer.js'
 import { EventBus } from '../EventBus.js'
 import { ThreadRegistry } from '../ThreadRegistry.js'
 import { ThreadWorkspaceResolver } from '../ThreadWorkspaceResolver.js'
@@ -32,6 +32,7 @@ export class ChannelOutputManager {
   private readonly deliveryQueue = new KeyedSerialQueue()
   private deliveryInbox = new MessageInbox<void>()
   private started = false
+  private subscription?: ConfigSubscription
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
@@ -55,11 +56,12 @@ export class ChannelOutputManager {
   }
 
   async start(): Promise<void> {
-    if (!this.started) {
-      this.started = true
-      this.eventBus.on(AppEvent.ChannelMessageDisplayRequested, this.listener)
+    if (this.started) {
+      return
     }
-    this.configer.subscribe('channelo', async () => {
+    this.started = true
+    this.eventBus.on(AppEvent.ChannelMessageDisplayRequested, this.listener)
+    this.subscription = this.configer.subscribe('channelo', async () => {
       const applied = await this.applyConfig()
       if (applied.isFailed) {
         await this.sendSystem(`通道输出配置应用失败：${applied.message}`)
@@ -161,6 +163,8 @@ export class ChannelOutputManager {
       this.started = false
       this.eventBus.off(AppEvent.ChannelMessageDisplayRequested, this.listener)
     }
+    this.subscription?.dispose()
+    this.subscription = undefined
     await this.flushOutputs()
     for (const output of this.outputs.values()) {
       const result = await output.stop()
@@ -168,13 +172,15 @@ export class ChannelOutputManager {
         failures.push(result.message)
       }
     }
+    this.outputs.clear()
+    this.deliveryInbox = new MessageInbox<void>()
     if (failures.length > 0) {
       return Result.fail(failures.join('\n'))
     }
     return Result.successVoid()
   }
 
-  async applyConfig(): Promise<Result<void>> {
+  private async applyConfig(): Promise<Result<void>> {
     const failures: string[] = []
     await this.flushOutputs()
     for (const output of this.outputs.values()) {
