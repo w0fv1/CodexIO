@@ -1347,6 +1347,15 @@ describe('core', () => {
     const requests: Array<{ method: string, params?: unknown }> = []
     client['request'] = async (method: string, params?: unknown) => {
       requests.push({ method, params })
+      if (method === 'thread/resume') {
+        return {
+          thread: {
+            id: 'codex-thread',
+            name: 'VS Code thread',
+            status: { type: 'idle' }
+          }
+        }
+      }
       if (method === 'turn/start') {
         return {
           turn: {
@@ -1365,17 +1374,107 @@ describe('core', () => {
     })
 
     expect(result.isFailed).toBe(false)
-    expect(requests).toEqual([{
-      method: 'turn/start',
-      params: {
-        threadId: 'codex-thread',
-        input: [{
-          type: 'text',
-          text: 'continue',
-          text_elements: []
-        }]
+    expect(requests).toEqual([
+      {
+        method: 'thread/resume',
+        params: {
+          threadId: 'codex-thread',
+          excludeTurns: true
+        }
+      },
+      {
+        method: 'turn/start',
+        params: {
+          threadId: 'codex-thread',
+          input: [{
+            type: 'text',
+            text: 'continue',
+            text_elements: []
+          }]
+        }
       }
-    }])
+    ])
+  })
+
+  it('never creates a replacement thread when an explicit Codex thread cannot resume', async () => {
+    const client = createTestCodexClient({
+      get: async () => undefined
+    } as unknown as Configer)
+    const requests: string[] = []
+    client['request'] = async (method: string) => {
+      requests.push(method)
+      throw new Error('thread not found')
+    }
+
+    const result = await client.send({
+      thread: { id: 'codex-thread', name: 'VS Code thread' },
+      threadId: 'codex-thread',
+      text: 'continue'
+    })
+
+    expect(result.isFailed).toBe(true)
+    expect(result.message).toContain('thread not found')
+    expect(requests).toEqual(['thread/resume'])
+  })
+
+  it('does not resume an explicit Codex thread already loaded by this client', async () => {
+    const client = createTestCodexClient({
+      get: async () => undefined
+    } as unknown as Configer)
+    client['threads'].set('codex-thread', {
+      id: 'codex-thread',
+      title: 'VS Code thread',
+      isWorking: false
+    })
+    const requests: string[] = []
+    client['request'] = async (method: string) => {
+      requests.push(method)
+      if (method === 'turn/start') {
+        return {
+          turn: {
+            id: 'continued-turn',
+            threadId: 'codex-thread'
+          }
+        }
+      }
+      throw new Error(method)
+    }
+
+    const result = await client.send({
+      thread: { id: 'codex-thread', name: 'VS Code thread' },
+      threadId: 'codex-thread',
+      text: 'continue'
+    })
+
+    expect(result.isFailed).toBe(false)
+    expect(requests).toEqual(['turn/start'])
+  })
+
+  it('rejects a resume response for a different Codex thread identity', async () => {
+    const client = createTestCodexClient({
+      get: async () => undefined
+    } as unknown as Configer)
+    const requests: string[] = []
+    client['request'] = async (method: string) => {
+      requests.push(method)
+      return {
+        thread: {
+          id: 'different-thread',
+          name: 'Different thread'
+        }
+      }
+    }
+
+    const result = await client.send({
+      thread: { id: 'codex-thread', name: 'VS Code thread' },
+      threadId: 'codex-thread',
+      text: 'continue'
+    })
+
+    expect(result.isFailed).toBe(true)
+    expect(result.message).toContain('codex resumed unexpected thread: different-thread')
+    expect(requests).toEqual(['thread/resume'])
+    expect(client['threads'].size).toBe(0)
   })
 
   it('upserts repeated web messages by stable message id', () => {

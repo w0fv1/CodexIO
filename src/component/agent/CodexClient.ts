@@ -372,9 +372,14 @@ export class CodexClient {
         cachedThread: normalizedThreadId ? this.threads.has(normalizedThreadId) : false,
         activeTurnId: normalizedThreadId ? this.turnIdByThreadId.get(normalizedThreadId) ?? null : null
       })
-      const threadId = normalizedThreadId.length > 0
-        ? normalizedThreadId
-        : (await this.startThread(input.thread)).id
+      let threadId: string
+      if (normalizedThreadId.length === 0) {
+        threadId = (await this.startThread(input.thread)).id
+      } else if (this.threads.has(normalizedThreadId)) {
+        threadId = normalizedThreadId
+      } else {
+        threadId = (await this.resumeThread(normalizedThreadId, input.thread.name)).id
+      }
       const turnInput = this.toTurnInput(input)
       const activeTurnId = this.turnIdByThreadId.get(threadId)
       if (activeTurnId) {
@@ -432,6 +437,37 @@ export class CodexClient {
     } catch (error) {
       return failFromError(error)
     }
+  }
+
+  private async resumeThread(threadId: string, fallbackTitle: string): Promise<CodexClientThread> {
+    Logger.info('codex client resuming thread', {
+      threadId
+    })
+    const response = await this.request('thread/resume', {
+      threadId,
+      excludeTurns: true
+    })
+    if (!response || typeof response !== 'object') {
+      throw new Error('codex thread resume response not found')
+    }
+    const thread = this.readThread((response as Record<string, unknown>).thread)
+    if (!thread) {
+      throw new Error('codex resumed thread id not found')
+    }
+    if (thread.id !== threadId) {
+      throw new Error(`codex resumed unexpected thread: ${thread.id}`)
+    }
+    if (!thread.title.trim()) {
+      thread.title = fallbackTitle
+    }
+    this.upsertThread(thread)
+    this.observerLifecycle.ignoreThread(thread.id)
+    Logger.info('codex client thread resumed', {
+      threadId: thread.id,
+      title: thread.title,
+      isWorking: thread.isWorking
+    })
+    return thread
   }
 
   private async startThread(messageThread: MessageThread): Promise<CodexClientThread> {
