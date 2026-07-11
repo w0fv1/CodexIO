@@ -71,6 +71,95 @@ describe('channel provider idempotency', () => {
     expect(reply).not.toHaveBeenCalled()
   })
 
+  it('recovers a Feishu reply anchor from the bound thread after restart', async () => {
+    const registry = threadRegistry()
+    registry.ensure('codex-thread')
+    registry.bind('codex-thread', {
+      source: 'feishu',
+      id: 'chat:thread:omt_existing'
+    })
+    const list = vi.fn(async () => ({
+      data: {
+        items: [{
+          message_id: 'om_existing',
+          thread_id: 'omt_existing'
+        }]
+      }
+    }))
+    const reply = vi.fn(async () => ({
+      data: {
+        message_id: 'om_reply',
+        thread_id: 'omt_existing'
+      }
+    }))
+    const create = vi.fn()
+    const output = new FeishuChannelOutput({} as never, registry)
+    Reflect.set(output, 'chatId', 'chat')
+    Reflect.set(output, 'client', {
+      im: {
+        v1: {
+          message: { list, reply, create }
+        }
+      }
+    })
+
+    const result = await output.send(createMessage({
+      id: 'agent-message',
+      thread: { id: 'codex-thread', name: 'Thread' },
+      role: 'agent',
+      text: 'reply'
+    }))
+
+    expect(result.isFailed).toBe(false)
+    expect(list).toHaveBeenCalledWith({
+      params: {
+        container_id_type: 'thread',
+        container_id: 'omt_existing',
+        sort_type: 'ByCreateTimeDesc',
+        page_size: 1
+      }
+    })
+    expect(reply).toHaveBeenCalledWith(expect.objectContaining({
+      path: {
+        message_id: 'om_existing'
+      }
+    }))
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('never creates a replacement Feishu thread when a bound thread has no reply anchor', async () => {
+    const registry = threadRegistry()
+    registry.ensure('codex-thread')
+    registry.bind('codex-thread', {
+      source: 'feishu',
+      id: 'chat:thread:omt_existing'
+    })
+    const list = vi.fn(async () => ({ data: { items: [] } }))
+    const reply = vi.fn()
+    const create = vi.fn()
+    const output = new FeishuChannelOutput({} as never, registry)
+    Reflect.set(output, 'chatId', 'chat')
+    Reflect.set(output, 'client', {
+      im: {
+        v1: {
+          message: { list, reply, create }
+        }
+      }
+    })
+
+    const result = await output.send(createMessage({
+      id: 'agent-message',
+      thread: { id: 'codex-thread', name: 'Thread' },
+      role: 'agent',
+      text: 'reply'
+    }))
+
+    expect(result.isFailed).toBe(true)
+    expect(result.message).toContain('feishu thread reply message not found')
+    expect(reply).not.toHaveBeenCalled()
+    expect(create).not.toHaveBeenCalled()
+  })
+
   it('uses the message revision in SMTP Message-IDs', async () => {
     const mail: Array<{ messageId: string }> = []
     const output = new EmailChannelOutput({} as never)

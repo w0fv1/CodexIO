@@ -28,6 +28,21 @@ type FeishuCreateMessageClient = {
   im: {
     v1: {
       message: {
+        list: (payload: {
+          params: {
+            container_id_type: 'thread'
+            container_id: string
+            sort_type: 'ByCreateTimeDesc'
+            page_size: 1
+          }
+        }) => Promise<{
+          data?: {
+            items?: Array<{
+              message_id?: string
+              thread_id?: string
+            }>
+          }
+        }>
         create: (payload: FeishuCreateMessagePayload) => Promise<{
           data?: {
             message_id?: string
@@ -208,6 +223,34 @@ export class FeishuChannelOutput implements ChannelOutput {
       const sourceReplyMessageId = context?.source === 'feishu' ? context.sourceMessageId?.trim() : undefined
       let replyMessageId = sourceReplyMessageId || this.replyMessageIdByIoThreadId.get(message.thread.id)
       const messageClient = this.client as unknown as FeishuCreateMessageClient
+      if (!replyMessageId && registeredFeishuThreadId) {
+        Logger.info('feishu openapi resolving reply anchor', {
+          messageId: message.id,
+          ioThreadId: message.thread.id,
+          registeredFeishuThreadId
+        })
+        const listed = await messageClient.im.v1.message.list({
+          params: {
+            container_id_type: 'thread',
+            container_id: registeredFeishuThreadId,
+            sort_type: 'ByCreateTimeDesc',
+            page_size: 1
+          }
+        })
+        replyMessageId = listed.data?.items
+          ?.find((item) => item.thread_id?.trim() === registeredFeishuThreadId)
+          ?.message_id?.trim()
+        if (!replyMessageId) {
+          throw new Error('feishu thread reply message not found')
+        }
+        this.replyMessageIdByIoThreadId.set(message.thread.id, replyMessageId)
+        Logger.info('feishu openapi resolved reply anchor', {
+          messageId: message.id,
+          ioThreadId: message.thread.id,
+          registeredFeishuThreadId,
+          replyMessageId
+        })
+      }
       for (const [index, outgoingMessage] of outgoingMessages.entries()) {
         const uuid = deriveExternalDeliveryId('feishu', message, String(index))
         if (replyMessageId) {
