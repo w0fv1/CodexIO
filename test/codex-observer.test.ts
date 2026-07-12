@@ -456,6 +456,61 @@ describe('CodexThreadObserver', () => {
     observer.stop()
   })
 
+  it('abandons a source version after the configured retry limit', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-11T00:00:00Z'))
+    let updatedAt = 1783728000
+    let attempts = 0
+    const diagnostics: string[] = []
+    const observer = new CodexThreadObserver({
+      request: async (method) => {
+        if (method === 'thread/list') {
+          return {
+            data: [{ id: 'thread-1', updatedAt }],
+            nextCursor: null
+          }
+        }
+        if (method === 'thread/read') {
+          return {
+            thread: {
+              id: 'thread-1',
+              name: 'Thread',
+              turns: [{
+                id: 'turn-1',
+                status: 'completed',
+                completedAt: 1783728001,
+                items: [{ id: 'message-1', type: 'agentMessage', text: 'reply' }]
+              }]
+            }
+          }
+        }
+        throw new Error(method)
+      }
+    }, {
+      intervalMs: 1000,
+      maxRetryAttempts: 2
+    }, async () => {
+      attempts += 1
+      throw new Error('permanent ingestion failure')
+    }, () => {}, (diagnostic) => {
+      diagnostics.push(diagnostic.event)
+    })
+
+    await observer.start()
+    updatedAt = 1783728001
+    await observer['poll']()
+    vi.setSystemTime(new Date('2026-07-11T00:00:02Z'))
+    await observer['poll']()
+    vi.setSystemTime(new Date('2026-07-11T00:00:03Z'))
+    await observer['poll']()
+    vi.setSystemTime(new Date('2026-07-11T00:00:04Z'))
+    await observer['poll']()
+
+    expect(attempts).toBe(2)
+    expect(diagnostics).toContain('threadReconcileAbandoned')
+    observer.stop()
+  })
+
   it('schedules the next poll only after the current poll finishes', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-11T00:00:00Z'))
@@ -751,7 +806,7 @@ describe('CodexThreadObserver', () => {
               name: 'Thread',
               turns: [{
                 id: 'turn-1',
-                status: 'completed',
+                status: 'inProgress',
                 completedAt: null,
                 items: []
               }]
@@ -890,13 +945,11 @@ describe('CodexThreadObserver', () => {
     observer.stop()
   })
 
-  it('keeps a completed turn without a timestamp unreconciled', async () => {
+  it('treats a completed turn without a timestamp as terminal', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-11T00:00:00Z'))
     let updatedAt = 1783728000
-    let completedAt: number | null = null
     let readCount = 0
-    const snapshots: CodexThreadSnapshot[] = []
     const observer = new CodexThreadObserver({
       request: async (method) => {
         if (method === 'thread/list') {
@@ -914,7 +967,7 @@ describe('CodexThreadObserver', () => {
               turns: [{
                 id: 'turn-1',
                 status: 'completed',
-                completedAt,
+                completedAt: null,
                 items: [{ id: 'final', type: 'agentMessage', phase: 'final_answer', text: 'answer' }]
               }]
             }
@@ -924,9 +977,7 @@ describe('CodexThreadObserver', () => {
       }
     }, {
       intervalMs: 1000
-    }, async (snapshot) => {
-      snapshots.push(snapshot)
-    })
+    }, async () => {})
 
     await observer.start()
     updatedAt = 1783728001
@@ -934,23 +985,17 @@ describe('CodexThreadObserver', () => {
     vi.setSystemTime(new Date('2026-07-11T00:00:02Z'))
     await observer['poll']()
     expect(readCount).toBe(1)
-    expect(snapshots).toEqual([])
-
-    completedAt = 1783728001
     vi.setSystemTime(new Date('2026-07-11T00:00:03Z'))
     await observer['poll']()
-    expect(readCount).toBe(2)
-    expect(snapshots).toHaveLength(1)
+    expect(readCount).toBe(1)
     observer.stop()
   })
 
-  it.each(['completed', 'interrupted'])('keeps a %s turn without its final item unreconciled', async (status) => {
+  it.each(['completed', 'interrupted'])('treats a %s turn without a final item as terminal', async (status) => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-11T00:00:00Z'))
     let updatedAt = 1783728000
-    let items: unknown[] = []
     let readCount = 0
-    const snapshots: CodexThreadSnapshot[] = []
     const observer = new CodexThreadObserver({
       request: async (method) => {
         if (method === 'thread/list') {
@@ -969,7 +1014,7 @@ describe('CodexThreadObserver', () => {
                 id: 'turn-1',
                 status,
                 completedAt: 1783728001,
-                items
+                items: []
               }]
             }
           }
@@ -978,9 +1023,7 @@ describe('CodexThreadObserver', () => {
       }
     }, {
       intervalMs: 1000
-    }, async (snapshot) => {
-      snapshots.push(snapshot)
-    })
+    }, async () => {})
 
     await observer.start()
     updatedAt = 1783728001
@@ -988,24 +1031,17 @@ describe('CodexThreadObserver', () => {
     vi.setSystemTime(new Date('2026-07-11T00:00:02Z'))
     await observer['poll']()
     expect(readCount).toBe(1)
-    expect(snapshots).toEqual([])
-
-    items = [{ id: 'final', type: 'agentMessage', phase: 'final_answer', text: 'answer' }]
     vi.setSystemTime(new Date('2026-07-11T00:00:03Z'))
     await observer['poll']()
-    expect(readCount).toBe(2)
-    expect(snapshots).toMatchObject([{
-      messages: [{ itemId: 'final', text: 'answer' }]
-    }])
+    expect(readCount).toBe(1)
     observer.stop()
   })
 
-  it.each(['completed', 'interrupted'])('keeps a %s shell without timestamp or items unreconciled', async (status) => {
+  it.each(['completed', 'interrupted'])('treats a %s shell without timestamp or items as terminal', async (status) => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-11T00:00:00Z'))
     let updatedAt = 1783727999
-    let completedAt: number | null = null
-    let items: unknown[] = []
+    let readCount = 0
     const snapshots: CodexThreadSnapshot[] = []
     const observer = new CodexThreadObserver({
       request: async (method) => {
@@ -1016,6 +1052,7 @@ describe('CodexThreadObserver', () => {
           }
         }
         if (method === 'thread/read') {
+          readCount += 1
           return {
             thread: {
               id: 'thread-1',
@@ -1023,8 +1060,8 @@ describe('CodexThreadObserver', () => {
               turns: [{
                 id: 'turn-1',
                 status,
-                completedAt,
-                items
+                completedAt: null,
+                items: []
               }]
             }
           }
@@ -1043,14 +1080,9 @@ describe('CodexThreadObserver', () => {
     vi.setSystemTime(new Date('2026-07-11T00:00:02Z'))
     await observer['poll']()
     expect(snapshots).toEqual([])
-
-    completedAt = 1783728001
-    items = [{ id: 'final', type: 'agentMessage', phase: 'final_answer', text: 'answer' }]
     vi.setSystemTime(new Date('2026-07-11T00:00:03Z'))
     await observer['poll']()
-    expect(snapshots).toMatchObject([{
-      messages: [{ itemId: 'final', text: 'answer' }]
-    }])
+    expect(readCount).toBe(1)
     observer.stop()
   })
 

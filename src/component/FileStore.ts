@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { basename, extname, join, resolve } from 'node:path'
-import { copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rename, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { fileTypeFromBuffer } from 'file-type'
 import { inject, injectable } from 'inversify'
 import { CodexioMetadata } from './CodexioMetadata.js'
@@ -10,6 +10,11 @@ export type FileStoreBufferInput = {
   buffer: Buffer
   name: string
   mime?: string
+}
+
+export type FileStoreCleanupResult = {
+  deleted: number
+  bytes: number
 }
 
 export function isImageFile(file: Pick<MessageFile, 'mime'>): boolean {
@@ -55,13 +60,10 @@ export class FileStore {
       throw new Error(`file is not a regular file: ${resolvedPath}`)
     }
     const buffer = await readFile(resolvedPath)
-    const prepared = await this.prepare(buffer, basename(resolvedPath))
-    await mkdir(this.rootPath, {
-      recursive: true
+    return this.importBuffer({
+      buffer,
+      name: basename(resolvedPath)
     })
-    await copyFile(resolvedPath, prepared.path)
-    this.files.set(prepared.id, prepared)
-    return prepared
   }
 
   async importBuffer(input: FileStoreBufferInput): Promise<MessageFile> {
@@ -69,9 +71,66 @@ export class FileStore {
     await mkdir(this.rootPath, {
       recursive: true
     })
-    await writeFile(prepared.path, input.buffer)
+    try {
+      await stat(prepared.path)
+      await utimes(prepared.path, new Date(), new Date())
+    } catch (error) {
+      if (!isMissingFileError(error)) {
+        throw error
+      }
+      const temporaryPath = join(this.rootPath, `.${prepared.id}.${randomUUID()}.tmp`)
+      await writeFile(temporaryPath, input.buffer, {
+        flag: 'wx'
+      })
+      try {
+        await rename(temporaryPath, prepared.path)
+      } catch (renameError) {
+        await rm(temporaryPath, {
+          force: true
+        })
+        try {
+          await stat(prepared.path)
+        } catch {
+          throw renameError
+        }
+      }
+    }
     this.files.set(prepared.id, prepared)
     return prepared
+  }
+
+  async cleanup(retentionDays = 30, now = new Date()): Promise<FileStoreCleanupResult> {
+    await mkdir(this.rootPath, {
+      recursive: true
+    })
+    const cutoff = now.getTime() - retentionDays * 24 * 60 * 60 * 1000
+    const activePaths = new Set([...this.files.values()].map((file) => file.path))
+    let deleted = 0
+    let bytes = 0
+    for (const entry of await readdir(this.rootPath, {
+      withFileTypes: true
+    })) {
+      if (!entry.isFile()) {
+        continue
+      }
+      const path = join(this.rootPath, entry.name)
+      if (activePaths.has(path)) {
+        continue
+      }
+      const metadata = await stat(path)
+      if (metadata.mtimeMs >= cutoff) {
+        continue
+      }
+      await rm(path, {
+        force: true
+      })
+      deleted += 1
+      bytes += metadata.size
+    }
+    return {
+      deleted,
+      bytes
+    }
   }
 
   async read(id: string): Promise<Buffer> {
@@ -105,17 +164,21 @@ export class FileStore {
     const baseName = basename(name)
     const inputExtension = extname(baseName).toLowerCase()
     const mime = detected?.mime ?? (providedMime && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(providedMime) ? providedMime : extensionMimes.get(inputExtension) ?? 'application/octet-stream')
-    const id = randomUUID()
+    const id = createHash('sha256').update(buffer).digest('hex')
     const extension = imageMimeExtensions.get(mime) ?? (detected?.ext ? `.${detected.ext}` : extname(baseName))
-    const path = join(this.rootPath, `${id}${extension}`)
+    const path = join(this.rootPath, id)
     return {
       id,
       mime,
       name: baseName || `${id}${extension}`,
       size: buffer.length,
-      sha256: createHash('sha256').update(buffer).digest('hex'),
+      sha256: id,
       path,
       url: `/api/files/${id}`
     }
   }
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && error.code === 'ENOENT'
 }

@@ -1687,8 +1687,8 @@ describe('core', () => {
   })
 
   it('parses markdown attachment references', () => {
-    expect(parseMarkdownAttachmentReferences('图片 ![图](https://example.com/a.png) 文件 [说明](./docs/readme.md)')).toEqual({
-      text: '图片 `https://example.com/a.png` 文件 `./docs/readme.md`',
+    expect(parseMarkdownAttachmentReferences('图片 ![图](https://example.com/a.png) 下载 [官网](https://example.com/a.zip) 文件 [说明](./docs/readme.md)')).toEqual({
+      text: '图片 `https://example.com/a.png` 下载 [官网](https://example.com/a.zip) 文件 `./docs/readme.md`',
       files: [
         {
           label: '图',

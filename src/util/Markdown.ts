@@ -90,7 +90,7 @@ export function parseMarkdownAttachmentReferences(markdown: string): MarkdownAtt
     }
     index = match.end
     const path = normalizeMarkdownLinkTarget(match.target)
-    if (!isFileReferencePath(path)) {
+    if (!isAttachmentReference(path, match.image)) {
       continue
     }
     parts.push(markdown.slice(lastIndex, match.start))
@@ -165,8 +165,8 @@ function normalizeMarkdownLinkTarget(target: string): string {
   }
 }
 
-function isFileReferencePath(path: string): boolean {
-  return /^https?:\/\//i.test(path)
+function isAttachmentReference(path: string, image: boolean): boolean {
+  return (image && /^https?:\/\//i.test(path))
     || path.startsWith('/api/files/')
     || /^[A-Za-z]:[\\/]/.test(path)
     || path.startsWith('/')

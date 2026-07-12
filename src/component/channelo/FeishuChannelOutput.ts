@@ -13,6 +13,8 @@ import { ChannelOutput, ChannelOutputContext } from './ChannelOutput.js'
 import { deriveExternalDeliveryId } from './ExternalDeliveryIdentity.js'
 
 type FeishuChannelOutputConfig = CodexioConfig['channelo']['feishu']
+const feishuImageMaxBytes = 10 * 1024 * 1024
+const feishuFileMaxBytes = 30 * 1024 * 1024
 type FeishuCreateMessagePayload = {
   params: {
     receive_id_type: 'open_id' | 'user_id' | 'union_id' | 'email' | 'chat_id'
@@ -128,7 +130,17 @@ export class FeishuChannelOutput implements ChannelOutput {
       })
       const images: Array<{ imageKey: string }> = []
       const files: Array<{ fileKey: string }> = []
+      const rejectedFiles: Array<{ name: string, size: number, limit: number }> = []
       for (const file of message.files ?? []) {
+        const limit = isImageFile(file) ? feishuImageMaxBytes : feishuFileMaxBytes
+        if (file.size > limit) {
+          rejectedFiles.push({
+            name: file.name,
+            size: file.size,
+            limit
+          })
+          continue
+        }
         if (isImageFile(file)) {
           const image = await this.client.im.v1.image.create({
             data: {
@@ -183,13 +195,24 @@ export class FeishuChannelOutput implements ChannelOutput {
         }
       }
       const content: Array<Array<Record<string, string>>> = []
-      if (message.text.trim().length > 0) {
+      const rejectionText = rejectedFiles.map((file) => {
+        return `附件未发送：${file.name}（${file.size} 字节），飞书限制为 ${file.limit} 字节。`
+      }).join('\n')
+      const outgoingText = [message.text.trim(), rejectionText].filter(Boolean).join('\n\n')
+      if (outgoingText.length > 0) {
         content.push([
           {
             tag: 'md',
-            text: message.text
+            text: outgoingText
           }
         ])
+      }
+      if (rejectedFiles.length > 0) {
+        Logger.warn('feishu attachments rejected', {
+          messageId: message.id,
+          ioThreadId: message.thread.id,
+          files: rejectedFiles
+        })
       }
       for (const image of images) {
         content.push([

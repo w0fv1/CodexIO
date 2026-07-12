@@ -172,6 +172,65 @@ describe('channel provider idempotency', () => {
     expect(create).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ['image/png', 10 * 1024 * 1024 + 1, 'image'],
+    ['application/octet-stream', 30 * 1024 * 1024 + 1, 'file']
+  ])('skips oversized Feishu %s attachments and still sends the text', async (mime, size, uploadType) => {
+    const registry = threadRegistry()
+    registry.ensure('codex-thread')
+    registry.bind('codex-thread', {
+      source: 'feishu',
+      id: 'chat:thread:omt_existing'
+    })
+    const imageCreate = vi.fn()
+    const fileCreate = vi.fn()
+    const reply = vi.fn(async () => ({
+      data: {
+        message_id: 'om_reply',
+        thread_id: 'omt_existing'
+      }
+    }))
+    const output = new FeishuChannelOutput({} as never, registry)
+    Reflect.set(output, 'chatId', 'chat')
+    Reflect.set(output, 'client', {
+      im: {
+        v1: {
+          image: { create: imageCreate },
+          file: { create: fileCreate },
+          message: {
+            list: async () => ({
+              data: {
+                items: [{ message_id: 'om_existing', thread_id: 'omt_existing' }]
+              }
+            }),
+            reply
+          }
+        }
+      }
+    })
+
+    const result = await output.send(createMessage({
+      id: `oversized-${uploadType}`,
+      thread: { id: 'codex-thread', name: 'Thread' },
+      role: 'agent',
+      text: 'answer',
+      files: [{
+        id: 'file-id',
+        mime,
+        name: 'oversized.bin',
+        size,
+        sha256: 'hash',
+        path: 'missing-file'
+      }]
+    }))
+
+    expect(result.isFailed).toBe(false)
+    expect(imageCreate).not.toHaveBeenCalled()
+    expect(fileCreate).not.toHaveBeenCalled()
+    expect(reply).toHaveBeenCalledOnce()
+    expect(Reflect.get(reply.mock.calls[0][0].data, 'content')).toContain('附件未发送')
+  })
+
   it('uses the immutable message identity in SMTP Message-IDs', async () => {
     const mail: Array<{ messageId: string }> = []
     const output = new EmailChannelOutput({} as never)

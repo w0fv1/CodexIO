@@ -19,6 +19,7 @@ import { AgentManager } from './component/agent/AgentManager.js'
 import { ThreadRegistry } from './component/ThreadRegistry.js'
 import { DesktopIntegration } from './component/desktop/DesktopIntegration.js'
 import { ServerRuntime } from './component/ServerRuntime.js'
+import { FileStore } from './component/FileStore.js'
 
 @injectable()
 export class CodexioApplication {
@@ -35,7 +36,8 @@ export class CodexioApplication {
     @inject(AgentManager) private readonly agentManager: AgentManager,
     @inject(ThreadRegistry) private readonly threadRegistry: ThreadRegistry,
     @inject(DesktopIntegration) private readonly desktopIntegration: DesktopIntegration,
-    @inject(ServerRuntime) private readonly serverRuntime: ServerRuntime
+    @inject(ServerRuntime) private readonly serverRuntime: ServerRuntime,
+    @inject(FileStore) private readonly fileStore: FileStore
   ) {
     this.eventBus.on(AppEvent.StopRequested, () => {
       void this.stopAndExit(0)
@@ -53,6 +55,10 @@ export class CodexioApplication {
     const cleanedLogs = await Logger.cleanup(30)
     if (cleanedLogs.deleted > 0) {
       Logger.info('old log files cleaned', cleanedLogs)
+    }
+    const cleanedFiles = await this.fileStore.cleanup(30)
+    if (cleanedFiles.deleted > 0) {
+      Logger.info('old files cleaned', cleanedFiles)
     }
     try {
       await this.threadRegistry.init()

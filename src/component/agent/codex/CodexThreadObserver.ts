@@ -39,12 +39,14 @@ type ThreadSyncState = ThreadCandidate & {
   reconciledUpdatedAt?: number
   lastReadAt?: number
   retryAttempt: number
+  pendingAttempt: number
   retryAt: number
 }
 
 export type CodexThreadObserverOptions = {
   intervalMs: number
   overlapSeconds?: number
+  maxRetryAttempts?: number
 }
 
 export type CodexThreadObserverDiagnostic = {
@@ -98,6 +100,7 @@ export class CodexThreadObserver {
           firstObservedAt: observedAt,
           reconciledUpdatedAt: thread.updatedAt < this.baselineCompletedAt ? thread.updatedAt : undefined,
           retryAttempt: 0,
+          pendingAttempt: 0,
           retryAt: 0
         })
       }
@@ -232,21 +235,24 @@ export class CodexThreadObserver {
         try {
           const reconciled = await this.readThread(candidate.id)
           if (!reconciled) {
-            this.scheduleRetry(state)
+            state.pendingAttempt += 1
+            const baseDelay = Math.max(1000, this.options.intervalMs)
+            state.retryAt = Date.now() + Math.min(10000, baseDelay * (2 ** (state.pendingAttempt - 1)))
             continue
           }
           if (state.updatedAt === candidate.updatedAt) {
             state.reconciledUpdatedAt = candidate.updatedAt
             state.firstObservedAt = Date.now()
             state.retryAttempt = 0
+            state.pendingAttempt = 0
             state.retryAt = 0
           }
         } catch (error) {
           const failure = error instanceof Error ? error : new Error(String(error))
-          this.scheduleRetry(state)
+          const abandoned = this.scheduleRetry(state)
           this.receiveError(failure)
           this.diagnose({
-            event: 'threadReconcileFailed',
+            event: abandoned ? 'threadReconcileAbandoned' : 'threadReconcileFailed',
             data: {
               threadId: candidate.id,
               updatedAt: candidate.updatedAt,
@@ -334,6 +340,7 @@ export class CodexThreadObserver {
         stableSince: observedAt,
         firstObservedAt: observedAt,
         retryAttempt: 0,
+        pendingAttempt: 0,
         retryAt: 0
       })
       return
@@ -347,6 +354,7 @@ export class CodexThreadObserver {
     if (wasReconciled) {
       state.firstObservedAt = observedAt
       state.retryAttempt = 0
+      state.pendingAttempt = 0
       state.retryAt = 0
     }
   }
@@ -359,7 +367,7 @@ export class CodexThreadObserver {
         if (state.reconciledUpdatedAt === state.updatedAt || state.retryAt > now) {
           return false
         }
-        return state.retryAttempt > 0
+        return state.retryAttempt > 0 || state.pendingAttempt > 0
           || now - state.stableSince >= settleMs
           || now - state.firstObservedAt >= maxWaitMs
       })
@@ -367,10 +375,17 @@ export class CodexThreadObserver {
       .map(({ id, updatedAt }) => ({ id, updatedAt }))
   }
 
-  private scheduleRetry(state: ThreadSyncState): void {
+  private scheduleRetry(state: ThreadSyncState): boolean {
     state.retryAttempt += 1
+    if (state.retryAttempt >= Math.max(1, this.options.maxRetryAttempts ?? 5)) {
+      state.reconciledUpdatedAt = state.updatedAt
+      state.firstObservedAt = Date.now()
+      state.retryAt = 0
+      return true
+    }
     const baseDelay = Math.max(1000, this.options.intervalMs)
     state.retryAt = Date.now() + Math.min(10000, baseDelay * (2 ** (state.retryAttempt - 1)))
+    return false
   }
 
   private overlapSeconds(): number {
@@ -489,18 +504,25 @@ export class CodexThreadObserver {
         }
       })
     }
-    if (terminalTurnWithoutTimestampCount > 0 || terminalTurnWithoutAgentMessageCount > 0 || nonTerminalTurnCount > 0) {
+    if (terminalTurnWithoutTimestampCount > 0 || terminalTurnWithoutAgentMessageCount > 0) {
+      this.diagnose({
+        event: 'threadTerminalAnomaly',
+        data: {
+          threadId,
+          terminalTurnWithoutTimestampCount,
+          terminalTurnWithoutAgentMessageCount
+        }
+      })
+    }
+    if (nonTerminalTurnCount > 0) {
       this.diagnose({
         event: 'threadReconcilePending',
         data: {
           threadId,
-          terminalTurnWithoutTimestampCount,
-          terminalTurnWithoutAgentMessageCount,
           nonTerminalTurnCount
         }
       })
-      return false
     }
-    return true
+    return nonTerminalTurnCount === 0
   }
 }

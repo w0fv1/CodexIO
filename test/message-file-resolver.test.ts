@@ -1,7 +1,7 @@
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
 import { FileStore } from '../src/component/FileStore.js'
 import { MessageFileResolver } from '../src/component/MessageFileResolver.js'
@@ -14,6 +14,74 @@ import { createMessage, Message } from '../src/value/Message.js'
 import { Result } from '../src/value/Result.js'
 
 describe('message file resolver', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('keeps ordinary HTTPS links as links without downloading them', async () => {
+    const rootPath = await mkdtemp(join(tmpdir(), 'codexio-http-link-'))
+    const fetcher = vi.fn()
+    vi.stubGlobal('fetch', fetcher)
+    const resolver = new MessageFileResolver(new FileStore(new CodexioMetadata({ rootPath })))
+    const text = '[Codexio](https://next.firco.cn/download/release/codexio/latest?platform=electron)'
+
+    const resolved = await resolver.resolve(createMessage({
+      id: 'agent-link',
+      thread: { id: 'thread', name: '链接' },
+      role: 'agent',
+      text
+    }), rootPath)
+
+    expect(resolved.text).toBe(text)
+    expect(resolved.files).toBeUndefined()
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+
+  it('downloads an explicitly embedded remote image', async () => {
+    const rootPath = await mkdtemp(join(tmpdir(), 'codexio-http-image-'))
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=', 'base64')
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(png, {
+      headers: {
+        'content-length': String(png.length),
+        'content-type': 'image/png'
+      }
+    })))
+    const resolver = new MessageFileResolver(new FileStore(new CodexioMetadata({ rootPath })))
+
+    const resolved = await resolver.resolve(createMessage({
+      id: 'agent-image',
+      thread: { id: 'thread', name: '图片' },
+      role: 'agent',
+      text: '![图片](https://example.com/image.png)'
+    }), rootPath)
+
+    expect(resolved.files).toMatchObject([{
+      mime: 'image/png',
+      size: png.length
+    }])
+  })
+
+  it('rejects a remote image whose declared size exceeds the download limit', async () => {
+    const rootPath = await mkdtemp(join(tmpdir(), 'codexio-http-large-image-'))
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('not read', {
+      headers: {
+        'content-length': String(10 * 1024 * 1024 + 1),
+        'content-type': 'image/png'
+      }
+    })))
+    const resolver = new MessageFileResolver(new FileStore(new CodexioMetadata({ rootPath })))
+
+    const resolved = await resolver.resolve(createMessage({
+      id: 'agent-large-image',
+      thread: { id: 'thread', name: '图片' },
+      role: 'agent',
+      text: '![图片](https://example.com/image.png)'
+    }), rootPath)
+
+    expect(resolved.files).toBeUndefined()
+    expect(await readdir(new CodexioMetadata({ rootPath }).filePath).catch(() => [])).toEqual([])
+  })
+
   it('materializes every markdown attachment before delivery', async () => {
     const rootPath = await mkdtemp(join(tmpdir(), 'codexio-file-resolver-'))
     const workspacePath = join(rootPath, 'workspace')
@@ -50,6 +118,43 @@ describe('message file resolver', () => {
     })
 
     expect(file.size).toBe(buffer.length)
+  })
+
+  it('stores identical content once using its SHA-256 identity', async () => {
+    const rootPath = await mkdtemp(join(tmpdir(), 'codexio-deduplicated-file-'))
+    const metadata = new CodexioMetadata({ rootPath })
+    const fileStore = new FileStore(metadata)
+    const first = await fileStore.importBuffer({
+      buffer: Buffer.from('same content'),
+      name: 'first.txt'
+    })
+    const second = await fileStore.importBuffer({
+      buffer: Buffer.from('same content'),
+      name: 'second.txt'
+    })
+
+    expect(second.id).toBe(first.id)
+    expect(second.path).toBe(first.path)
+    expect(await readdir(metadata.filePath)).toHaveLength(1)
+  })
+
+  it('cleans unreferenced files after the retention period', async () => {
+    const rootPath = await mkdtemp(join(tmpdir(), 'codexio-file-cleanup-'))
+    const metadata = new CodexioMetadata({ rootPath })
+    await mkdir(metadata.filePath, {
+      recursive: true
+    })
+    const expiredPath = join(metadata.filePath, 'expired')
+    await writeFile(expiredPath, 'expired')
+    await utimes(expiredPath, new Date('2026-01-01T00:00:00Z'), new Date('2026-01-01T00:00:00Z'))
+
+    const result = await new FileStore(metadata).cleanup(30, new Date('2026-03-01T00:00:00Z'))
+
+    expect(result).toEqual({
+      deleted: 1,
+      bytes: 7
+    })
+    expect(await readdir(metadata.filePath)).toEqual([])
   })
 
   it('materializes Agent output in AgentManager before channel delivery', async () => {
