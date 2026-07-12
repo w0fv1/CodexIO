@@ -20,6 +20,7 @@ export class NfircoThreadInput implements ChannelInput {
   private reconnectTimer?: ReturnType<typeof setTimeout>
   private stopped = true
   private reconnectDelayMs = 1000
+  private heartbeatIntervalMs = 15000
   private receiveQueue = Promise.resolve()
   private selfAccessId?: string
 
@@ -70,13 +71,29 @@ export class NfircoThreadInput implements ChannelInput {
     this.selfAccessId = undefined
     await new Promise<void>((resolve, reject) => {
       let settled = false
+      let pongReceived = true
+      let heartbeatTimer: ReturnType<typeof setInterval> | undefined
       const socket = openNfircoThreadSocket(credentials)
       this.socket = socket
       socket.once('open', () => {
+        heartbeatTimer = setInterval(() => {
+          if (!pongReceived) {
+            Logger.warn('nfirco thread input heartbeat timed out', {
+              section
+            })
+            socket.terminate()
+            return
+          }
+          pongReceived = false
+          socket.ping()
+        }, this.heartbeatIntervalMs)
         socket.send(JSON.stringify({
           type: 'thread.section.subscribe',
           section
         }))
+      })
+      socket.on('pong', () => {
+        pongReceived = true
       })
       socket.once('error', (error) => {
         Logger.warn('nfirco thread input error', {
@@ -138,6 +155,10 @@ export class NfircoThreadInput implements ChannelInput {
         }
       })
       socket.on('close', (code, reason) => {
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer)
+          heartbeatTimer = undefined
+        }
         Logger.warn('nfirco thread input closed', {
           code,
           reason: reason.toString()
@@ -148,8 +169,8 @@ export class NfircoThreadInput implements ChannelInput {
         }
         if (this.socket === socket) {
           this.socket = undefined
+          this.scheduleReconnect()
         }
-        this.scheduleReconnect()
       })
     })
   }

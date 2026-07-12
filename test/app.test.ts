@@ -737,7 +737,7 @@ describe('server', () => {
     await input.stop()
   })
 
-  it('reconnects nfirco thread input after the socket closes', async () => {
+  it('reconnects nfirco thread input when the socket stops responding to pings', async () => {
     const port = await resolveAvailableServerPort('127.0.0.1', 8787)
     const httpServer = new HttpServer((request, response) => {
       if (request.url === '/asset/readme.txt') {
@@ -750,7 +750,8 @@ describe('server', () => {
     })
     const wsServer = new WebSocketServer({
       server: httpServer,
-      path: '/api/threadio/ws'
+      path: '/api/threadio/ws',
+      autoPong: false
     })
     const sockets: WebSocket[] = []
     const connectionHeaders: IncomingHttpHeaders[] = []
@@ -760,6 +761,11 @@ describe('server', () => {
       connectionHeaders.push(request.headers)
       connectionCount += 1
       const currentConnection = connectionCount
+      socket.on('ping', (data) => {
+        if (currentConnection > 1) {
+          socket.pong(data)
+        }
+      })
       socket.send(JSON.stringify({
         type: 'ready',
         accessId: 'self-access'
@@ -771,11 +777,6 @@ describe('server', () => {
             type: 'thread.section.subscribed',
             section: message.section
           }))
-          if (currentConnection === 1) {
-            setTimeout(() => {
-              socket.close()
-            }, 10)
-          }
         }
       })
     })
@@ -806,6 +807,7 @@ describe('server', () => {
     })
     const input = new NfircoThreadInput(new Configer(metadata), new FileStore(metadata))
     ;(input as unknown as { reconnectDelayMs: number }).reconnectDelayMs = 10
+    ;(input as unknown as { heartbeatIntervalMs: number }).heartbeatIntervalMs = 10
     const received: Array<Record<string, unknown>> = []
     await input.start({
       receive: async (source, message) => {
