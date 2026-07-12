@@ -92,3 +92,4 @@ channelo:
     baseUrl: "${channeli.nfirco.baseUrl}"
     account: "${channeli.nfirco.account}"
     password: "${channeli.nfirco.password}"
+    section: "${channeli.nfirco.section}"

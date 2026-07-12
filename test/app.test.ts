@@ -760,6 +760,10 @@ describe('server', () => {
       connectionHeaders.push(request.headers)
       connectionCount += 1
       const currentConnection = connectionCount
+      socket.send(JSON.stringify({
+        type: 'ready',
+        accessId: 'self-access'
+      }))
       socket.on('message', (data) => {
         const message = JSON.parse(data.toString()) as Record<string, unknown>
         if (message.type === 'thread.section.subscribe') {
@@ -791,7 +795,6 @@ describe('server', () => {
       `    baseUrl: http://127.0.0.1:${port}`,
       '    account: 用户+Book',
       '    password: pass+密码',
-      '    accessId: self-access',
       '    section: section-1',
       'channelo:',
       '  web:',
@@ -972,7 +975,6 @@ describe('server', () => {
       `    baseUrl: http://127.0.0.1:${port}`,
       '    account: 用户+Book',
       '    password: pass+密码',
-      '    accessId: self-access',
       '    section: section-1'
     ].join('\n'))
     const metadata = new CodexioMetadata({
@@ -1106,7 +1108,6 @@ describe('server', () => {
       `    baseUrl: http://127.0.0.1:${port}`,
       '    account: 用户+Book',
       '    password: pass+密码',
-      '    accessId: self-access',
       '    section: section-1'
     ].join('\n'))
     const metadata = new CodexioMetadata({

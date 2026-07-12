@@ -836,8 +836,7 @@ describe('core', () => {
           enabled: true,
           baseUrl: 'https://firco.cn',
           account: 'codexio',
-          password: 'password',
-          accessId: 'access-1'
+          password: 'password'
         }
       }
     })

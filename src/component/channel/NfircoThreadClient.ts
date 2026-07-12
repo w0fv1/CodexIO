@@ -5,7 +5,6 @@ export type NfircoThreadCredentials = {
   baseUrl: string
   account: string
   password: string
-  accessId?: string
 }
 
 export type NfircoThreadAttachment = {
@@ -229,8 +228,7 @@ export function normalizeNfircoThreadCredentials(credentials: NfircoThreadCreden
   return {
     baseUrl: toHttpBaseUrl(credentials.baseUrl),
     account: credentials.account.trim(),
-    password: credentials.password,
-    accessId: credentials.accessId?.trim()
+    password: credentials.password
   }
 }
 

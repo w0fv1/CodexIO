@@ -21,6 +21,7 @@ export class NfircoThreadInput implements ChannelInput {
   private stopped = true
   private reconnectDelayMs = 1000
   private receiveQueue = Promise.resolve()
+  private selfAccessId?: string
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
@@ -54,6 +55,7 @@ export class NfircoThreadInput implements ChannelInput {
     this.socket = undefined
     this.receiver = undefined
     this.config = undefined
+    this.selfAccessId = undefined
     this.receiveQueue = Promise.resolve()
     return Result.successVoid()
   }
@@ -65,6 +67,7 @@ export class NfircoThreadInput implements ChannelInput {
     }
     const credentials = normalizeNfircoThreadCredentials(config)
     const section = config.section.trim()
+    this.selfAccessId = undefined
     await new Promise<void>((resolve, reject) => {
       let settled = false
       const socket = openNfircoThreadSocket(credentials)
@@ -88,7 +91,30 @@ export class NfircoThreadInput implements ChannelInput {
         try {
           const payload = data.toString()
           const event = parseNfircoThreadSocketEvent(JSON.parse(payload))
+          if (event?.type === 'ready') {
+            const accessId = typeof event.accessId === 'string' ? event.accessId.trim() : ''
+            if (accessId.length === 0) {
+              const error = new Error('nfirco thread ready accessId missing')
+              if (!settled) {
+                settled = true
+                reject(error)
+              }
+              socket.close()
+              return
+            }
+            this.selfAccessId = accessId
+            Logger.info('nfirco thread identity ready', {
+              accessId
+            })
+            return
+          }
           if (!settled && event?.type === 'thread.section.subscribed') {
+            if (!this.selfAccessId) {
+              settled = true
+              reject(new Error('nfirco thread subscribed before identity ready'))
+              socket.close()
+              return
+            }
             settled = true
             Logger.info('nfirco thread input connected', {
               section
@@ -96,7 +122,11 @@ export class NfircoThreadInput implements ChannelInput {
             resolve()
             return
           }
-          this.receiveQueue = this.receiveQueue.then(() => this.receiveEvent(event)).catch((error) => {
+          const selfAccessId = this.selfAccessId
+          if (!selfAccessId) {
+            return
+          }
+          this.receiveQueue = this.receiveQueue.then(() => this.receiveEvent(event, selfAccessId)).catch((error) => {
             Logger.warn('nfirco thread message receive crashed', {
               message: error instanceof Error ? error.message : String(error)
             })
@@ -139,14 +169,16 @@ export class NfircoThreadInput implements ChannelInput {
     }, this.reconnectDelayMs)
   }
 
-  private async receiveEvent(event: ReturnType<typeof parseNfircoThreadSocketEvent>): Promise<void> {
+  private async receiveEvent(event: ReturnType<typeof parseNfircoThreadSocketEvent>, selfAccessId: string): Promise<void> {
     if (!isNfircoThreadInputEvent(event)) {
       return
     }
-    if (this.isSelfEvent(event.authorAccessId)) {
+    if (event.authorAccessId?.trim() === selfAccessId) {
       Logger.info('nfirco thread self event ignored', {
         type: event.type,
-        threadUuid: event.threadUuid
+        threadUuid: event.threadUuid,
+        authorAccessId: event.authorAccessId,
+        selfAccessId
       })
       return
     }
@@ -196,8 +228,4 @@ export class NfircoThreadInput implements ChannelInput {
     }
   }
 
-  private isSelfEvent(authorAccessId?: string): boolean {
-    const selfAccessId = this.config?.accessId?.trim()
-    return selfAccessId !== undefined && selfAccessId.length > 0 && authorAccessId?.trim() === selfAccessId
-  }
 }
