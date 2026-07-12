@@ -3,17 +3,17 @@ import { createInterface } from 'node:readline'
 import { dirname, isAbsolute } from 'node:path'
 import { inject, injectable } from 'inversify'
 import { execa } from 'execa'
-import { Configer } from '../Configer.js'
-import { CodexioMetadata } from '../CodexioMetadata.js'
-import { Logger } from '../Logger.js'
-import { ThreadWorkspaceResolver } from '../ThreadWorkspaceResolver.js'
-import { createProcessEnv } from '../../util/ProcessEnvironment.js'
-import { Result } from '../../value/Result.js'
-import { MessageThread } from '../../value/Message.js'
-import { CodexRuntimeConfig, CodexRuntimeResolver } from './codex/CodexRuntimeResolver.js'
-import { CodexSessionSupervisor } from './codex/CodexSessionSupervisor.js'
-import { CodexLiveItemTracker } from './codex/CodexLiveItemTracker.js'
-import { CodexObserverLifecycle } from './codex/CodexObserverLifecycle.js'
+import { Configer } from '../../Configer.js'
+import { CodexioMetadata } from '../../CodexioMetadata.js'
+import { Logger } from '../../Logger.js'
+import { ThreadWorkspaceResolver } from '../../ThreadWorkspaceResolver.js'
+import { createProcessEnv } from '../../../util/ProcessEnvironment.js'
+import { Result } from '../../../value/Result.js'
+import { MessageThread } from '../../../value/Message.js'
+import { CodexRuntimeConfig, CodexRuntimeResolver } from './CodexRuntimeResolver.js'
+import { CodexSessionSupervisor } from './CodexSessionSupervisor.js'
+import { CodexLiveItemTracker } from './CodexLiveItemTracker.js'
+import { CodexObserverLifecycle } from './CodexObserverLifecycle.js'
 import {
   CodexClientEventMap,
   CodexClientCompletedMessage,
@@ -23,7 +23,7 @@ import {
   CodexClientThread,
   CodexClientTurn,
   CodexThreadSnapshot
-} from './codex/CodexProtocol.js'
+} from './CodexProtocol.js'
 
 export type {
   CodexClientCompletedMessage,
@@ -33,7 +33,7 @@ export type {
   CodexClientThread,
   CodexClientTurn,
   CodexThreadSnapshot
-} from './codex/CodexProtocol.js'
+} from './CodexProtocol.js'
 
 type RpcMessage = {
   id?: number
@@ -70,6 +70,7 @@ export class CodexClient {
   private readonly events = new EventEmitter()
   private readonly threads = new Map<string, CodexClientThread>()
   private readonly turnIdByThreadId = new Map<string, string>()
+  private readonly turnTimeoutByThreadId = new Map<string, { turnId: string, timeout: NodeJS.Timeout }>()
   private readonly liveItems = new CodexLiveItemTracker()
   private readonly workspaceResolver: ThreadWorkspaceResolver
   private readonly runtimeResolver: CodexRuntimeResolver
@@ -83,6 +84,7 @@ export class CodexClient {
   private stopPromise?: Promise<Result<void>>
   private loginStarted = false
   private loginEvent?: CodexClientLoginEvent
+  private turnTimeoutMs = 0
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
@@ -143,6 +145,7 @@ export class CodexClient {
       }
       try {
         const config = await this.readRuntimeConfig()
+        this.turnTimeoutMs = config.turnTimeoutMs
         await this.workspaceResolver.ensureBase()
         if (generation !== this.generation) {
           return Result.fail('codex client start superseded')
@@ -293,6 +296,7 @@ export class CodexClient {
     this.loginStarted = false
     this.loginEvent = undefined
     this.turnIdByThreadId.clear()
+    this.clearTurnTimeouts()
     this.liveItems.clear()
     this.threads.clear()
     this.observerLifecycle.stop()
@@ -373,12 +377,23 @@ export class CodexClient {
         activeTurnId: normalizedThreadId ? this.turnIdByThreadId.get(normalizedThreadId) ?? null : null
       })
       let threadId: string
+      let model: string | undefined
+      let reasoningEffort: CodexRuntimeConfig['reasoningEffort'] | undefined
       if (normalizedThreadId.length === 0) {
-        threadId = (await this.startThread(input.thread)).id
+        const config = await this.readRuntimeConfig()
+        threadId = (await this.startThread(input.thread, config)).id
+        model = config.model
+        reasoningEffort = config.reasoningEffort
       } else if (this.threads.has(normalizedThreadId)) {
         threadId = normalizedThreadId
       } else {
         threadId = (await this.resumeThread(normalizedThreadId, input.thread.name)).id
+      }
+      if (model === undefined || reasoningEffort === undefined) {
+        [model, reasoningEffort] = await Promise.all([
+          this.configer.get('agents.codex.model'),
+          this.configer.get('agents.codex.reasoningEffort')
+        ])
       }
       const turnInput = this.toTurnInput(input)
       const activeTurnId = this.turnIdByThreadId.get(threadId)
@@ -404,7 +419,9 @@ export class CodexClient {
       })
       const response = await this.request('turn/start', {
         threadId,
-        input: turnInput
+        input: turnInput,
+        ...(model ? { model } : {}),
+        ...(reasoningEffort ? { effort: reasoningEffort } : {})
       })
       if (!response || typeof response !== 'object') {
         throw new Error('codex turn response not found')
@@ -469,20 +486,21 @@ export class CodexClient {
     return thread
   }
 
-  private async startThread(messageThread: MessageThread): Promise<CodexClientThread> {
-    const config = await this.readRuntimeConfig()
+  private async startThread(messageThread: MessageThread, config?: CodexRuntimeConfig): Promise<CodexClientThread> {
+    const runtimeConfig = config ?? await this.readRuntimeConfig()
     const cwd = await this.workspaceResolver.ensure(messageThread.id)
-    const codexExecutablePath = config.bundled && config.args[0] && isAbsolute(config.args[0])
-      ? config.args[0]
-      : config.command
+    const codexExecutablePath = runtimeConfig.bundled && runtimeConfig.args[0] && isAbsolute(runtimeConfig.args[0])
+      ? runtimeConfig.args[0]
+      : runtimeConfig.command
     const codexExecutableDirectory = isAbsolute(codexExecutablePath) ? dirname(codexExecutablePath) : ''
     const response = await this.request('thread/start', {
+      ...(runtimeConfig.model ? { model: runtimeConfig.model } : {}),
       cwd,
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
       ephemeral: false,
       developerInstructions: [
-        config.instruction,
+        runtimeConfig.instruction,
         codexExecutableDirectory.length > 0
           ? [
               'Codex runtime context:',
@@ -627,6 +645,7 @@ export class CodexClient {
         if (threadId && turnId) {
           this.liveItems.clearThread(threadId)
           this.turnIdByThreadId.set(threadId, turnId)
+          this.scheduleTurnTimeout(threadId, turnId)
           this.emitMessage({
             thread: this.messageThread(threadId),
             turnId,
@@ -684,7 +703,18 @@ export class CodexClient {
           ? this.liveItems.getItem(threadId, turnId, itemId)
           : undefined
         const phase = readString(item, 'phase') ?? itemState?.phase
-        if (threadId && turnId && itemId && phase !== 'commentary' && (!type || type === 'agentMessage')) {
+        if (threadId && turnId && itemId && phase === 'commentary' && (!type || type === 'agentMessage') && text.trim().length > 0) {
+          this.emitMessage({
+            thread: this.messageThread(threadId),
+            turnId,
+            itemId,
+            status: 'progressCompleted',
+            role: 'assistant',
+            text,
+            occurredAt: readNumber(data, 'completedAtMs'),
+            messages: []
+          })
+        } else if (threadId && turnId && itemId && phase !== 'commentary' && (!type || type === 'agentMessage')) {
           this.emitMessage({
             thread: this.messageThread(threadId),
             turnId,
@@ -713,6 +743,7 @@ export class CodexClient {
       case 'thread/closed': {
         const threadId = readString(data, 'threadId')
         if (threadId) {
+          this.clearTurnTimeout(threadId)
           this.liveItems.clearThread(threadId)
           this.removeThread(threadId)
         }
@@ -727,6 +758,7 @@ export class CodexClient {
         const threadId = readString(data, 'threadId')
         const turnId = threadId ? this.turnIdByThreadId.get(threadId) : undefined
         if (threadId && turnId) {
+          this.clearTurnTimeout(threadId, turnId)
           this.emitMessage({
             thread: this.messageThread(threadId),
             turnId,
@@ -750,6 +782,7 @@ export class CodexClient {
     if (!threadId || !turnId) {
       return
     }
+    this.clearTurnTimeout(threadId, turnId)
     this.turnIdByThreadId.delete(threadId)
     this.upsertThread({
       id: threadId,
@@ -882,6 +915,71 @@ export class CodexClient {
     return this.runtimeResolver.resolve()
   }
 
+  private scheduleTurnTimeout(threadId: string, turnId: string): void {
+    this.clearTurnTimeout(threadId)
+    if (this.turnTimeoutMs <= 0) {
+      return
+    }
+    const timeout = setTimeout(() => {
+      void this.interruptTimedOutTurn(threadId, turnId)
+    }, this.turnTimeoutMs)
+    this.turnTimeoutByThreadId.set(threadId, {
+      turnId,
+      timeout
+    })
+  }
+
+  private async interruptTimedOutTurn(threadId: string, turnId: string): Promise<void> {
+    const scheduled = this.turnTimeoutByThreadId.get(threadId)
+    if (!scheduled || scheduled.turnId !== turnId || this.turnIdByThreadId.get(threadId) !== turnId) {
+      return
+    }
+    this.clearTurnTimeout(threadId, turnId)
+    this.turnIdByThreadId.delete(threadId)
+    this.liveItems.clearTurn(threadId, turnId)
+    this.upsertThread({
+      id: threadId,
+      title: this.threads.get(threadId)?.title ?? '',
+      isWorking: false
+    })
+    this.emitMessage({
+      thread: this.messageThread(threadId),
+      turnId,
+      status: 'failed',
+      role: 'assistant',
+      text: `Codex 执行超过 ${Math.ceil(this.turnTimeoutMs / 1000)} 秒，已中断。`,
+      messages: []
+    })
+    try {
+      await this.request('turn/interrupt', {
+        threadId,
+        turnId
+      })
+    } catch (error) {
+      Logger.error('codex turn interrupt failed', error)
+      const session = this.session
+      if (session) {
+        this.failSession(session, error instanceof Error ? error : new Error(String(error)))
+      }
+    }
+  }
+
+  private clearTurnTimeout(threadId: string, turnId?: string): void {
+    const scheduled = this.turnTimeoutByThreadId.get(threadId)
+    if (!scheduled || (turnId && scheduled.turnId !== turnId)) {
+      return
+    }
+    clearTimeout(scheduled.timeout)
+    this.turnTimeoutByThreadId.delete(threadId)
+  }
+
+  private clearTurnTimeouts(): void {
+    for (const scheduled of this.turnTimeoutByThreadId.values()) {
+      clearTimeout(scheduled.timeout)
+    }
+    this.turnTimeoutByThreadId.clear()
+  }
+
   private rejectPending(session: CodexSession, error: Error): void {
     for (const pending of session.pendingRequests.values()) {
       clearTimeout(pending.timeout)
@@ -901,6 +999,7 @@ export class CodexClient {
     }
     this.session = undefined
     this.started = false
+    this.clearTurnTimeouts()
     this.liveItems.clear()
     this.supervisor.sessionEnded()
     this.resetLogin()
@@ -914,6 +1013,7 @@ export class CodexClient {
     }
     this.session = undefined
     this.started = false
+    this.clearTurnTimeouts()
     this.liveItems.clear()
     this.supervisor.sessionEnded()
     this.resetLogin()

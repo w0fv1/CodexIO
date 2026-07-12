@@ -438,7 +438,7 @@ export const webPageHtml = `<!doctype html>
             thread.updatedAt = Math.max(thread.updatedAt, message.occurredAt)
           }
           for (const thread of this.threads) {
-            thread.messages.sort((left, right) => left.occurredAt - right.occurredAt || left.sequence - right.sequence || String(left.id).localeCompare(String(right.id)))
+            thread.messages.sort((left, right) => left.occurredAt - right.occurredAt || String(left.id).localeCompare(String(right.id)))
           }
           if (!this.activeThreadId && this.threads.length > 0) {
             this.switchThread(this.threads[0].id)
@@ -597,10 +597,7 @@ export const webPageHtml = `<!doctype html>
         append(threadId, type, text, html, files) {
           const message = {
             id: this.nextId++,
-            revision: 'local',
             occurredAt: Date.now(),
-            sequence: 0,
-            status: 'completed',
             type,
             text,
             html,
@@ -626,10 +623,7 @@ export const webPageHtml = `<!doctype html>
         normalizeMessage(input) {
           return {
             id: input.id || this.nextId++,
-            revision: input.revision,
             occurredAt: Number.isFinite(Number(input.occurredAt)) ? Number(input.occurredAt) : Date.now(),
-            sequence: Number.isInteger(input.sequence) ? input.sequence : 0,
-            status: input.status || 'completed',
             type: input.role,
             text: input.text || '',
             html: input.html || null,
@@ -646,18 +640,11 @@ export const webPageHtml = `<!doctype html>
           const existingIndex = thread.messages.findIndex((item) => item.id === message.id)
           const inserted = existingIndex < 0
           if (existingIndex >= 0) {
-            const existing = thread.messages[existingIndex]
-            if (existing.revision === message.revision) {
-              return
-            }
-            if (existing.status === 'completed' && message.status === 'streaming') {
-              return
-            }
-            thread.messages.splice(existingIndex, 1, message)
+            return
           } else {
             thread.messages.push(message)
           }
-          thread.messages.sort((left, right) => left.occurredAt - right.occurredAt || left.sequence - right.sequence || String(left.id).localeCompare(String(right.id)))
+          thread.messages.sort((left, right) => left.occurredAt - right.occurredAt || String(left.id).localeCompare(String(right.id)))
           thread.updatedAt = Math.max(thread.updatedAt, message.occurredAt)
           if (!historical && thread.id !== this.activeThreadId) {
             if (inserted) {

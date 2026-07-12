@@ -63,6 +63,11 @@ export type CodexClientMessage = CodexClientMessageBase & ({
   text: string
   messages: CodexClientCompletedMessage[]
 } | {
+  status: 'progressCompleted'
+  itemId: string
+  text: string
+  messages: []
+} | {
   status: 'turnCompleted'
   text: string
   messages: CodexClientCompletedMessage[]

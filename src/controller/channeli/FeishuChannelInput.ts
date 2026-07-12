@@ -4,8 +4,9 @@ import { CodexioConfig } from '../../value/ConfigDefinition.js'
 import { Result } from '../../value/Result.js'
 import { Logger } from '../../component/Logger.js'
 import { Configer } from '../../component/Configer.js'
-import { parseFeishuMessageText, shouldReceiveFeishuMessage, shouldReceiveFeishuSender } from '../../value/FeishuMessage.js'
+import { parseFeishuMessage, shouldReceiveFeishuMessage, shouldReceiveFeishuSender } from '../../value/FeishuMessage.js'
 import { ChannelInput, ChannelInputMessage, ChannelInputReceiver } from './ChannelInput.js'
+import { FileStore } from '../../component/FileStore.js'
 
 type FeishuChannelInputConfig = CodexioConfig['channeli']['feishu']
 type FeishuMessageEvent = {
@@ -58,6 +59,22 @@ type FeishuReplyMessageClient = {
   }
 }
 
+type FeishuResourceClient = {
+  im: {
+    v1: {
+      messageResource: {
+        get: (payload: {
+          params: { type: string }
+          path: { message_id: string, file_key: string }
+        }) => Promise<{
+          getReadableStream: () => NodeJS.ReadableStream
+          headers: Record<string, unknown>
+        }>
+      }
+    }
+  }
+}
+
 @injectable()
 export class FeishuChannelInput implements ChannelInput {
   readonly type = 'feishu'
@@ -71,7 +88,8 @@ export class FeishuChannelInput implements ChannelInput {
   private reconnectDelayMs = 1000
 
   constructor(
-    @inject(Configer) private readonly configer: Configer
+    @inject(Configer) private readonly configer: Configer,
+    @inject(FileStore) private readonly fileStore: FileStore
   ) {}
 
   async start(receiver: ChannelInputReceiver): Promise<boolean> {
@@ -210,18 +228,18 @@ export class FeishuChannelInput implements ChannelInput {
     const messageId = typeof data.message.message_id === 'string' && data.message.message_id.trim().length > 0 ? data.message.message_id.trim() : ''
     const sender = readFeishuSender(data)
     try {
-      const parsedText = parseFeishuMessageText(data.message.message_type, data.message.content, data.message.mentions ?? [])
-      if (!parsedText.success && parsedText.reason === 'unsupported') {
+      const parsedMessage = parseFeishuMessage(data.message.message_type, data.message.content, data.message.mentions ?? [])
+      if (!parsedMessage.success && parsedMessage.reason === 'unsupported') {
         Logger.warn('feishu message unsupported', {
           type: data.message.message_type
         })
         return
       }
-      if (!parsedText.success) {
+      if (!parsedMessage.success) {
         Logger.warn('feishu message parse failed')
         return
       }
-      const bindMatch = /^[￥$]bind(?:\s+(\S+))?\s*$/i.exec(parsedText.text.trim())
+      const bindMatch = /^[￥$]bind(?:\s+(\S+))?\s*$/i.exec(parsedMessage.text.trim())
       const isBindCommand = bindMatch !== null
       if (this.chatId.length > 0 && data.message.chat_id !== this.chatId && !isBindCommand) {
         Logger.info('feishu chat ignored', {
@@ -354,7 +372,8 @@ export class FeishuChannelInput implements ChannelInput {
         channelThreadId: channelThreadId.id,
         sourceMessageId: messageId,
         mentioned: Boolean(data.message.mentions?.some((mention) => mention.key.trim().length > 0)),
-        length: parsedText.text.length
+        length: parsedMessage.text.length,
+        resources: parsedMessage.resources.length
       })
       const receiver = this.receiver
       if (!receiver) {
@@ -363,10 +382,33 @@ export class FeishuChannelInput implements ChannelInput {
         })
         return
       }
+      const files = []
+      for (const resource of parsedMessage.resources) {
+        const downloaded = await (this.openApiClient as unknown as FeishuResourceClient).im.v1.messageResource.get({
+          params: {
+            type: resource.type
+          },
+          path: {
+            message_id: messageId,
+            file_key: resource.key
+          }
+        })
+        const chunks: Buffer[] = []
+        for await (const chunk of downloaded.getReadableStream()) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+        }
+        const contentType = downloaded.headers['content-type']
+        files.push(await this.fileStore.importBuffer({
+          buffer: Buffer.concat(chunks),
+          name: resource.name,
+          mime: typeof contentType === 'string' ? contentType : undefined
+        }))
+      }
       void receiver.receive('feishu', {
         channelThreadId,
         sourceMessageId: messageId,
-        text: parsedText.text,
+        text: parsedMessage.text,
+        files,
         mentioned: Boolean(data.message.mentions?.some((mention) => mention.key.trim().length > 0)),
         sender
       }).then((result) => {

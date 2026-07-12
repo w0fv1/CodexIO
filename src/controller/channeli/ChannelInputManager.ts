@@ -6,7 +6,7 @@ import { ThreadRegistry } from '../../component/ThreadRegistry.js'
 import { ChannelOutputManager } from '../../component/channelo/ChannelOutputManager.js'
 import { AgentManager } from '../../component/agent/AgentManager.js'
 import { ChannelInputReceiveResult } from '../../value/Event.js'
-import { createMessage, deriveMessageId, deriveMessageRevision } from '../../value/Message.js'
+import { createMessage, deriveMessageId } from '../../value/Message.js'
 import { Result } from '../../value/Result.js'
 import { CommandExecutor } from '../CommandExecutor.js'
 import { ChannelInput, ChannelInputMessage, ChannelInputReceiver, ChannelType } from './ChannelInput.js'
@@ -71,13 +71,7 @@ export class ChannelInputManager implements ChannelInputReceiver {
       sourceMessageId
     }
     const messageId = deriveMessageId('channel', source, channelThreadId.source, channelThreadId.id, sourceMessageId)
-    const revision = deriveMessageRevision({
-      status: 'completed',
-      role: 'user',
-      text: input.text,
-      files: input.files
-    })
-    return this.inbox.run(messageId, revision, async () => {
+    return this.inbox.run(messageId, async () => {
       const thread = this.threadRegistry.resolve(channelThreadId, input.threadName, input.text)
       Logger.info('channel input resolved thread', {
         source,
@@ -95,12 +89,16 @@ export class ChannelInputManager implements ChannelInputReceiver {
         text: input.text,
         files: input.files
       })
-      const displayed = await this.outputManager.sendUser(message, {
+      const displayed = await this.outputManager.send(message, {
         source,
         sourceMessageId
       })
       if (displayed.isFailed) {
-        return Result.fail(displayed.message)
+        Logger.warn('channel input display failed', {
+          source,
+          sourceMessageId,
+          message: displayed.message
+        })
       }
       const command = await this.commandExecutor.receive({
         source,
@@ -110,11 +108,7 @@ export class ChannelInputManager implements ChannelInputReceiver {
       if (command.isFailed || command.data?.consumed) {
         return command
       }
-      const received = await this.agentManager.receive({
-        source,
-        message,
-        sourceMessageId
-      })
+      const received = await this.agentManager.receive(message)
       if (received.isFailed) {
         return Result.fail(received.message)
       }

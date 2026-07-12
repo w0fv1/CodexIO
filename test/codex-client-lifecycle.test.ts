@@ -7,8 +7,8 @@ import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
 import { ChannelOutputManager } from '../src/component/channelo/ChannelOutputManager.js'
 import { ThreadRegistry } from '../src/component/ThreadRegistry.js'
 import { CodexAgent } from '../src/component/agent/CodexAgent.js'
-import { CodexClient, CodexClientMessage } from '../src/component/agent/CodexClient.js'
-import { CodexMessageStreamer } from '../src/component/agent/CodexMessageStreamer.js'
+import { CodexClient, CodexClientMessage } from '../src/component/agent/codex/CodexClient.js'
+import { CodexMessageAssembler } from '../src/component/agent/codex/CodexMessageAssembler.js'
 import { CodexLiveItemTracker } from '../src/component/agent/codex/CodexLiveItemTracker.js'
 import { createMessage } from '../src/value/Message.js'
 import { Result } from '../src/value/Result.js'
@@ -299,14 +299,54 @@ describe('Codex client lifecycle', () => {
 
     expect(messages.map((message) => message.status)).toEqual([
       'started',
+      'progressCompleted',
       'delta',
       'itemCompleted',
       'turnCompleted'
     ])
-    expect(messages[1].occurredAt).toBe(3000)
-    expect(messages[2].occurredAt).toBe(4000)
-    expect(messages[3].occurredAt).toBe(5000)
-    expect(messages[3].messages.map((message) => message.text)).toEqual(['visible'])
+    expect(messages[1]).toMatchObject({
+      itemId: 'commentary',
+      text: 'hidden',
+      occurredAt: 2000
+    })
+    expect(messages[2].occurredAt).toBe(3000)
+    expect(messages[3].occurredAt).toBe(4000)
+    expect(messages[4].occurredAt).toBe(5000)
+    expect(messages[4].messages.map((message) => message.text)).toEqual(['visible'])
+  })
+
+  it('interrupts and fails a turn that exceeds its execution timeout', async () => {
+    vi.useFakeTimers()
+    const client = createClient()
+    const messages: CodexClientMessage[] = []
+    const requests: Array<{ method: string, params?: unknown }> = []
+    client.on('message', (message) => {
+      messages.push(message)
+    })
+    client['turnTimeoutMs'] = 1000
+    client['request'] = async (method: string, params?: unknown) => {
+      requests.push({ method, params })
+      return {}
+    }
+
+    client['handleNotification']('turn/started', {
+      threadId: 'thread',
+      turn: { id: 'turn' }
+    })
+    await vi.advanceTimersByTimeAsync(1000)
+
+    expect(requests).toEqual([{
+      method: 'turn/interrupt',
+      params: {
+        threadId: 'thread',
+        turnId: 'turn'
+      }
+    }])
+    expect(messages.at(-1)).toMatchObject({
+      status: 'failed',
+      text: 'Codex 执行超过 1 秒，已中断。'
+    })
+    expect(client['turnIdByThreadId'].has('thread')).toBe(false)
   })
 
   it('clears tracked live items at the turn boundary', () => {
@@ -332,13 +372,14 @@ describe('Codex agent lifecycle', () => {
       dataPath: join(tmpdir(), `codexio-agent-lifecycle-${randomUUID()}`)
     })
     const outputManager = successfulOutputManager()
+    const assembler = new CodexMessageAssembler()
     const agent = new CodexAgent(
       { get: async () => false } as never,
-      outputManager,
       new ThreadRegistry(metadata),
       client as unknown as CodexClient,
-      new CodexMessageStreamer(outputManager)
+      assembler
     )
+    attachOutput(agent, assembler, outputManager)
     const first = agent.receive(receivedEvent('one'))
     const second = agent.receive(receivedEvent('two'))
 
@@ -357,13 +398,15 @@ describe('Codex agent lifecycle', () => {
     const metadata = new CodexioMetadata({
       dataPath: join(tmpdir(), `codexio-agent-readiness-${randomUUID()}`)
     })
+    const outputManager = successfulOutputManager()
+    const assembler = new CodexMessageAssembler()
     const agent = new CodexAgent(
       { get: async () => false } as never,
-      successfulOutputManager(),
       new ThreadRegistry(metadata),
       client as unknown as CodexClient,
-      new CodexMessageStreamer(successfulOutputManager())
+      assembler
     )
+    attachOutput(agent, assembler, outputManager)
 
     expect((await agent.receive(receivedEvent('one'))).isFailed).toBe(false)
     expect((await agent.receive(receivedEvent('two'))).isFailed).toBe(false)
@@ -374,8 +417,16 @@ describe('Codex agent lifecycle', () => {
 
 function successfulOutputManager(): ChannelOutputManager {
   return {
-    sendAgent: async () => Result.successVoid()
+    send: async () => Result.successVoid()
   } as unknown as ChannelOutputManager
+}
+
+function attachOutput(agent: CodexAgent, assembler: CodexMessageAssembler, outputManager: ChannelOutputManager): void {
+  const receiver = {
+    receiveAgentOutput: (message: Parameters<import('../src/component/agent/Agent.js').AgentOutputReceiver['receiveAgentOutput']>[0]) => outputManager.send(message)
+  }
+  Reflect.set(agent, 'outputReceiver', receiver)
+  assembler.start(receiver)
 }
 
 function createClient(options: {
@@ -481,15 +532,12 @@ function fakeProcess(options: {
 }
 
 function receivedEvent(text: string) {
-  return {
-    source: 'web' as const,
-    message: createMessage({
-      id: text,
-      thread: { id: text, name: text },
-      role: 'user',
-      text
-    })
-  }
+  return createMessage({
+    id: text,
+    thread: { id: text, name: text },
+    role: 'user',
+    text
+  })
 }
 
 class GatedCodexClient {

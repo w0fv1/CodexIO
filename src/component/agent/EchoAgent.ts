@@ -1,43 +1,40 @@
-import { inject, injectable } from 'inversify'
+import { injectable } from 'inversify'
 import { Result } from '../../value/Result.js'
-import { createMessage, deriveMessageId } from '../../value/Message.js'
-import { ChannelOutputManager } from '../channelo/ChannelOutputManager.js'
+import { createMessage, deriveMessageId, Message } from '../../value/Message.js'
 import { Logger } from '../Logger.js'
-import { Agent, AgentInput } from './Agent.js'
+import { Agent, AgentOutputReceiver } from './Agent.js'
 
 @injectable()
 export class EchoAgent implements Agent {
   readonly type = 'echo'
+  private receiver?: AgentOutputReceiver
 
-  constructor(
-    @inject(ChannelOutputManager) private readonly outputManager: ChannelOutputManager
-  ) {}
-
-  async start(): Promise<Result<void>> {
+  async start(receiver: AgentOutputReceiver): Promise<Result<void>> {
+    this.receiver = receiver
     return Result.successVoid()
   }
 
   async stop(): Promise<Result<void>> {
+    this.receiver = undefined
     return Result.successVoid()
   }
 
-  async receive(event: AgentInput): Promise<Result<void>> {
+  async receive(message: Message): Promise<Result<void>> {
     Logger.info('echo agent received channel message', {
-      source: event.source,
-      ioThreadId: event.message.thread.id,
-      text: event.message.text,
-      files: event.message.files?.length ?? 0
+      ioThreadId: message.thread.id,
+      text: message.text,
+      files: message.files?.length ?? 0
     })
-    return this.outputManager.sendAgent(createMessage({
-      id: deriveMessageId('echo', event.message.id),
-      occurredAt: Math.max(Date.now(), event.message.occurredAt + 1),
-      thread: event.message.thread,
+    if (!this.receiver) {
+      return Result.fail('echo agent output receiver not ready')
+    }
+    return this.receiver.receiveAgentOutput(createMessage({
+      id: deriveMessageId('echo', message.id),
+      occurredAt: Math.max(Date.now(), message.occurredAt + 1),
+      thread: message.thread,
       role: 'agent',
-      text: event.message.text,
-      files: event.message.files
-    }), {
-      source: event.source,
-      sourceMessageId: event.sourceMessageId
-    })
+      text: message.text,
+      files: message.files
+    }))
   }
 }

@@ -1,6 +1,4 @@
-import { MessageRevision } from '../value/Message.js'
 import { Result } from '../value/Result.js'
-import { KeyedSerialQueue } from './KeyedSerialQueue.js'
 
 type InboxEntry<T> = {
   promise: Promise<Result<T>>
@@ -9,37 +7,35 @@ type InboxEntry<T> = {
 
 export class MessageInbox<T> {
   private readonly entries = new Map<string, InboxEntry<T>>()
-  private readonly queue = new KeyedSerialQueue()
 
   constructor(private readonly capacity = 10_000) {}
 
-  run(id: string, revision: MessageRevision, task: () => Promise<Result<T>>): Promise<Result<T>> {
-    const entryKey = `${id.length}:${id}${revision}`
-    const existing = this.entries.get(entryKey)
+  run(id: string, task: () => Promise<Result<T>>): Promise<Result<T>> {
+    const existing = this.entries.get(id)
     if (existing) {
       return existing.promise
     }
-    const operation = this.queue.run(id, task)
+    const operation = Promise.resolve().then(task)
     const entry: InboxEntry<T> = {
       promise: operation,
       completed: false
     }
-    this.entries.set(entryKey, entry)
+    this.entries.set(id, entry)
     void operation.then((result) => {
-      if (this.entries.get(entryKey) !== entry) {
+      if (this.entries.get(id) !== entry) {
         return
       }
       if (result.isFailed) {
-        this.entries.delete(entryKey)
+        this.entries.delete(id)
         return
       }
       entry.completed = true
-      this.entries.delete(entryKey)
-      this.entries.set(entryKey, entry)
+      this.entries.delete(id)
+      this.entries.set(id, entry)
       this.trim()
     }, () => {
-      if (this.entries.get(entryKey) === entry) {
-        this.entries.delete(entryKey)
+      if (this.entries.get(id) === entry) {
+        this.entries.delete(id)
       }
     })
     return operation

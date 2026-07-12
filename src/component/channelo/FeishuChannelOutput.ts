@@ -32,7 +32,7 @@ type FeishuCreateMessageClient = {
           params: {
             container_id_type: 'thread'
             container_id: string
-            sort_type: 'ByCreateTimeDesc'
+            sort_type: 'ByCreateTimeAsc' | 'ByCreateTimeDesc'
             page_size: 1
           }
         }) => Promise<{
@@ -76,7 +76,6 @@ export class FeishuChannelOutput implements ChannelOutput {
   private config?: FeishuChannelOutputConfig
   private client?: Lark.Client
   private chatId = ''
-  private readonly replyMessageIdByIoThreadId = new Map<string, string>()
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
@@ -124,7 +123,6 @@ export class FeishuChannelOutput implements ChannelOutput {
         contextSource: context?.source ?? null,
         sourceMessageId: context?.sourceMessageId ?? null,
         registeredFeishuThreadId: registeredFeishuThreadId ?? null,
-        cachedReplyMessageId: this.replyMessageIdByIoThreadId.get(message.thread.id) ?? null,
         length: message.text.length,
         files: message.files?.length ?? 0
       })
@@ -220,10 +218,9 @@ export class FeishuChannelOutput implements ChannelOutput {
           })
         })
       }
-      const sourceReplyMessageId = context?.source === 'feishu' ? context.sourceMessageId?.trim() : undefined
-      let replyMessageId = sourceReplyMessageId || this.replyMessageIdByIoThreadId.get(message.thread.id)
+      let rootMessageId: string | undefined
       const messageClient = this.client as unknown as FeishuCreateMessageClient
-      if (!replyMessageId && registeredFeishuThreadId) {
+      if (registeredFeishuThreadId) {
         Logger.info('feishu openapi resolving reply anchor', {
           messageId: message.id,
           ioThreadId: message.thread.id,
@@ -233,38 +230,37 @@ export class FeishuChannelOutput implements ChannelOutput {
           params: {
             container_id_type: 'thread',
             container_id: registeredFeishuThreadId,
-            sort_type: 'ByCreateTimeDesc',
+            sort_type: 'ByCreateTimeAsc',
             page_size: 1
           }
         })
-        replyMessageId = listed.data?.items
+        const root = listed.data?.items
           ?.find((item) => item.thread_id?.trim() === registeredFeishuThreadId)
-          ?.message_id?.trim()
-        if (!replyMessageId) {
+        rootMessageId = root?.message_id?.trim()
+        if (!rootMessageId) {
           throw new Error('feishu thread reply message not found')
         }
-        this.replyMessageIdByIoThreadId.set(message.thread.id, replyMessageId)
         Logger.info('feishu openapi resolved reply anchor', {
           messageId: message.id,
           ioThreadId: message.thread.id,
           registeredFeishuThreadId,
-          replyMessageId
+          rootMessageId
         })
       }
       for (const [index, outgoingMessage] of outgoingMessages.entries()) {
         const uuid = deriveExternalDeliveryId('feishu', message, String(index))
-        if (replyMessageId) {
+        if (rootMessageId) {
           Logger.info('feishu openapi replying message', {
             messageId: message.id,
             ioThreadId: message.thread.id,
-            replyMessageId,
+            rootMessageId,
             registeredFeishuThreadId: registeredFeishuThreadId ?? null,
             deliveryIndex: index,
             deliveryId: uuid
           })
           const replied = await messageClient.im.v1.message.reply({
             path: {
-              message_id: replyMessageId
+              message_id: rootMessageId
             },
             data: {
               msg_type: outgoingMessage.msgType,
@@ -274,14 +270,11 @@ export class FeishuChannelOutput implements ChannelOutput {
             }
           })
           const createdMessageId = replied.data?.message_id?.trim()
-          if (createdMessageId) {
-            this.replyMessageIdByIoThreadId.set(message.thread.id, createdMessageId)
-          }
           const repliedThreadId = replied.data?.thread_id?.trim()
           Logger.info('feishu openapi replied message', {
             messageId: message.id,
             ioThreadId: message.thread.id,
-            replyMessageId,
+            rootMessageId,
             createdMessageId: createdMessageId ?? null,
             returnedFeishuThreadId: repliedThreadId ?? null,
             registeredFeishuThreadId: registeredFeishuThreadId ?? null
@@ -322,8 +315,7 @@ export class FeishuChannelOutput implements ChannelOutput {
           registeredFeishuThreadId: registeredFeishuThreadId ?? null
         })
         if (createdMessageId) {
-          replyMessageId = createdMessageId
-          this.replyMessageIdByIoThreadId.set(message.thread.id, createdMessageId)
+          rootMessageId = createdMessageId
         }
         if (!registeredFeishuThreadId) {
           if (!createdThreadId) {
@@ -368,7 +360,6 @@ export class FeishuChannelOutput implements ChannelOutput {
 
   async stop(): Promise<Result<void>> {
     this.client = undefined
-    this.replyMessageIdByIoThreadId.clear()
     return Result.successVoid()
   }
 

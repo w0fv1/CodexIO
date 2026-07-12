@@ -17,7 +17,10 @@ export type CodexRuntimeConfig = {
   proxyUrl?: string
   noProxyHosts: string[]
   instruction: string
+  model: string
+  reasoningEffort: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   requestTimeoutMs: number
+  turnTimeoutMs: number
   observe?: {
     intervalMs: number
   }
@@ -45,7 +48,10 @@ export class CodexRuntimeResolver {
       serverHost,
       codexCommand,
       instruction,
+      model,
+      reasoningEffort,
       requestTimeoutSeconds,
+      turnTimeoutSeconds,
       observe
     ] = await Promise.all([
       this.configer.get('agents.codex.bundled'),
@@ -56,7 +62,10 @@ export class CodexRuntimeResolver {
       this.configer.get('server.host'),
       this.configer.get('agents.codex.command'),
       this.configer.get('agents.instruction'),
+      this.configer.get('agents.codex.model'),
+      this.configer.get('agents.codex.reasoningEffort'),
       this.configer.get('agents.codex.requestTimeoutSeconds'),
+      this.configer.get('agents.codex.turnTimeoutSeconds'),
       this.configer.get('agents.codex.observe')
     ])
     const command = bundled
@@ -78,7 +87,10 @@ export class CodexRuntimeResolver {
         ...proxyNoProxy.split(',').map((item) => item.trim()).filter((item) => item.length > 0)
       ],
       instruction,
+      model,
+      reasoningEffort,
       requestTimeoutMs: requestTimeoutSeconds * 1000,
+      turnTimeoutMs: turnTimeoutSeconds * 1000,
       observe: observe.enabled
           ? {
             intervalMs: observe.intervalSeconds * 1000

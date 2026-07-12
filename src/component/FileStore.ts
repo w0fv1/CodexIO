@@ -42,12 +42,10 @@ const extensionMimes = new Map<string, string>([
 @injectable()
 export class FileStore {
   private readonly rootPath: string
-  private readonly maxFileSizeBytes: number
   private readonly files = new Map<string, MessageFile>()
 
   constructor(@inject(CodexioMetadata) metadata: CodexioMetadata) {
     this.rootPath = metadata.filePath
-    this.maxFileSizeBytes = 20 * 1024 * 1024
   }
 
   async importPath(path: string): Promise<MessageFile> {
@@ -55,9 +53,6 @@ export class FileStore {
     const metadata = await stat(resolvedPath)
     if (!metadata.isFile()) {
       throw new Error(`file is not a regular file: ${resolvedPath}`)
-    }
-    if (metadata.size > this.maxFileSizeBytes) {
-      throw new Error(`file is too large: ${resolvedPath}`)
     }
     const buffer = await readFile(resolvedPath)
     const prepared = await this.prepare(buffer, basename(resolvedPath))
@@ -70,9 +65,6 @@ export class FileStore {
   }
 
   async importBuffer(input: FileStoreBufferInput): Promise<MessageFile> {
-    if (input.buffer.length > this.maxFileSizeBytes) {
-      throw new Error('file is too large')
-    }
     const prepared = await this.prepare(input.buffer, input.name, input.mime)
     await mkdir(this.rootPath, {
       recursive: true

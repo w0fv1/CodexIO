@@ -5,10 +5,9 @@ import { Configer } from '../Configer.js'
 import { ThreadRegistry } from '../ThreadRegistry.js'
 import { Logger } from '../Logger.js'
 import { KeyedSerialQueue } from '../KeyedSerialQueue.js'
-import { Agent, AgentInput } from './Agent.js'
-import { ChannelOutputManager } from '../channelo/ChannelOutputManager.js'
-import { CodexClient, CodexClientLoginEvent, CodexClientMessage, CodexClientThread, CodexThreadSnapshot } from './CodexClient.js'
-import { codexMessageId, CodexMessageStreamer } from './CodexMessageStreamer.js'
+import { Agent, AgentOutputReceiver } from './Agent.js'
+import { CodexClient, CodexClientLoginEvent, CodexClientMessage, CodexClientThread, CodexThreadSnapshot } from './codex/CodexClient.js'
+import { codexMessageId, CodexMessageAssembler } from './codex/CodexMessageAssembler.js'
 
 @injectable()
 export class CodexAgent implements Agent {
@@ -17,24 +16,24 @@ export class CodexAgent implements Agent {
   private loginIoThreadId?: string
   private readonly threadIdByIoThreadId = new Map<string, string>()
   private readonly ioThreadIdByThreadId = new Map<string, string>()
-  private readonly sourceByIoThreadId = new Map<string, AgentInput['source']>()
-  private readonly sourceMessageIdByIoThreadId = new Map<string, string>()
   private readonly lastOccurredAtByThreadId = new Map<string, number>()
   private readonly disposers: Array<() => void> = []
   private readonly mailbox = new KeyedSerialQueue()
   private lifecycleGeneration = 0
   private startPromise?: Promise<Result<void>>
   private stopPromise?: Promise<Result<void>>
+  private outputReceiver?: AgentOutputReceiver
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
-    @inject(ChannelOutputManager) private readonly outputManager: ChannelOutputManager,
     @inject(ThreadRegistry) private readonly threadRegistry: ThreadRegistry,
     @inject(CodexClient) private readonly client: CodexClient,
-    @inject(CodexMessageStreamer) private readonly messageStreamer: CodexMessageStreamer
+    @inject(CodexMessageAssembler) private readonly messageAssembler: CodexMessageAssembler
   ) {}
 
-  start(): Promise<Result<void>> {
+  start(receiver: AgentOutputReceiver): Promise<Result<void>> {
+    this.outputReceiver = receiver
+    this.messageAssembler.start(receiver)
     if (this.started) {
       return this.client.start()
     }
@@ -101,14 +100,15 @@ export class CodexAgent implements Agent {
     return startPromise
   }
 
-  async receive(event: AgentInput): Promise<Result<void>> {
-    const started = await this.start()
+  async receive(message: Message): Promise<Result<void>> {
+    if (!this.outputReceiver) {
+      return Result.fail('codex agent output receiver not ready')
+    }
+    const started = await this.start(this.outputReceiver)
     if (started.isFailed) {
       return started
     }
-    this.loginIoThreadId = event.message.thread.id
-    this.sourceByIoThreadId.set(event.message.thread.id, event.source)
-    this.bindSourceMessageId(event.message.thread.id, event.sourceMessageId)
+    this.loginIoThreadId = message.thread.id
     const loggedIn = await this.client.login()
     if (loggedIn.isFailed) {
       return Result.fail(loggedIn.message)
@@ -116,34 +116,31 @@ export class CodexAgent implements Agent {
     if (!loggedIn.data) {
       return Result.successVoid()
     }
-    const mappedThreadId = this.threadIdByIoThreadId.get(event.message.thread.id)
+    const mappedThreadId = this.threadIdByIoThreadId.get(message.thread.id)
     Logger.info('codex agent routing channel message', {
-      source: event.source,
-      sourceMessageId: event.sourceMessageId ?? null,
-      messageId: event.message.id,
-      ioThreadId: event.message.thread.id,
+      messageId: message.id,
+      ioThreadId: message.thread.id,
       mappedThreadId: mappedThreadId ?? null,
-      bindings: this.threadRegistry.getChannelThreadIds(event.message.thread.id)
+      bindings: this.threadRegistry.getChannelThreadIds(message.thread.id)
     })
     const sent = await this.client.send({
-      thread: event.message.thread,
+      thread: message.thread,
       threadId: mappedThreadId,
-      text: event.message.text,
-      files: event.message.files
+      text: message.text,
+      files: message.files
     })
     if (sent.isFailed) {
       return Result.fail(sent.message)
     }
     if (sent.data) {
-      this.bindThread(event.message.thread.id, sent.data.threadId)
+      this.bindThread(message.thread.id, sent.data.threadId)
     }
     Logger.info('codex agent received channel message', {
-      source: event.source,
-      ioThreadId: event.message.thread.id,
+      ioThreadId: message.thread.id,
       threadId: sent.data?.threadId,
       turnId: sent.data?.turnId,
-      text: event.message.text,
-      files: event.message.files?.length ?? 0
+      text: message.text,
+      files: message.files?.length ?? 0
     })
     return Result.successVoid()
   }
@@ -162,10 +159,9 @@ export class CodexAgent implements Agent {
       this.loginIoThreadId = undefined
       this.threadIdByIoThreadId.clear()
       this.ioThreadIdByThreadId.clear()
-      this.sourceByIoThreadId.clear()
-      this.sourceMessageIdByIoThreadId.clear()
       this.lastOccurredAtByThreadId.clear()
-      this.messageStreamer.clear()
+      this.messageAssembler.clear()
+      this.outputReceiver = undefined
       return stopped
     })()
     this.stopPromise = stopPromise
@@ -186,8 +182,6 @@ export class CodexAgent implements Agent {
     if (!ioThreadId) {
       return
     }
-    const source = this.sourceByIoThreadId.get(ioThreadId)
-    const sourceMessageId = this.sourceMessageIdByIoThreadId.get(ioThreadId)
     await this.sendAgent(createMessage({
       id: deriveMessageId('codex-login', ioThreadId),
       thread: this.threadRegistry.ensure(ioThreadId),
@@ -199,63 +193,58 @@ export class CodexAgent implements Agent {
             `打开：${login.verificationUrl}`,
             `验证码：${login.userCode}`
           ].join('\n')
-    }), source, sourceMessageId)
+    }))
   }
 
   private async receiveCodexMessage(message: CodexClientMessage): Promise<void> {
-    const thread = this.resolveThread(message.thread)
-    const ioThreadId = thread.id
     if (message.status === 'started') {
       return
     }
+    const thread = this.resolveThread(message.thread)
     if (message.status === 'delta' && message.text.length > 0) {
-      const source = this.sourceByIoThreadId.get(ioThreadId)
-      const sourceMessageId = this.sourceMessageIdByIoThreadId.get(ioThreadId)
-      await this.messageStreamer.append({
+      this.messageAssembler.append({
         thread,
         agentThreadId: message.thread.id,
         turnId: message.turnId,
-        source,
-        sourceMessageId,
         occurredAt: this.messageOccurredAt(message)
       }, message.itemId, message.text)
       return
     }
     if (message.status === 'itemCompleted') {
-      const source = this.sourceByIoThreadId.get(ioThreadId)
-      const sourceMessageId = this.sourceMessageIdByIoThreadId.get(ioThreadId)
-      await this.messageStreamer.stageItem({
+      await this.messageAssembler.completeItem({
         thread,
         agentThreadId: message.thread.id,
         turnId: message.turnId,
-        source,
-        sourceMessageId,
-        occurredAt: this.messageOccurredAt(message),
-        sequence: message.messages[0]?.sequence
+        occurredAt: this.messageOccurredAt(message)
       }, message.itemId, message.messages[0]?.text ?? '')
       return
     }
+    if (message.status === 'progressCompleted') {
+      await this.sendAgent(createMessage({
+        id: codexMessageId(message.thread.id, message.turnId, message.itemId),
+        occurredAt: this.messageOccurredAt(message),
+        thread,
+        role: 'agent',
+        text: message.text
+      }))
+      return
+    }
     if (message.status === 'turnCompleted') {
-      const source = this.sourceByIoThreadId.get(ioThreadId)
-      const sourceMessageId = this.sourceMessageIdByIoThreadId.get(ioThreadId)
-      await this.messageStreamer.complete({
+      await this.messageAssembler.complete({
         thread,
         agentThreadId: message.thread.id,
         turnId: message.turnId,
-        source,
-        sourceMessageId,
         occurredAt: this.messageOccurredAt(message)
       }, message.messages.map((completed) => {
         return {
           itemId: completed.itemId,
-          text: completed.text,
-          sequence: completed.sequence
+          text: completed.text
         }
       }))
       return
     }
     if (message.status === 'failed') {
-      this.messageStreamer.clearTurn(message.thread.id, message.turnId)
+      this.messageAssembler.clearTurn(message.thread.id, message.turnId)
       if (message.text.trim().length === 0) {
         return
       }
@@ -264,23 +253,20 @@ export class CodexAgent implements Agent {
         thread,
         role: 'agent',
         text: message.text
-      }), this.sourceByIoThreadId.get(ioThreadId), this.sourceMessageIdByIoThreadId.get(ioThreadId))
+      }))
     }
   }
 
   private async receiveCodexSnapshot(snapshot: CodexThreadSnapshot): Promise<void> {
     const thread = this.resolveThread(snapshot.thread)
-    const source = this.sourceByIoThreadId.get(thread.id)
-    const sourceMessageId = this.sourceMessageIdByIoThreadId.get(thread.id)
     for (const snapshotMessage of snapshot.messages) {
       const result = await this.sendAgent(createMessage({
         id: codexMessageId(snapshot.thread.id, snapshotMessage.turnId, snapshotMessage.itemId),
         occurredAt: snapshotMessage.completedAt * 1000,
-        sequence: snapshotMessage.sequence,
         thread,
         role: 'agent',
         text: snapshotMessage.text
-      }), source, sourceMessageId)
+      }))
       if (result.isFailed) {
         throw new Error(result.message)
       }
@@ -298,7 +284,7 @@ export class CodexAgent implements Agent {
       thread: this.threadRegistry.ensure(ioThreadId),
       role: 'agent',
       text
-    }), this.sourceByIoThreadId.get(ioThreadId), this.sourceMessageIdByIoThreadId.get(ioThreadId))
+    }))
   }
 
   private receiveCodexThread(thread: CodexClientThread): void {
@@ -311,18 +297,11 @@ export class CodexAgent implements Agent {
 
   private resolveThread(agentThread: CodexClientMessage['thread']): Message['thread'] {
     let ioThreadId = this.ioThreadIdByThreadId.get(agentThread.id)
-    const resolution = ioThreadId ? 'mapped' : 'canonical'
     if (!ioThreadId) {
       ioThreadId = agentThread.id
       this.bindThread(ioThreadId, agentThread.id)
     }
     const currentThread = this.threadRegistry.ensure(ioThreadId)
-    Logger.info('codex agent resolved agent thread', {
-      resolution,
-      agentThreadId: agentThread.id,
-      ioThreadId,
-      bindings: this.threadRegistry.getChannelThreadIds(ioThreadId)
-    })
     return agentThread.name === '新对话' && currentThread.name !== '新对话'
       ? currentThread
       : this.threadRegistry.rename(ioThreadId, agentThread.name)
@@ -358,13 +337,6 @@ export class CodexAgent implements Agent {
     })
   }
 
-  private bindSourceMessageId(ioThreadId: string, sourceMessageId?: string): void {
-    const normalized = sourceMessageId?.trim()
-    if (normalized) {
-      this.sourceMessageIdByIoThreadId.set(ioThreadId, normalized)
-    }
-  }
-
   private nextOccurredAt(threadId: string): number {
     const occurredAt = Math.max(Date.now(), (this.lastOccurredAtByThreadId.get(threadId) ?? 0) + 1)
     this.lastOccurredAtByThreadId.set(threadId, occurredAt)
@@ -382,15 +354,11 @@ export class CodexAgent implements Agent {
     return message.occurredAt
   }
 
-  private async sendAgent(
-    message: Message,
-    source?: AgentInput['source'],
-    sourceMessageId?: string
-  ): Promise<Result<void>> {
-    const result = await this.outputManager.sendAgent(message, {
-      source,
-      sourceMessageId
-    })
+  private async sendAgent(message: Message): Promise<Result<void>> {
+    if (!this.outputReceiver) {
+      return Result.fail('codex agent output receiver not ready')
+    }
+    const result = await this.outputReceiver.receiveAgentOutput(message)
     if (result.isFailed) {
       Logger.warn('codex agent output failed', {
         message: result.message

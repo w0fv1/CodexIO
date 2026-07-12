@@ -1,16 +1,13 @@
-import { CodexioConfig } from '../../value/ConfigDefinition.js'
 import { Message } from '../../value/Message.js'
 import { Result } from '../../value/Result.js'
 
-export type AgentInput = {
-  source: keyof CodexioConfig['channeli']
-  message: Message
-  sourceMessageId?: string
+export interface AgentOutputReceiver {
+  receiveAgentOutput(message: Message): Promise<Result<void>>
 }
 
 export interface Agent {
   type: string
-  start(): Promise<Result<void>>
-  receive(input: AgentInput): Promise<Result<void>>
+  start(receiver: AgentOutputReceiver): Promise<Result<void>>
+  receive(message: Message): Promise<Result<void>>
   stop(): Promise<Result<void>>
 }

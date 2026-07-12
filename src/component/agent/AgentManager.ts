@@ -1,16 +1,19 @@
 import { inject, injectable } from 'inversify'
 import { Result } from '../../value/Result.js'
+import { Message } from '../../value/Message.js'
 import { Configer, ConfigSubscription } from '../Configer.js'
 import { Logger } from '../Logger.js'
 import { ThreadWorkspaceResolver } from '../ThreadWorkspaceResolver.js'
-import { Agent, AgentInput } from './Agent.js'
+import { ChannelOutputManager } from '../channelo/ChannelOutputManager.js'
+import { MessageFileResolver } from '../MessageFileResolver.js'
+import { Agent, AgentOutputReceiver } from './Agent.js'
 import { CodexAgent } from './CodexAgent.js'
 import { EchoAgent } from './EchoAgent.js'
 
 export type AgentManagerStatus = 'idle' | 'online'
 
 @injectable()
-export class AgentManager {
+export class AgentManager implements AgentOutputReceiver {
   private statusValue: AgentManagerStatus = 'idle'
   private subscription?: ConfigSubscription
 
@@ -18,7 +21,9 @@ export class AgentManager {
     @inject(Configer) private readonly configer: Configer,
     @inject(CodexAgent) private readonly codexAgent: Agent,
     @inject(EchoAgent) private readonly echoAgent: Agent,
-    @inject(ThreadWorkspaceResolver) private readonly workspaceResolver: ThreadWorkspaceResolver
+    @inject(ThreadWorkspaceResolver) private readonly workspaceResolver: ThreadWorkspaceResolver,
+    @inject(MessageFileResolver) private readonly fileResolver: MessageFileResolver,
+    @inject(ChannelOutputManager) private readonly outputManager: ChannelOutputManager
   ) {}
 
   status(): { status: AgentManagerStatus } {
@@ -28,6 +33,9 @@ export class AgentManager {
   }
 
   async start(): Promise<Result<void>> {
+    if (this.statusValue === 'online') {
+      return Result.successVoid()
+    }
     if (!this.subscription) {
       this.subscription = this.configer.subscribe([
         'agents',
@@ -43,7 +51,7 @@ export class AgentManager {
     }
     const agent = await this.getActiveAgent()
     await this.ensureWorkspace()
-    const started = await agent.start()
+    const started = await agent.start(this)
     if (started.isFailed) {
       return started
     }
@@ -69,7 +77,7 @@ export class AgentManager {
     }
     const agent = await this.getActiveAgent()
     await this.ensureWorkspace()
-    const started = await agent.start()
+    const started = await agent.start(this)
     if (started.isFailed) {
       return started
     }
@@ -94,7 +102,7 @@ export class AgentManager {
     return Result.successVoid()
   }
 
-  async receive(event: AgentInput): Promise<Result<void>> {
+  async receive(message: Message): Promise<Result<void>> {
     const started = await this.start()
     if (started.isFailed) {
       return started
@@ -102,12 +110,17 @@ export class AgentManager {
     const agent = await this.getActiveAgent()
     Logger.info('agent receive started', {
       agent: agent.type,
-      source: event.source,
-      ioThreadId: event.message.thread.id,
-      text: event.message.text,
-      files: event.message.files?.length ?? 0
+      ioThreadId: message.thread.id,
+      text: message.text,
+      files: message.files?.length ?? 0
     })
-    return agent.receive(event)
+    return agent.receive(message)
+  }
+
+  async receiveAgentOutput(message: Message): Promise<Result<void>> {
+    const workspacePath = await this.workspaceResolver.resolve(message.thread.id)
+    const resolved = await this.fileResolver.resolve(message, workspacePath)
+    return this.outputManager.send(resolved)
   }
 
   private async getActiveAgent(): Promise<Agent> {

@@ -18,10 +18,7 @@ export type WebThreadMessage = {
   thread: MessageThread
   webThreadId: string
   text: string
-  revision: Message['revision']
   occurredAt: number
-  sequence: number
-  status: Message['status']
   html?: string
   files?: MessageFile[]
 }
@@ -75,14 +72,9 @@ export class WebThreadManager {
   appendMessage(message: Message, webThreadId?: string): WebThreadMessage {
     const existing = this.messages.get(message.id)
     if (existing) {
-      if (existing.revision === message.revision) {
-        return existing
-      }
-      if (existing.status === 'completed' && message.status === 'streaming') {
-        return existing
-      }
+      return existing
     }
-    const targetWebThreadId = existing?.webThreadId ?? (webThreadId?.trim() || this.displayThreadId(message.thread.id))
+    const targetWebThreadId = webThreadId?.trim() || this.displayThreadId(message.thread.id)
     let thread = this.threads.get(targetWebThreadId)
     if (!thread) {
       thread = {
@@ -108,7 +100,7 @@ export class WebThreadManager {
     return {
       threads: this.listThreads(),
       messages: [...this.messages.values()]
-        .sort((left, right) => left.occurredAt - right.occurredAt || left.sequence - right.sequence || left.id.localeCompare(right.id))
+        .sort((left, right) => left.occurredAt - right.occurredAt || left.id.localeCompare(right.id))
         .map((message) => ({
           ...message,
           thread: { ...message.thread },
@@ -141,10 +133,7 @@ export class WebThreadManager {
       thread: { ...message.thread },
       webThreadId,
       text: message.text,
-      revision: message.revision,
-      occurredAt: message.occurredAt,
-      sequence: message.sequence,
-      status: message.status
+      occurredAt: message.occurredAt
     }
     if (message.files && message.files.length > 0) {
       data.files = message.files.map((file) => ({ ...file }))

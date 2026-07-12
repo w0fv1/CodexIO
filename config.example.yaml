@@ -28,7 +28,10 @@ agents:
     enabled: false
     bundled: false
     command: codex
+    model: gpt-5.6-sol
+    reasoningEffort: medium
     requestTimeoutSeconds: 120
+    turnTimeoutSeconds: 300
     observe:
       enabled: false
       intervalSeconds: 1

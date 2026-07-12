@@ -15,7 +15,7 @@ afterEach(() => {
 })
 
 describe('channel provider idempotency', () => {
-  it('uses the message revision in Feishu UUIDs', async () => {
+  it('uses the immutable message identity in Feishu UUIDs', async () => {
     const calls: Array<{ data: { uuid: string } }> = []
     const output = new FeishuChannelOutput({} as never, threadRegistry())
     Reflect.set(output, 'chatId', 'chat')
@@ -23,6 +23,18 @@ describe('channel provider idempotency', () => {
       im: {
         v1: {
           message: {
+            list: async () => ({
+              data: {
+                items: [{
+                  message_id: 'created',
+                  thread_id: 'thread'
+                }]
+              }
+            }),
+            create: async (payload: { data: { uuid: string } }) => {
+              calls.push(payload)
+              return { data: { message_id: 'created', thread_id: 'thread' } }
+            },
             reply: async (payload: { data: { uuid: string } }) => {
               calls.push(payload)
               return { data: { message_id: randomUUID(), thread_id: 'thread' } }
@@ -31,7 +43,7 @@ describe('channel provider idempotency', () => {
         }
       }
     })
-    const [first, second] = revisions()
+    const [first, second] = immutableMessages()
 
     await output.send(first, { source: 'feishu', sourceMessageId: 'source' })
     await output.send(second, { source: 'feishu', sourceMessageId: 'source' })
@@ -40,7 +52,7 @@ describe('channel provider idempotency', () => {
       deriveExternalDeliveryId('feishu', first, '0'),
       deriveExternalDeliveryId('feishu', second, '0')
     ])
-    expect(calls[0].data.uuid).not.toBe(calls[1].data.uuid)
+    expect(calls[0].data.uuid).toBe(calls[1].data.uuid)
   })
 
   it('never uses another channel message identity as a Feishu reply identity', async () => {
@@ -61,7 +73,7 @@ describe('channel provider idempotency', () => {
       }
     })
 
-    const result = await output.send(revisions()[0], {
+    const result = await output.send(immutableMessages()[0], {
       source: 'web',
       sourceMessageId: 'browser-message-id'
     })
@@ -115,7 +127,7 @@ describe('channel provider idempotency', () => {
       params: {
         container_id_type: 'thread',
         container_id: 'omt_existing',
-        sort_type: 'ByCreateTimeDesc',
+        sort_type: 'ByCreateTimeAsc',
         page_size: 1
       }
     })
@@ -160,7 +172,7 @@ describe('channel provider idempotency', () => {
     expect(create).not.toHaveBeenCalled()
   })
 
-  it('uses the message revision in SMTP Message-IDs', async () => {
+  it('uses the immutable message identity in SMTP Message-IDs', async () => {
     const mail: Array<{ messageId: string }> = []
     const output = new EmailChannelOutput({} as never)
     Reflect.set(output, 'config', {
@@ -176,7 +188,7 @@ describe('channel provider idempotency', () => {
         mail.push(payload)
       }
     })
-    const [first, second] = revisions()
+    const [first, second] = immutableMessages()
 
     await output.send(first)
     await output.send(second)
@@ -187,7 +199,7 @@ describe('channel provider idempotency', () => {
     ])
   })
 
-  it('uses the message revision in webhook idempotency keys', async () => {
+  it('uses the immutable message identity in webhook idempotency keys', async () => {
     const keys: string[] = []
     vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
       keys.push(new Headers(init?.headers).get('Idempotency-Key') ?? '')
@@ -197,7 +209,7 @@ describe('channel provider idempotency', () => {
     Reflect.set(output, 'config', {
       url: 'https://example.com/webhook'
     })
-    const [first, second] = revisions()
+    const [first, second] = immutableMessages()
 
     await output.send(first)
     await output.send(second)
@@ -209,7 +221,7 @@ describe('channel provider idempotency', () => {
   })
 })
 
-function revisions() {
+function immutableMessages() {
   const thread = { id: 'io-thread', name: 'Thread' }
   return [
     createMessage({

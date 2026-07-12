@@ -5,18 +5,37 @@ import { describe, expect, it } from 'vitest'
 import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
 import { ThreadRegistry } from '../src/component/ThreadRegistry.js'
 import { CodexAgent } from '../src/component/agent/CodexAgent.js'
-import { CodexClient, CodexClientMessage, CodexThreadSnapshot } from '../src/component/agent/CodexClient.js'
+import { CodexClient, CodexClientMessage, CodexThreadSnapshot } from '../src/component/agent/codex/CodexClient.js'
 import { CodexClientEventMap } from '../src/component/agent/codex/CodexProtocol.js'
-import { CodexMessageStreamer } from '../src/component/agent/CodexMessageStreamer.js'
+import { CodexMessageAssembler } from '../src/component/agent/codex/CodexMessageAssembler.js'
 import { WebThreadManager } from '../src/component/channel/WebThreadManager.js'
 import { Result } from '../src/value/Result.js'
 import { createMessage, Message } from '../src/value/Message.js'
 import { ChannelOutputManager } from '../src/component/channelo/ChannelOutputManager.js'
 
 describe('Codex agent ingestion', () => {
+  it('does not create a canonical thread mapping from a started notification', async () => {
+    const context = fixture()
+    await context.agent.start(context.receiver)
+
+    context.client.emitMessage({
+      thread: { id: 'codex-thread', name: 'VS Code thread' },
+      turnId: 'turn',
+      status: 'started',
+      role: 'assistant',
+      text: '',
+      messages: []
+    })
+    await context.agent['mailbox'].drain()
+
+    expect(context.agent['ioThreadIdByThreadId'].size).toBe(0)
+    expect(context.agent['threadIdByIoThreadId'].size).toBe(0)
+    await context.agent.stop()
+  })
+
   it('serializes the production live listener without losing concurrent completions', async () => {
     const context = fixture()
-    await context.agent.start()
+    await context.agent.start(context.receiver)
 
     for (let index = 0; index < 5; index += 1) {
       context.client.emitMessage(completedMessage(index))
@@ -35,7 +54,7 @@ describe('Codex agent ingestion', () => {
 
   it('delegates snapshots to the canonical output manager without channel overrides', async () => {
     const context = fixture()
-    await context.agent.start()
+    await context.agent.start(context.receiver)
     const snapshot: CodexThreadSnapshot = {
       thread: { id: 'codex-thread', name: 'VS Code thread' },
       messages: Array.from({ length: 5 }, (_, index) => ({
@@ -52,13 +71,13 @@ describe('Codex agent ingestion', () => {
 
     expect(context.web.snapshot().messages).toHaveLength(5)
     expect(context.events).toHaveLength(10)
-    expect(context.events.every((event) => event.context === undefined || !('targets' in event.context))).toBe(true)
+    expect(context.events.every((event) => event.role === 'agent')).toBe(true)
     await context.agent.stop()
   })
 
   it('uses one Web entity for live completion and snapshot reconciliation', async () => {
     const context = fixture()
-    await context.agent.start()
+    await context.agent.start(context.receiver)
     context.client.emitMessage(completedMessage(0))
     await context.agent['mailbox'].drain()
     await context.client.emitSnapshot({
@@ -76,9 +95,31 @@ describe('Codex agent ingestion', () => {
     await context.agent.stop()
   })
 
+  it('publishes completed commentary as a channel progress message', async () => {
+    const context = fixture()
+    await context.agent.start(context.receiver)
+
+    context.client.emitMessage({
+      thread: { id: 'codex-thread', name: 'VS Code thread' },
+      turnId: 'turn',
+      itemId: 'progress',
+      status: 'progressCompleted',
+      role: 'assistant',
+      text: '图片正在生成中。',
+      messages: []
+    })
+    await context.agent['mailbox'].drain()
+
+    expect(context.events).toContainEqual(expect.objectContaining({
+      role: 'agent',
+      text: '图片正在生成中。'
+    }))
+    await context.agent.stop()
+  })
+
   it('continues an observed Codex thread after a channel thread is bound to it', async () => {
     const context = fixture()
-    await context.agent.start()
+    await context.agent.start(context.receiver)
     await context.client.emitSnapshot({
       thread: { id: 'codex-thread', name: 'VS Code thread' },
       messages: []
@@ -92,16 +133,12 @@ describe('Codex agent ingestion', () => {
       id: 'chat:thread:omt_thread'
     })
 
-    await context.agent.receive({
-      source: 'feishu',
-      sourceMessageId: 'om_reply',
-      message: createMessage({
-        id: 'feishu-message',
-        thread,
-        role: 'user',
-        text: 'continue'
-      })
-    })
+    await context.agent.receive(createMessage({
+      id: 'feishu-message',
+      thread,
+      role: 'user',
+      text: 'continue'
+    }))
 
     expect(context.client.sentThreadIds).toEqual(['codex-thread'])
     await context.agent.stop()
@@ -109,21 +146,17 @@ describe('Codex agent ingestion', () => {
 
   it('routes reconciled completion back to the source channel after continuing an observed thread', async () => {
     const context = fixture()
-    await context.agent.start()
+    await context.agent.start(context.receiver)
     await context.client.emitSnapshot({
       thread: { id: 'codex-thread', name: 'VS Code thread' },
       messages: []
     })
-    await context.agent.receive({
-      source: 'feishu',
-      sourceMessageId: 'om_user',
-      message: createMessage({
-        id: 'feishu-message',
-        thread: { id: 'codex-thread', name: 'VS Code thread' },
-        role: 'user',
-        text: 'continue'
-      })
-    })
+    await context.agent.receive(createMessage({
+      id: 'feishu-message',
+      thread: { id: 'codex-thread', name: 'VS Code thread' },
+      role: 'user',
+      text: 'continue'
+    }))
 
     await context.client.emitSnapshot({
       thread: { id: 'codex-thread', name: 'VS Code thread' },
@@ -136,18 +169,11 @@ describe('Codex agent ingestion', () => {
       }]
     })
 
-    expect(context.events).toContainEqual({
-      message: expect.objectContaining({
+    expect(context.events).toContainEqual(expect.objectContaining({
         thread: { id: 'codex-thread', name: 'VS Code thread' },
         role: 'agent',
-        status: 'completed',
         text: 'completed reply'
-      }),
-      context: {
-        source: 'feishu',
-        sourceMessageId: 'om_user'
-      }
-    })
+    }))
     await context.agent.stop()
   })
 })
@@ -157,29 +183,37 @@ function fixture(): {
   client: RecordingCodexClient
   web: WebThreadManager
   registry: ThreadRegistry
-  events: Array<{ message: Message, context?: object }>
+  events: Message[]
+  receiver: {
+    receiveAgentOutput: (message: Message) => Promise<Result<void>>
+  }
 } {
   const registry = new ThreadRegistry(new CodexioMetadata({
     dataPath: join(tmpdir(), `codexio-agent-ingestion-${randomUUID()}`)
   }))
   const web = new WebThreadManager(registry)
-  const events: Array<{ message: Message, context?: object }> = []
+  const events: Message[] = []
   const outputManager = {
-    sendAgent: async (message: Message, context?: object) => {
-      events.push({ message, context })
+    send: async (message: Message) => {
+      events.push(message)
       web.appendMessage(message)
       return Result.successVoid()
     }
   } as unknown as ChannelOutputManager
   const client = new RecordingCodexClient()
+  const assembler = new CodexMessageAssembler()
   const agent = new CodexAgent(
     { get: async () => false } as never,
-    outputManager,
     registry,
     client as unknown as CodexClient,
-    new CodexMessageStreamer(outputManager)
+    assembler
   )
-  return { agent, client, web, registry, events }
+  const receiver = {
+    receiveAgentOutput: (message: Message) => outputManager.send(message)
+  }
+  Reflect.set(agent, 'outputReceiver', receiver)
+  assembler.start(receiver)
+  return { agent, client, web, registry, events, receiver }
 }
 
 function completedMessage(index: number): CodexClientMessage {

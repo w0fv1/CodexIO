@@ -191,6 +191,22 @@ export const configDefinition = defineConfig({
         schema: z.string(),
         default: 'codex'
       }),
+      model: field({
+        label: 'Model',
+        description: 'Codex 使用的模型。',
+        type: 'string',
+        apply: '重启 Codex Agent',
+        schema: z.string().min(1),
+        default: 'gpt-5.6-sol'
+      }),
+      reasoningEffort: field({
+        label: 'Reasoning Effort',
+        description: 'Codex 的推理强度。',
+        type: 'string',
+        apply: '重启 Codex Agent',
+        schema: z.enum(['none', 'low', 'medium', 'high', 'xhigh', 'max']),
+        default: 'medium'
+      }),
       requestTimeoutSeconds: field({
         label: 'Request Timeout Seconds',
         description: '单次 Codex 请求等待超时时间。',
@@ -198,6 +214,14 @@ export const configDefinition = defineConfig({
         apply: '重启 Codex Agent',
         schema: positiveInt,
         default: 120
+      }),
+      turnTimeoutSeconds: field({
+        label: 'Turn Timeout Seconds',
+        description: 'Codex 单轮任务的最长执行时间，超时后主动中断。',
+        type: 'number',
+        apply: '重启 Codex Agent',
+        schema: positiveInt,
+        default: 300
       }),
       observe: group({
         title: 'VS Code Replies',

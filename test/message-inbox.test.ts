@@ -3,10 +3,10 @@ import { MessageInbox } from '../src/component/MessageInbox.js'
 import { Result } from '../src/value/Result.js'
 
 describe('MessageInbox', () => {
-  it('shares one successful result for a repeated identity and revision', async () => {
+  it('shares one successful result for a repeated identity', async () => {
     const inbox = new MessageInbox<string>()
     let executions = 0
-    const execute = () => inbox.run('message', 'revision', async () => {
+    const execute = () => inbox.run('message', async () => {
       executions += 1
       return Result.success('processed')
     })
@@ -21,7 +21,7 @@ describe('MessageInbox', () => {
   it('allows a failed message to be retried', async () => {
     const inbox = new MessageInbox<string>()
     let executions = 0
-    const execute = () => inbox.run('message', 'revision', async () => {
+    const execute = () => inbox.run('message', async () => {
       executions += 1
       return executions === 1 ? Result.fail<string>('failed') : Result.success('retried')
     })
@@ -31,34 +31,45 @@ describe('MessageInbox', () => {
     expect(executions).toBe(2)
   })
 
-  it('processes a new revision after the prior revision', async () => {
+  it('turns a synchronous task exception into a retryable rejection', async () => {
     const inbox = new MessageInbox<string>()
-    const revisions: string[] = []
 
-    await inbox.run('message', 'first', async () => {
-      revisions.push('first')
+    await expect(inbox.run('message', () => {
+      throw new Error('failed')
+    })).rejects.toThrow('failed')
+    await expect(inbox.run('message', async () => Result.success('retried'))).resolves.toMatchObject({
+      data: 'retried'
+    })
+  })
+
+  it('processes different immutable message identities', async () => {
+    const inbox = new MessageInbox<string>()
+    const messages: string[] = []
+
+    await inbox.run('first', async () => {
+      messages.push('first')
       return Result.success('first')
     })
-    await inbox.run('message', 'second', async () => {
-      revisions.push('second')
+    await inbox.run('second', async () => {
+      messages.push('second')
       return Result.success('second')
     })
 
-    expect(revisions).toEqual(['first', 'second'])
+    expect(messages).toEqual(['first', 'second'])
   })
 
-  it('reuses every successful revision across an A to B to A delivery sequence', async () => {
+  it('reuses every successful message across an A to B to A delivery sequence', async () => {
     const inbox = new MessageInbox<string>()
-    const revisions: string[] = []
-    const execute = (revision: string) => inbox.run('message', revision, async () => {
-      revisions.push(revision)
-      return Result.success(revision)
+    const messages: string[] = []
+    const execute = (id: string) => inbox.run(id, async () => {
+      messages.push(id)
+      return Result.success(id)
     })
 
     expect((await execute('A')).data).toBe('A')
     expect((await execute('B')).data).toBe('B')
     expect((await execute('A')).data).toBe('A')
 
-    expect(revisions).toEqual(['A', 'B'])
+    expect(messages).toEqual(['A', 'B'])
   })
 })

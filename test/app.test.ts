@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { Readable } from 'node:stream'
 import { describe, expect, it } from 'vitest'
 import { WebSocket, WebSocketServer } from 'ws'
 import * as Lark from '@larksuiteoapi/node-sdk'
@@ -16,6 +17,7 @@ import { ChannelInputManager } from '../src/controller/channeli/ChannelInputMana
 import { ChannelOutputManager } from '../src/component/channelo/ChannelOutputManager.js'
 import { CodexioApiController } from '../src/controller/CodexioApiController.js'
 import { FileStore } from '../src/component/FileStore.js'
+import { MessageFileResolver } from '../src/component/MessageFileResolver.js'
 import { WebChannelInput } from '../src/controller/channeli/WebChannelInput.js'
 import { FeishuChannelInput } from '../src/controller/channeli/FeishuChannelInput.js'
 import { EmailChannelInput } from '../src/controller/channeli/EmailChannelInput.js'
@@ -35,8 +37,8 @@ import { ThreadWorkspaceResolver } from '../src/component/ThreadWorkspaceResolve
 import { EchoAgent } from '../src/component/agent/EchoAgent.js'
 import { AgentManager } from '../src/component/agent/AgentManager.js'
 import { CodexAgent } from '../src/component/agent/CodexAgent.js'
-import { CodexClient } from '../src/component/agent/CodexClient.js'
-import { CodexMessageStreamer } from '../src/component/agent/CodexMessageStreamer.js'
+import { CodexClient } from '../src/component/agent/codex/CodexClient.js'
+import { CodexMessageAssembler } from '../src/component/agent/codex/CodexMessageAssembler.js'
 import { CommandExecutor } from '../src/controller/CommandExecutor.js'
 import { createMessage } from '../src/value/Message.js'
 import { ServerRuntime } from '../src/component/ServerRuntime.js'
@@ -81,12 +83,25 @@ class FakeFeishuWsClient {
 
 class FakeFeishuOpenApiClient {
   readonly replies: unknown[] = []
+  readonly resources = new Map<string, Buffer>()
+  readonly resourceRequests: unknown[] = []
   readonly im = {
     v1: {
       message: {
         reply: async (payload: unknown) => {
           this.replies.push(payload)
           return {}
+        }
+      },
+      messageResource: {
+        get: async (payload: { path: { file_key: string } }) => {
+          this.resourceRequests.push(payload)
+          return {
+            getReadableStream: () => Readable.from(this.resources.get(payload.path.file_key) ?? Buffer.alloc(0)),
+            headers: {
+              'content-type': 'application/pdf'
+            }
+          }
         }
       }
     }
@@ -436,7 +451,7 @@ describe('server', () => {
       rootPath: testMetadata.rootPath,
       configPath
     })
-    const input = new TestFeishuChannelInput(new Configer(metadata))
+    const input = new TestFeishuChannelInput(new Configer(metadata), new FileStore(metadata))
     ;(input as unknown as { reconnectDelayMs: number }).reconnectDelayMs = 10
     await input.start({
       receive: async () => Result.success({
@@ -456,6 +471,63 @@ describe('server', () => {
     expect(input.clients[0].closed).toBe(true)
     expect(input.clients[1].started).toBe(true)
     expect(input.clients[1].autoReconnect).toBe(true)
+    await input.stop()
+  })
+
+  it('downloads an allowed Feishu attachment without a mention when aite is disabled', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codexio-feishu-file-'))
+    const configPath = join(dir, 'config.yaml')
+    await writeFile(configPath, [
+      'channeli:',
+      '  feishu:',
+      '    enabled: true',
+      '    appId: app-id',
+      '    appSecret: app-secret',
+      '    chatId: chat-id',
+      '    aite: false',
+      '    allowedOpenIds:',
+      '      - ou_allowed'
+    ].join('\n'))
+    const metadata = new CodexioMetadata({
+      rootPath: dir,
+      configPath
+    })
+    const input = new TestFeishuChannelInput(new Configer(metadata), new FileStore(metadata))
+    const received: Array<{ text: string, files?: Array<{ path: string }> }> = []
+    await input.start({
+      receive: async (_source, message) => {
+        received.push(message)
+        return Result.success({ ioThreadId: 'io-thread' })
+      }
+    })
+    expect(Reflect.get(input, 'inputConfig')).toMatchObject({
+      aite: false,
+      allowedOpenIds: ['ou_allowed']
+    })
+    input.openApiClients[0].resources.set('file-key', Buffer.from('pdf-body'))
+    expect(Reflect.get(input, 'openApiClient')).toBe(input.openApiClients[0])
+
+    await Reflect.get(input, 'receive').call(input, {
+      sender: {
+        sender_id: {
+          open_id: 'ou_allowed'
+        }
+      },
+      message: {
+        message_id: 'om_file',
+        chat_id: 'chat-id',
+        chat_type: 'group',
+        message_type: 'file',
+        content: JSON.stringify({
+          file_key: 'file-key',
+          file_name: 'report.pdf'
+        })
+      }
+    })
+    expect(input.openApiClients[0].resourceRequests).toHaveLength(1)
+    expect(received).toHaveLength(1)
+    expect(received[0].text).toBe('')
+    expect(await readFile(received[0].files?.[0].path ?? '', 'utf8')).toBe('pdf-body')
     await input.stop()
   })
 
@@ -489,7 +561,7 @@ describe('server', () => {
       configPath
     })
     const configer = new Configer(metadata)
-    const input = new TestFeishuChannelInput(configer)
+    const input = new TestFeishuChannelInput(configer, new FileStore(metadata))
     const received: unknown[] = []
     await input.start({
       receive: async (source, message) => {
@@ -1156,7 +1228,7 @@ async function createTestCodexioApp(configer: Configer): Promise<{
   const serverRuntime = new ServerRuntime()
   const webInput = new WebChannelInput(configer, webHub)
   const webOutput = new WebChannelOutput(configer, webHub, serverRuntime)
-  const feishuInput = new FeishuChannelInput(configer)
+  const feishuInput = new FeishuChannelInput(configer, fileStore)
   const feishuOutput = new FeishuChannelOutput(configer, threadRegistry)
   const emailInput = new EmailChannelInput(configer)
   const emailOutput = new EmailChannelOutput(configer)
@@ -1164,18 +1236,16 @@ async function createTestCodexioApp(configer: Configer): Promise<{
   const nfircoOutput = new NfircoThreadOutput(configer, threadRegistry)
   const outputManager = new ChannelOutputManager(
     configer,
-    fileStore,
     threadRegistry,
     webOutput,
     feishuOutput,
     new FeishuWebhookChannelOutput(configer),
     emailOutput,
-    nfircoOutput,
-    workspaceResolver
+    nfircoOutput
   )
-  const codexAgent = new CodexAgent(configer, outputManager, threadRegistry, codexClient, new CodexMessageStreamer(outputManager))
-  const echoAgent = new EchoAgent(outputManager)
-  const agentManager = new AgentManager(configer, codexAgent, echoAgent, workspaceResolver)
+  const codexAgent = new CodexAgent(configer, threadRegistry, codexClient, new CodexMessageAssembler())
+  const echoAgent = new EchoAgent()
+  const agentManager = new AgentManager(configer, codexAgent, echoAgent, workspaceResolver, new MessageFileResolver(fileStore), outputManager)
   const inputManager = new ChannelInputManager(configer, threadRegistry, outputManager, agentManager, new CommandExecutor(outputManager), webInput, feishuInput, emailInput, nfircoInput)
   const apiController = new CodexioApiController(configer, outputManager, fileStore, webHub, eventBus, metadata, serverRuntime)
   await outputManager.start()

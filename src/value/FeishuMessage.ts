@@ -14,6 +14,12 @@ const FeishuPostContentSchema = z.object({
 
 const FeishuLocalizedPostContentSchema = z.record(z.string(), FeishuPostContentSchema)
 
+const FeishuResourceContentSchema = z.object({
+  image_key: z.string().optional(),
+  file_key: z.string().optional(),
+  file_name: z.string().optional()
+})
+
 export type FeishuMention = {
   key: string
 }
@@ -30,7 +36,24 @@ export type FeishuMessageTextParseResult =
     reason: 'unsupported' | 'invalid' | 'empty'
   }
 
-export function parseFeishuMessageText(messageType: string, content: string, mentions: FeishuMention[] = []): FeishuMessageTextParseResult {
+export type FeishuMessageResource = {
+  key: string
+  name: string
+  type: 'image' | 'file'
+}
+
+export type FeishuMessageParseResult =
+  | {
+    success: true
+    text: string
+    resources: FeishuMessageResource[]
+  }
+  | {
+    success: false
+    reason: 'unsupported' | 'invalid' | 'empty'
+  }
+
+export function parseFeishuMessage(messageType: string, content: string, mentions: FeishuMention[] = []): FeishuMessageParseResult {
   let value: unknown
   try {
     value = JSON.parse(content)
@@ -40,27 +63,63 @@ export function parseFeishuMessageText(messageType: string, content: string, men
       reason: 'invalid'
     }
   }
-  const parsedText = messageType === 'text' ? parseTextContent(value) : messageType === 'post' ? parsePostContent(value) : undefined
-  if (parsedText === undefined) {
-    return {
-      success: false,
-      reason: messageType === 'text' || messageType === 'post' ? 'invalid' : 'unsupported'
+  let text = ''
+  const resources: FeishuMessageResource[] = []
+  if (messageType === 'text') {
+    const parsed = parseTextContent(value)
+    if (parsed === undefined) {
+      return { success: false, reason: 'invalid' }
     }
+    text = parsed
+  } else if (messageType === 'post') {
+    const parsed = parsePost(value)
+    if (!parsed) {
+      return { success: false, reason: 'invalid' }
+    }
+    text = parsed.text
+    resources.push(...parsed.resources)
+  } else if (['image', 'file', 'audio', 'media'].includes(messageType)) {
+    const parsed = FeishuResourceContentSchema.safeParse(value)
+    if (!parsed.success) {
+      return { success: false, reason: 'invalid' }
+    }
+    const key = messageType === 'image' ? parsed.data.image_key : parsed.data.file_key
+    if (!key) {
+      return { success: false, reason: 'invalid' }
+    }
+    resources.push({
+      key,
+      name: parsed.data.file_name?.trim() || `${key}${messageType === 'image' ? '.image' : ''}`,
+      type: messageType === 'image' ? 'image' : 'file'
+    })
+  } else {
+    return { success: false, reason: 'unsupported' }
   }
-  let text = parsedText
   for (const mention of mentions) {
     text = text.replaceAll(mention.key, '')
   }
   text = text.trim()
-  if (text.length === 0) {
-    return {
-      success: false,
-      reason: 'empty'
-    }
+  if (text.length === 0 && resources.length === 0) {
+    return { success: false, reason: 'empty' }
   }
   return {
     success: true,
-    text
+    text,
+    resources
+  }
+}
+
+export function parseFeishuMessageText(messageType: string, content: string, mentions: FeishuMention[] = []): FeishuMessageTextParseResult {
+  const parsed = parseFeishuMessage(messageType, content, mentions)
+  if (!parsed.success) {
+    return parsed
+  }
+  if (parsed.text.length === 0) {
+    return { success: false, reason: 'empty' }
+  }
+  return {
+    success: true,
+    text: parsed.text
   }
 }
 
@@ -91,20 +150,37 @@ function parseTextContent(value: unknown): string | undefined {
 }
 
 function parsePostContent(value: unknown): string | undefined {
+  return parsePost(value)?.text
+}
+
+function parsePost(value: unknown): { text: string, resources: FeishuMessageResource[] } | undefined {
   const direct = FeishuPostContentSchema.safeParse(value)
   if (direct.success) {
-    return extractPostText(direct.data.content)
+    return extractPost(direct.data.content)
   }
   const localized = FeishuLocalizedPostContentSchema.safeParse(value)
   if (!localized.success) {
     return undefined
   }
   const preferred = localized.data.zh_cn ?? localized.data.en_us ?? localized.data.ja_jp ?? Object.values(localized.data)[0]
-  return preferred ? extractPostText(preferred.content) : undefined
+  return preferred ? extractPost(preferred.content) : undefined
 }
 
-function extractPostText(content: Array<Array<Record<string, unknown>>>): string {
-  return content.map((line) => line.map(extractPostElementText).join('')).join('\n')
+function extractPost(content: Array<Array<Record<string, unknown>>>): { text: string, resources: FeishuMessageResource[] } {
+  const resources = content.flatMap((line) => line.flatMap((element) => {
+    if (element.tag !== 'img' || typeof element.image_key !== 'string') {
+      return []
+    }
+    return [{
+      key: element.image_key,
+      name: `${element.image_key}.image`,
+      type: 'image' as const
+    }]
+  }))
+  return {
+    text: content.map((line) => line.map(extractPostElementText).join('')).join('\n'),
+    resources
+  }
 }
 
 function extractPostElementText(element: Record<string, unknown>): string {
