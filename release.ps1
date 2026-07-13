@@ -125,7 +125,8 @@ if ($null -eq $uploadData -or [string]::IsNullOrWhiteSpace($uploadData.uploadUrl
 }
 
 Write-Step "上传到 OSS"
-& curl.exe --fail --show-error --location --noproxy "*" --http1.1 --request PUT --header "Content-Type: $($releaseInfo.mimeType)" --upload-file $artifactPath $uploadData.uploadUrl
+$contentDisposition = "Content-Disposition: attachment; filename=`"$($releaseInfo.fileName)`""
+& curl.exe --fail --show-error --location --noproxy "*" --http1.1 --request PUT --header "Content-Type: $($releaseInfo.mimeType)" --header $contentDisposition --upload-file $artifactPath $uploadData.uploadUrl
 if ($LASTEXITCODE -ne 0) {
     throw "OSS upload failed: curl exit code $LASTEXITCODE"
 }
