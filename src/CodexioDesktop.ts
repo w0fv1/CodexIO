@@ -1,11 +1,12 @@
 import { spawn, ChildProcess } from 'node:child_process'
 import { appendFileSync, existsSync } from 'node:fs'
-import { copyFile, mkdir, readFile } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { setTimeout as wait } from 'node:timers/promises'
 import electron from 'electron'
 import type { NativeImage, Tray as ElectronTray } from 'electron'
 import { CodexioUpdater } from './CodexioUpdater.js'
+import { DesktopLogExporter } from './component/desktop/DesktopLogExporter.js'
 import { LoginItemManager } from './component/desktop/LoginItemManager.js'
 import { DesktopResponse, isDesktopRequest } from './value/DesktopMessage.js'
 
@@ -17,7 +18,7 @@ type ServerState = {
 
 type MenuIconName = 'message' | 'settings' | 'refresh' | 'fileText' | 'download' | 'power'
 
-const { app, Menu, nativeImage, shell, Tray, Notification } = electron
+const { app, clipboard, Menu, nativeImage, shell, Tray, Notification } = electron
 const iconPath = 'assets/icon.png'
 
 class CodexioDesktop {
@@ -36,6 +37,7 @@ class CodexioDesktop {
   private serverPath = ''
   private serverFailureNotified = false
   private readonly loginItems = new LoginItemManager(app, app.isPackaged, process.platform, process.execPath)
+  private readonly logExporter = new DesktopLogExporter(clipboard)
   private readonly notifications = new Set<electron.Notification>()
 
   async start(): Promise<void> {
@@ -258,8 +260,8 @@ class CodexioDesktop {
     }
     const targetPath = join(app.getPath('downloads'), logFileName)
     try {
-      await copyFile(sourcePath, targetPath)
-      this.notify('Codexio 日志已导出', `已保存到 Downloads\\${logFileName}`)
+      await this.logExporter.export(sourcePath, targetPath)
+      this.notify('Codexio 日志已导出', `已保存到 Downloads\\${logFileName}，并复制到剪贴板`)
     } catch (error) {
       this.log(`export log failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
       this.notify('Codexio 日志导出失败', normalizeErrorMessage(error))
