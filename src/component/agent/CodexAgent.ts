@@ -7,7 +7,7 @@ import { Logger } from '../Logger.js'
 import { KeyedSerialQueue } from '../KeyedSerialQueue.js'
 import { Agent, AgentOutputReceiver } from './Agent.js'
 import { CodexClient, CodexClientLoginEvent, CodexClientMessage, CodexClientThread, CodexThreadSnapshot } from './codex/CodexClient.js'
-import { codexMessageId, CodexMessageAssembler } from './codex/CodexMessageAssembler.js'
+import { codexCompletedMessageId, CodexMessageAssembler } from './codex/CodexMessageAssembler.js'
 
 @injectable()
 export class CodexAgent implements Agent {
@@ -221,7 +221,7 @@ export class CodexAgent implements Agent {
     }
     if (message.status === 'progressCompleted') {
       await this.sendAgent(createMessage({
-        id: codexMessageId(message.thread.id, message.turnId, message.itemId),
+        id: deriveMessageId('codex-progress', message.thread.id, message.turnId, message.itemId),
         occurredAt: this.messageOccurredAt(message),
         thread,
         role: 'agent',
@@ -261,7 +261,7 @@ export class CodexAgent implements Agent {
     const thread = this.resolveThread(snapshot.thread)
     for (const snapshotMessage of snapshot.messages) {
       const result = await this.sendAgent(createMessage({
-        id: codexMessageId(snapshot.thread.id, snapshotMessage.turnId, snapshotMessage.itemId),
+        id: codexCompletedMessageId(snapshot.thread.id, snapshotMessage.turnId, snapshotMessage.text),
         occurredAt: snapshotMessage.completedAt * 1000,
         thread,
         role: 'agent',

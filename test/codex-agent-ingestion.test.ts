@@ -95,6 +95,40 @@ describe('Codex agent ingestion', () => {
     await context.agent.stop()
   })
 
+  it('uses one message identity when live and snapshot item ids differ', async () => {
+    const context = fixture()
+    await context.agent.start(context.receiver)
+    context.client.emitMessage({
+      thread: { id: 'codex-thread', name: 'VS Code thread' },
+      turnId: 'turn',
+      itemId: 'live-item',
+      status: 'itemCompleted',
+      role: 'assistant',
+      text: '',
+      messages: [{
+        itemId: 'live-item',
+        role: 'assistant',
+        text: 'same reply'
+      }]
+    })
+    await context.agent['mailbox'].drain()
+    await context.client.emitSnapshot({
+      thread: { id: 'codex-thread', name: 'VS Code thread' },
+      messages: [{
+        turnId: 'turn',
+        itemId: 'snapshot-item',
+        role: 'assistant',
+        text: 'same reply',
+        completedAt: 100
+      }]
+    })
+
+    expect(context.events).toHaveLength(2)
+    expect(new Set(context.events.map((message) => message.id))).toHaveLength(1)
+    expect(context.web.snapshot().messages).toHaveLength(1)
+    await context.agent.stop()
+  })
+
   it('publishes completed commentary as a channel progress message', async () => {
     const context = fixture()
     await context.agent.start(context.receiver)

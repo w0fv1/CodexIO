@@ -48,7 +48,7 @@ export class CodexMessageAssembler {
       throw new Error('codex message output receiver not ready')
     }
     const result = await this.receiver.receiveAgentOutput(createMessage({
-      id: codexMessageId(item.agentThreadId, item.turnId, item.itemId),
+      id: codexCompletedMessageId(item.agentThreadId, item.turnId, content),
       occurredAt: item.occurredAt,
       thread: item.thread,
       role: 'agent',
@@ -110,6 +110,6 @@ export class CodexMessageAssembler {
   }
 }
 
-export function codexMessageId(agentThreadId: string, turnId: string, itemId: string): string {
-  return deriveMessageId('codex', agentThreadId, turnId, itemId)
+export function codexCompletedMessageId(agentThreadId: string, turnId: string, text: string): string {
+  return deriveMessageId('codex', agentThreadId, turnId, text.trim())
 }
