@@ -7,7 +7,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $scriptRoot = $PSScriptRoot
-$repoRoot = Split-Path -Path (Split-Path -Path $scriptRoot -Parent) -Parent
+$repoRoot = Split-Path -Path (Split-Path -Path (Split-Path -Path $scriptRoot -Parent) -Parent) -Parent
 Import-Module (Join-Path $repoRoot "script\NfircoBackendApiCredential.psm1") -Force
 $adminApiCredential = Read-NfircoBackendApiCredential -RepoRoot $repoRoot -Profile $CredentialProfile
 $adminApiUsername = [string]$adminApiCredential.Username
