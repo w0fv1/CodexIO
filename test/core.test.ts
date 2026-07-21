@@ -834,7 +834,7 @@ describe('core', () => {
       channelo: {
         nfirco: {
           enabled: true,
-          baseUrl: 'https://firco.cn',
+          baseUrl: 'https://next.firco.cn',
           account: 'codexio',
           password: 'password'
         }
