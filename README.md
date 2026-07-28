@@ -1,5 +1,5 @@
 ---
-version: 0.13.1
+version: 0.14.0
 ---
 
 # Codexio
@@ -173,13 +173,11 @@ curl -X POST -H "Authorization: Bearer $CODEXIO_SERVER_TOKEN" http://127.0.0.1:8
 
 Windows 桌面安装版可以在配置页的 App 分组中勾选“开机启动”。保存后立即生效，取消勾选会移除开机启动项。开发模式、命令行模式和容器模式不会修改 Windows 开机启动项。
 
-### 接收 VS Code Codex 回复
+### Codex 授权与对话隔离
 
-使用外部 Codex 时，可以在配置页的 VS Code Replies 分组中开启观察。Codexio 启动时只建立当前会话基线，不发送历史内容；启动后，所有 VS Code 工作区中新产生的完整 Agent 回复会进入现有输出链路并发送到所有已启用的输出通道。该能力不发送 VS Code 用户输入、流式片段、推理、命令输出或工具执行过程。
+关闭 Bundled、使用外部 Codex 时，Codexio 复用用户现有的 Codex 登录授权，不要求重复登录。
 
-开启前必须同时启用 Codex Agent，并关闭 Bundled。Codexio 将使用外部 Codex 和用户默认的 `CODEX_HOME`，从而读取 VS Code Codex 持久化的线程状态。
-
-每条内部消息都携带 thread ID 和名称。Codex 更新会话名称后，Web 页面的会话列表会同步更新。
+Codexio 只创建和维护自己发起的对话 thread，不扫描、导入或同步 VS Code 及其他 Codex Client 的对话记录。其他客户端的对话不会出现在 Codexio 的 Web 页面或输出通道中。
 
 ### 更新版本
 
@@ -315,6 +313,6 @@ Codexio 默认不把对话记录保存到远程数据库。它主要在本机处
 
 ## 版本说明
 
-当前 README 适用于版本 `0.13.1`。
+当前 README 适用于版本 `0.14.0`。
 
 如果发布页显示的版本和本文顶部的 `version` 不一致，请以发布页版本为准，并下载对应版本的说明。

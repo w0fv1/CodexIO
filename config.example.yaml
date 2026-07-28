@@ -32,9 +32,6 @@ agents:
     reasoningEffort: medium
     requestTimeoutSeconds: 120
     turnTimeoutSeconds: 300
-    observe:
-      enabled: false
-      intervalSeconds: 1
 channeli:
   web:
     enabled: true

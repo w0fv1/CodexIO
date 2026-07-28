@@ -13,7 +13,6 @@ import { MessageThread } from '../../../value/Message.js'
 import { CodexRuntimeConfig, CodexRuntimeResolver } from './CodexRuntimeResolver.js'
 import { CodexSessionSupervisor } from './CodexSessionSupervisor.js'
 import { CodexLiveItemTracker } from './CodexLiveItemTracker.js'
-import { CodexObserverLifecycle } from './CodexObserverLifecycle.js'
 import {
   CodexClientEventMap,
   CodexClientCompletedMessage,
@@ -21,8 +20,7 @@ import {
   CodexClientLoginEvent,
   CodexClientMessage,
   CodexClientThread,
-  CodexClientTurn,
-  CodexThreadSnapshot
+  CodexClientTurn
 } from './CodexProtocol.js'
 
 export type {
@@ -31,8 +29,7 @@ export type {
   CodexClientLoginEvent,
   CodexClientMessage,
   CodexClientThread,
-  CodexClientTurn,
-  CodexThreadSnapshot
+  CodexClientTurn
 } from './CodexProtocol.js'
 
 type RpcMessage = {
@@ -75,7 +72,6 @@ export class CodexClient {
   private readonly workspaceResolver: ThreadWorkspaceResolver
   private readonly runtimeResolver: CodexRuntimeResolver
   private readonly supervisor: CodexSessionSupervisor
-  private readonly observerLifecycle: CodexObserverLifecycle
   private session?: CodexSession
   private nextRequestId = 1
   private generation = 0
@@ -99,17 +95,6 @@ export class CodexClient {
       recover: () => {
         void this.ensureStarted()
       }
-    })
-    this.observerLifecycle = new CodexObserverLifecycle({
-      request: (method, params) => this.request(method, params),
-      emit: (snapshot) => this.emitSnapshot(snapshot),
-      fail: (error) => {
-        const session = this.session
-        if (session) {
-          this.failSession(session, error)
-        }
-      },
-      generation: () => this.generation
     })
   }
 
@@ -238,7 +223,6 @@ export class CodexClient {
         })}\n`)
         this.started = true
         this.supervisor.sessionReady(generation)
-        this.observerLifecycle.start(config.observe)
         Logger.info('codex client ready', {
           generation
         })
@@ -299,7 +283,6 @@ export class CodexClient {
     this.clearTurnTimeouts()
     this.liveItems.clear()
     this.threads.clear()
-    this.observerLifecycle.stop()
     const stopPromise = (async (): Promise<Result<void>> => {
       if (session) {
         await this.terminateSession(session)
@@ -520,7 +503,6 @@ export class CodexClient {
       thread.title = messageThread.name
     }
     this.upsertThread(thread)
-    this.observerLifecycle.ignoreThread(thread.id)
     return thread
   }
 
@@ -867,13 +849,6 @@ export class CodexClient {
     }
     this.threads.set(thread.id, thread)
     this.events.emit('thread', thread)
-  }
-
-  private async emitSnapshot(snapshot: CodexThreadSnapshot): Promise<void> {
-    const listeners = this.events.listeners('snapshot') as CodexClientEventMap['snapshot'][]
-    for (const listener of listeners) {
-      await listener(snapshot)
-    }
   }
 
   private messageThread(threadId: string): CodexClientMessage['thread'] {

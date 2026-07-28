@@ -92,59 +92,6 @@ describe('Codex client lifecycle', () => {
     expect(execaMock).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps the observer baseline and state while replacing a timed out session', async () => {
-    vi.useFakeTimers()
-    const baselineUpdatedAt = Math.floor(Date.now() / 1000)
-    const first = fakeProcess({
-      threadList: true,
-      threadListResponses: 1,
-      threadListData: [
-        { id: 'baseline-thread', updatedAt: baselineUpdatedAt }
-      ]
-    })
-    const replacement = fakeProcess({
-      threadList: true
-    })
-    execaMock.mockReturnValueOnce(first.child).mockReturnValueOnce(replacement.child)
-    const client = createClient({
-      observe: true,
-      requestTimeoutMs: 100
-    })
-    const clientErrors: Error[] = []
-    client.on('error', (error) => {
-      clientErrors.push(error)
-    })
-
-    expect((await client.start()).isFailed).toBe(false)
-    client['loginStarted'] = true
-    await vi.waitFor(() => {
-      expect(first.requests.some((request) => request.method === 'thread/list')).toBe(true)
-    })
-    const observerLifecycle = client['observerLifecycle']
-    const observer = observerLifecycle['observer']
-    const baseline = observer?.['baselineCompletedAt']
-    const threadStates = observer?.['threadStates']
-    await vi.waitFor(() => {
-      expect(threadStates?.has('baseline-thread')).toBe(true)
-    })
-
-    await vi.advanceTimersByTimeAsync(4200)
-    await vi.waitFor(() => {
-      expect(execaMock).toHaveBeenCalledTimes(2)
-      expect(replacement.requests.some((request) => request.method === 'thread/list')).toBe(true)
-    })
-
-    expect(client['observerLifecycle']).toBe(observerLifecycle)
-    expect(client['observerLifecycle']['observer']).toBe(observer)
-    expect(client['observerLifecycle']['observer']?.['baselineCompletedAt']).toBe(baseline)
-    expect(client['observerLifecycle']['observer']?.['threadStates']).toBe(threadStates)
-    expect(first.kill).toHaveBeenNthCalledWith(1, 'SIGTERM')
-    expect(first.kill).toHaveBeenNthCalledWith(2, 'SIGKILL')
-    expect(clientErrors).toEqual([])
-    replacement.exit()
-    await client.stop()
-  })
-
   it('recovers after an unexpected child exit while running is still desired', async () => {
     vi.useFakeTimers()
     const first = fakeProcess()
@@ -384,12 +331,12 @@ describe('Codex agent lifecycle', () => {
     const second = agent.receive(receivedEvent('two'))
 
     expect(client.startCalls).toBe(1)
-    expect(client.listenerCount).toBe(5)
+    expect(client.listenerCount).toBe(4)
     client.finishStart()
     expect((await first).isFailed).toBe(false)
     expect((await second).isFailed).toBe(false)
     expect(client.startCalls).toBe(1)
-    expect(client.listenerCount).toBe(5)
+    expect(client.listenerCount).toBe(4)
     await agent.stop()
   })
 
@@ -430,7 +377,6 @@ function attachOutput(agent: CodexAgent, assembler: CodexMessageAssembler, outpu
 }
 
 function createClient(options: {
-  observe?: boolean
   requestTimeoutMs?: number
 } = {}): CodexClient {
   const client = new CodexClient(
@@ -445,16 +391,15 @@ function createClient(options: {
     processCwd: tmpdir(),
     noProxyHosts: [],
     instruction: '',
+    model: 'gpt-5.6-sol',
+    reasoningEffort: 'medium',
     requestTimeoutMs: options.requestTimeoutMs ?? 10_000,
-    observe: options.observe ? { intervalMs: 1000 } : undefined
+    turnTimeoutMs: 300_000
   })
   return client
 }
 
 function fakeProcess(options: {
-  threadList?: boolean
-  threadListResponses?: number
-  threadListData?: Array<{ id: string; updatedAt: number }>
   exitAfterInitialize?: boolean
 } = {}): {
   child: never
@@ -472,7 +417,6 @@ function fakeProcess(options: {
     resolveExit = resolve
   })
   const kill = vi.fn()
-  let remainingThreadListResponses = options.threadListResponses ?? Number.POSITIVE_INFINITY
   const child = Object.assign(childPromise, {
     stdin,
     stdout,
@@ -495,18 +439,6 @@ function fakeProcess(options: {
               stderr: ''
             })
           }
-        })
-      }
-      if (request.method === 'thread/list' && options.threadList && remainingThreadListResponses > 0) {
-        remainingThreadListResponses -= 1
-        queueMicrotask(() => {
-          stdout.write(`${JSON.stringify({
-            id: request.id,
-            result: {
-              data: options.threadListData ?? [],
-              nextCursor: null
-            }
-          })}\n`)
         })
       }
     }

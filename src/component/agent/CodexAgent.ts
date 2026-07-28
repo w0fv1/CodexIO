@@ -6,7 +6,7 @@ import { ThreadRegistry } from '../ThreadRegistry.js'
 import { Logger } from '../Logger.js'
 import { KeyedSerialQueue } from '../KeyedSerialQueue.js'
 import { Agent, AgentOutputReceiver } from './Agent.js'
-import { CodexClient, CodexClientLoginEvent, CodexClientMessage, CodexClientThread, CodexThreadSnapshot } from './codex/CodexClient.js'
+import { CodexClient, CodexClientLoginEvent, CodexClientMessage, CodexClientThread } from './codex/CodexClient.js'
 import { codexCompletedMessageId, CodexMessageAssembler } from './codex/CodexMessageAssembler.js'
 
 @injectable()
@@ -54,9 +54,6 @@ export class CodexAgent implements Agent {
           void this.mailbox.run(message.thread.id, () => this.receiveCodexMessage(message)).catch((error) => {
             Logger.error('codex live message ingestion failed', error)
           })
-        }),
-        this.client.on('snapshot', (snapshot) => {
-          return this.mailbox.run(snapshot.thread.id, () => this.receiveCodexSnapshot(snapshot))
         }),
         this.client.on('thread', (thread) => {
           this.receiveCodexThread(thread)
@@ -201,6 +198,13 @@ export class CodexAgent implements Agent {
       return
     }
     const thread = this.resolveThread(message.thread)
+    if (!thread) {
+      Logger.warn('codex agent ignored unbound thread message', {
+        threadId: message.thread.id,
+        status: message.status
+      })
+      return
+    }
     if (message.status === 'delta' && message.text.length > 0) {
       this.messageAssembler.append({
         thread,
@@ -257,22 +261,6 @@ export class CodexAgent implements Agent {
     }
   }
 
-  private async receiveCodexSnapshot(snapshot: CodexThreadSnapshot): Promise<void> {
-    const thread = this.resolveThread(snapshot.thread)
-    for (const snapshotMessage of snapshot.messages) {
-      const result = await this.sendAgent(createMessage({
-        id: codexCompletedMessageId(snapshot.thread.id, snapshotMessage.turnId, snapshotMessage.text),
-        occurredAt: snapshotMessage.completedAt * 1000,
-        thread,
-        role: 'agent',
-        text: snapshotMessage.text
-      }))
-      if (result.isFailed) {
-        throw new Error(result.message)
-      }
-    }
-  }
-
   private async receiveClientError(error: Error): Promise<void> {
     const ioThreadId = this.loginIoThreadId ?? this.threadRegistry.getLastActive()?.id
     if (!ioThreadId) {
@@ -295,11 +283,10 @@ export class CodexAgent implements Agent {
     this.threadRegistry.rename(ioThreadId, thread.title)
   }
 
-  private resolveThread(agentThread: CodexClientMessage['thread']): Message['thread'] {
-    let ioThreadId = this.ioThreadIdByThreadId.get(agentThread.id)
+  private resolveThread(agentThread: CodexClientMessage['thread']): Message['thread'] | undefined {
+    const ioThreadId = this.ioThreadIdByThreadId.get(agentThread.id)
     if (!ioThreadId) {
-      ioThreadId = agentThread.id
-      this.bindThread(ioThreadId, agentThread.id)
+      return undefined
     }
     const currentThread = this.threadRegistry.ensure(ioThreadId)
     return agentThread.name === '新对话' && currentThread.name !== '新对话'

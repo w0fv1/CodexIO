@@ -28,13 +28,13 @@ import { createMessage, deriveMessageId, Message } from '../src/value/Message.js
 import { shouldReceiveFeishuMessage, shouldReceiveFeishuSender } from '../src/value/FeishuMessage.js'
 import { parseMarkdownAttachmentReferences, renderMarkdownHtml } from '../src/util/Markdown.js'
 import { resolveUserPath } from '../src/util/Path.js'
+import { createProcessEnv } from '../src/util/ProcessEnvironment.js'
 import { parseNfircoThreadSocketEvent } from '../src/component/channel/NfircoThreadClient.js'
 import { WebThreadManager } from '../src/component/channel/WebThreadManager.js'
 import { ServerRuntime } from '../src/component/ServerRuntime.js'
 import { LoginItemManager } from '../src/component/desktop/LoginItemManager.js'
 import { DesktopIntegration } from '../src/component/desktop/DesktopIntegration.js'
 import { renderConfigTemplate } from '../src/value/ConfigTemplate.js'
-import { CodexThreadObserver } from '../src/component/agent/codex/CodexThreadObserver.js'
 
 const testMetadata = new CodexioMetadata()
 
@@ -55,7 +55,6 @@ describe('core', () => {
     expect(config.agents.instruction).toContain('previews without a file path')
     expect(config.agents.echo.enabled).toBe(true)
     expect(config.agents.codex.bundled).toBe(true)
-    expect(config.agents.codex.observe.enabled).toBe(false)
     expect(config.app.workspace.path).toBe('workspace')
     expect(config.proxy.host).toBe('127.0.0.1')
     expect(config.proxy.noProxy).toBe('')
@@ -75,6 +74,29 @@ describe('core', () => {
       description: '在已经引入 Codexio 的飞书群聊中，或与 Codexio 私聊时，输入 $bind ${app.id} 即可在飞书中绑定 Codexio。'
     })
     expect(configDescriptor.fields.find((field) => field.path === 'channeli.feishu.enabled')?.groupPath).toBe('channeli.feishu')
+  })
+
+  it('does not expose cross-client Codex thread observation', () => {
+    const config = createDefaultConfig()
+    expect(config.agents.codex).not.toHaveProperty('observe')
+    expect(configDescriptor.groups).not.toContainEqual(expect.objectContaining({
+      path: 'agents.codex.observe'
+    }))
+    expect(configDescriptor.fields.some((field) => field.path.startsWith('agents.codex.observe.'))).toBe(false)
+  })
+
+  it('inherits the existing Codex authorization when no private home is configured', () => {
+    const previousCodexHome = process.env.CODEX_HOME
+    process.env.CODEX_HOME = 'C:\\shared-codex-auth'
+    try {
+      expect(createProcessEnv(undefined, undefined, undefined, [], {}, false).CODEX_HOME).toBe('C:\\shared-codex-auth')
+    } finally {
+      if (previousCodexHome === undefined) {
+        delete process.env.CODEX_HOME
+      } else {
+        process.env.CODEX_HOME = previousCodexHome
+      }
+    }
   })
 
   it('renders config references without interpreting markup', () => {
@@ -126,281 +148,6 @@ describe('core', () => {
     container.bind(Configer).toConstantValue(configer)
     const integration = container.get(DesktopIntegration)
     expect(Reflect.get(integration, 'configer')).toBe(configer)
-  })
-
-  it('observes only new completed VS Code agent replies after startup', async () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-07-11T00:00:00Z'))
-    const baselineCompletedAt = Math.floor(Date.now() / 1000)
-    let threads = [{
-      id: 'vscode-thread',
-      cwd: 'C:\\repo',
-      updatedAt: baselineCompletedAt
-    }]
-    let turns = [{
-      id: 'old-turn',
-      status: 'completed',
-      completedAt: baselineCompletedAt - 1,
-      items: [{
-        id: 'old-agent',
-        type: 'agentMessage',
-        text: 'old reply'
-      }]
-    }]
-    const snapshots: unknown[] = []
-    const diagnostics: Array<{ event: string, data: Record<string, unknown> }> = []
-    const request = vi.fn(async (method: string) => {
-      if (method === 'thread/list') {
-        return {
-          data: threads,
-          nextCursor: null
-        }
-      }
-      if (method === 'thread/read') {
-        return {
-          thread: {
-            id: 'vscode-thread',
-            name: 'VS Code project',
-            turns
-          }
-        }
-      }
-      throw new Error(method)
-    })
-    const observer = new CodexThreadObserver({ request }, {
-      intervalMs: 1000
-    }, async (snapshot) => {
-      snapshots.push(snapshot)
-    }, undefined, (diagnostic) => diagnostics.push(diagnostic))
-    await observer.start()
-    expect(snapshots).toEqual([])
-    expect(request).not.toHaveBeenCalledWith('thread/read', expect.anything())
-    expect(request).toHaveBeenCalledWith('thread/list', expect.not.objectContaining({
-      cwd: expect.anything()
-    }))
-    turns = [
-      ...turns,
-      {
-        id: 'new-turn',
-        status: 'completed',
-        completedAt: baselineCompletedAt + 1,
-        items: [
-          {
-            id: 'new-user',
-            type: 'userMessage',
-            text: 'new prompt'
-          },
-          {
-            id: 'new-agent',
-            type: 'agentMessage',
-            text: 'new reply'
-          }
-        ]
-      }
-    ]
-    threads = [{
-      ...threads[0],
-      updatedAt: baselineCompletedAt + 1
-    }]
-    await observer['poll']()
-    vi.setSystemTime(new Date('2026-07-11T00:00:02Z'))
-    await observer['poll']()
-    expect(snapshots).toEqual([{
-      thread: {
-        id: 'vscode-thread',
-        name: 'VS Code project'
-      },
-      messages: [{
-        turnId: 'new-turn',
-        itemId: 'new-agent',
-        role: 'assistant',
-        text: 'new reply',
-        completedAt: baselineCompletedAt + 1,
-        sequence: 2
-      }]
-    }])
-    expect(diagnostics).toEqual(expect.arrayContaining([
-      {
-        event: 'baselineEstablished',
-        data: expect.objectContaining({
-          threadCount: 1,
-          intervalMs: 1000
-        })
-      },
-      {
-        event: 'threadRead',
-        data: expect.objectContaining({
-          threadId: 'vscode-thread',
-          turnCount: 2,
-          completedTurnCount: 2,
-          agentMessageCount: 2,
-          snapshotMessageCount: 1
-        })
-      },
-      {
-        event: 'snapshotEmitted',
-        data: expect.objectContaining({
-          threadId: 'vscode-thread',
-          messageCount: 1
-        })
-      }
-    ]))
-    await observer['poll']()
-    expect(snapshots).toHaveLength(1)
-    observer.stop()
-  })
-
-  it('does not observe threads created by Codexio', async () => {
-    const messages: unknown[] = []
-    const request = vi.fn(async (method: string) => {
-      if (method === 'thread/list') {
-        return {
-          data: [{
-            id: 'codexio-thread',
-            cwd: 'C:\\repo',
-            updatedAt: 2
-          }],
-          nextCursor: null
-        }
-      }
-      if (method === 'thread/read') {
-        throw new Error('ignored thread must not be read')
-      }
-      throw new Error(method)
-    })
-    const observer = new CodexThreadObserver({ request }, {
-      intervalMs: 1000
-    }, async (message) => {
-      messages.push(message)
-    })
-    observer.ignoreThread('codexio-thread')
-    await observer.start()
-    await observer['poll']()
-    expect(messages).toEqual([])
-    expect(request).not.toHaveBeenCalledWith('thread/read', expect.anything())
-    observer.stop()
-  })
-
-  it('re-emits a turn that changes from interrupted to completed', async () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-07-11T00:00:00Z'))
-    const completedAt = Math.floor(Date.now() / 1000) + 1
-    let updatedAt = completedAt - 1
-    let status = 'interrupted'
-    const messages: unknown[] = []
-    const observer = new CodexThreadObserver({
-      request: async (method: string) => {
-        if (method === 'thread/list') {
-          return {
-            data: [{ id: 'vscode-thread', updatedAt }],
-            nextCursor: null
-          }
-        }
-        if (method === 'thread/read') {
-          return {
-            thread: {
-              id: 'vscode-thread',
-              name: 'VS Code thread',
-              turns: [{
-                id: 'turn',
-                status,
-                ...(status === 'completed' ? { completedAt } : {}),
-                items: status === 'completed'
-                  ? [{ id: 'agent-message', type: 'agentMessage', text: 'reply' }]
-                  : []
-              }]
-            }
-          }
-        }
-        throw new Error(method)
-      }
-    }, {
-      intervalMs: 1000
-    }, async (message) => {
-      messages.push(message)
-    })
-    await observer.start()
-    updatedAt = completedAt
-    await observer['poll']()
-    vi.setSystemTime(new Date('2026-07-11T00:00:02Z'))
-    await observer['poll']()
-    expect(messages).toEqual([])
-    status = 'completed'
-    updatedAt = completedAt + 1
-    await observer['poll']()
-    vi.setSystemTime(new Date('2026-07-11T00:00:04Z'))
-    await observer['poll']()
-    updatedAt = completedAt + 2
-    await observer['poll']()
-    vi.setSystemTime(new Date('2026-07-11T00:00:06Z'))
-    await observer['poll']()
-    expect(messages).toHaveLength(2)
-    expect(messages).toMatchObject([
-      { messages: [{ turnId: 'turn', itemId: 'agent-message' }] },
-      { messages: [{ turnId: 'turn', itemId: 'agent-message' }] }
-    ])
-    observer.stop()
-  })
-
-  it('retries a VS Code reply after a transient thread read failure', async () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-07-11T00:00:00Z'))
-    const completedAt = Math.floor(Date.now() / 1000) + 1
-    let listed = false
-    let readAttempts = 0
-    const messages: unknown[] = []
-    const errors: Error[] = []
-    const request = vi.fn(async (method: string) => {
-      if (method === 'thread/list') {
-        return {
-          data: listed
-            ? [{ id: 'vscode-thread', cwd: 'C:\\repo', updatedAt: completedAt }]
-            : [],
-          nextCursor: null
-        }
-      }
-      if (method === 'thread/read') {
-        readAttempts += 1
-        if (readAttempts === 1) {
-          throw new Error('temporary read failure')
-        }
-        return {
-          thread: {
-            id: 'vscode-thread',
-            name: null,
-            turns: [{
-              id: 'new-turn',
-              status: 'completed',
-              completedAt,
-              items: [{ id: 'new-agent', type: 'agentMessage', text: 'new reply' }]
-            }]
-          }
-        }
-      }
-      throw new Error(method)
-    })
-    const observer = new CodexThreadObserver({ request }, {
-      intervalMs: 1000
-    }, async (message) => {
-      messages.push(message)
-    }, (error) => {
-      errors.push(error)
-    })
-    await observer.start()
-    listed = true
-    await expect(observer['poll']()).resolves.toBeUndefined()
-    vi.setSystemTime(new Date('2026-07-11T00:00:02Z'))
-    await expect(observer['poll']()).resolves.toBeUndefined()
-    expect(errors.map((error) => error.message)).toEqual(['temporary read failure'])
-    vi.setSystemTime(new Date('2026-07-11T00:00:03Z'))
-    await observer['poll']()
-    expect(messages).toMatchObject([{
-      thread: {
-        id: 'vscode-thread',
-        name: '新对话'
-      }
-    }])
-    observer.stop()
   })
 
   it('does not persist config when a before-change integration fails', async () => {
@@ -958,8 +705,7 @@ describe('core', () => {
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codex'],
       ['agents.instruction', ''],
-      ['agents.codex.requestTimeoutSeconds', 120],
-      ['agents.codex.observe', { enabled: false,  intervalSeconds: 1 }]
+      ['agents.codex.requestTimeoutSeconds', 120]
     ])
     const client = createTestCodexClient({
       get: async (path: string) => values.get(path)
@@ -986,8 +732,7 @@ describe('core', () => {
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codex'],
       ['agents.instruction', ''],
-      ['agents.codex.requestTimeoutSeconds', 120],
-      ['agents.codex.observe', { enabled: false,  intervalSeconds: 1 }]
+      ['agents.codex.requestTimeoutSeconds', 120]
     ])
     const dir = await mkdtemp(join(tmpdir(), 'codexio-default-workspace-'))
     const metadata = new CodexioMetadata({
@@ -1034,8 +779,7 @@ describe('core', () => {
         ['server.host', '127.0.0.1'],
         ['agents.codex.command', 'codex'],
         ['agents.instruction', ''],
-        ['agents.codex.requestTimeoutSeconds', 120],
-        ['agents.codex.observe', { enabled: false,  intervalSeconds: 1 }]
+        ['agents.codex.requestTimeoutSeconds', 120]
       ])
       const metadata = new CodexioMetadata({
         rootPath: testMetadata.rootPath,
@@ -1047,6 +791,7 @@ describe('core', () => {
       const runtimeConfig = await client['readRuntimeConfig']()
       const expectedCommand = process.platform === 'win32' ? join(vscodeBin, 'codex.exe') : join(pathBin, 'codex')
       expect(runtimeConfig.command).toBe(expectedCommand)
+      expect(runtimeConfig.codexHomePath).toBeUndefined()
     } finally {
       if (previousPath === undefined) {
         delete process.env.PATH
@@ -1097,8 +842,7 @@ describe('core', () => {
         ['server.host', '127.0.0.1'],
         ['agents.codex.command', 'codex'],
         ['agents.instruction', ''],
-        ['agents.codex.requestTimeoutSeconds', 120],
-        ['agents.codex.observe', { enabled: false,  intervalSeconds: 1 }]
+        ['agents.codex.requestTimeoutSeconds', 120]
       ])
       const client = createTestCodexClient({
         get: async (path: string) => values.get(path)
@@ -1127,13 +871,6 @@ describe('core', () => {
     }
   })
 
-  it('requires external Codex when observing VS Code replies', () => {
-    const bundled = createDefaultConfig()
-    bundled.agents.codex.observe.enabled = true
-    expect(() => validateCodexioConfig(bundled)).toThrow('agents.codex.enabled must be true')
-    expect(() => validateCodexioConfig(bundled)).toThrow('agents.codex.bundled must be false')
-  })
-
   it('adds Codexio file delivery instructions to new codex threads', async () => {
     const values = new Map<string, unknown>([
       ['agents.codex.bundled', false],
@@ -1145,8 +882,7 @@ describe('core', () => {
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codex'],
       ['agents.instruction', 'File rule with Markdown reference'],
-      ['agents.codex.requestTimeoutSeconds', 120],
-      ['agents.codex.observe', { enabled: false,  intervalSeconds: 1 }]
+      ['agents.codex.requestTimeoutSeconds', 120]
     ])
     const client = createTestCodexClient({
       get: async (path: string) => values.get(path)
@@ -1181,8 +917,7 @@ describe('core', () => {
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', codexCommand],
       ['agents.instruction', 'Project instruction'],
-      ['agents.codex.requestTimeoutSeconds', 120],
-      ['agents.codex.observe', { enabled: false,  intervalSeconds: 1 }]
+      ['agents.codex.requestTimeoutSeconds', 120]
     ])
     const client = createTestCodexClient({
       get: async (path: string) => values.get(path)
@@ -1216,8 +951,7 @@ describe('core', () => {
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codexio-missing-command'],
       ['agents.instruction', 'Project instruction'],
-      ['agents.codex.requestTimeoutSeconds', 120],
-      ['agents.codex.observe', { enabled: false,  intervalSeconds: 1 }]
+      ['agents.codex.requestTimeoutSeconds', 120]
     ])
     const client = createTestCodexClient({
       get: async (path: string) => values.get(path)
@@ -1240,8 +974,7 @@ describe('core', () => {
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codex'],
       ['agents.instruction', ''],
-      ['agents.codex.requestTimeoutSeconds', 120],
-      ['agents.codex.observe', { enabled: false,  intervalSeconds: 1 }]
+      ['agents.codex.requestTimeoutSeconds', 120]
     ])
     const client = createTestCodexClient({
       get: async (path: string) => values.get(path)
@@ -1374,14 +1107,13 @@ describe('core', () => {
       get: async () => undefined
     } as unknown as Configer)
     const requests: Array<{ method: string, params?: unknown }> = []
-    const ignoreThread = vi.spyOn(client['observerLifecycle'], 'ignoreThread')
     client['request'] = async (method: string, params?: unknown) => {
       requests.push({ method, params })
       if (method === 'thread/resume') {
         return {
           thread: {
             id: 'codex-thread',
-            name: 'VS Code thread',
+            name: 'Codexio thread',
             status: { type: 'idle' }
           }
         }
@@ -1398,13 +1130,12 @@ describe('core', () => {
     }
 
     const result = await client.send({
-      thread: { id: 'codex-thread', name: 'VS Code thread' },
+      thread: { id: 'codex-thread', name: 'Codexio thread' },
       threadId: 'codex-thread',
       text: 'continue'
     })
 
     expect(result.isFailed).toBe(false)
-    expect(ignoreThread).not.toHaveBeenCalled()
     expect(requests).toEqual([
       {
         method: 'thread/resume',
@@ -1483,7 +1214,7 @@ describe('core', () => {
     }
 
     const result = await client.send({
-      thread: { id: 'codex-thread', name: 'VS Code thread' },
+      thread: { id: 'codex-thread', name: 'Codexio thread' },
       threadId: 'codex-thread',
       text: 'continue'
     })
@@ -1499,7 +1230,7 @@ describe('core', () => {
     } as unknown as Configer)
     client['threads'].set('codex-thread', {
       id: 'codex-thread',
-      title: 'VS Code thread',
+      title: 'Codexio thread',
       isWorking: false
     })
     const requests: string[] = []
@@ -1517,7 +1248,7 @@ describe('core', () => {
     }
 
     const result = await client.send({
-      thread: { id: 'codex-thread', name: 'VS Code thread' },
+      thread: { id: 'codex-thread', name: 'Codexio thread' },
       threadId: 'codex-thread',
       text: 'continue'
     })
@@ -1542,7 +1273,7 @@ describe('core', () => {
     }
 
     const result = await client.send({
-      thread: { id: 'codex-thread', name: 'VS Code thread' },
+      thread: { id: 'codex-thread', name: 'Codexio thread' },
       threadId: 'codex-thread',
       text: 'continue'
     })
@@ -1553,7 +1284,7 @@ describe('core', () => {
     expect(client['threads'].size).toBe(0)
   })
 
-  it('keeps new Codexio threads out of external thread observation', async () => {
+  it('creates Codexio threads without listing or reading other client threads', async () => {
     const values = new Map<string, unknown>([
       ['agents.codex.bundled', false],
       ['app.workspace.path', '~'],
@@ -1564,14 +1295,14 @@ describe('core', () => {
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codex'],
       ['agents.instruction', ''],
-      ['agents.codex.requestTimeoutSeconds', 120],
-      ['agents.codex.observe', { enabled: true, intervalSeconds: 1 }]
+      ['agents.codex.requestTimeoutSeconds', 120]
     ])
     const client = createTestCodexClient({
       get: async (path: string) => values.get(path)
     } as unknown as Configer)
-    const ignoreThread = vi.spyOn(client['observerLifecycle'], 'ignoreThread')
+    const requests: string[] = []
     client['request'] = async (method: string) => {
+      requests.push(method)
       if (method === 'thread/start') {
         return {
           thread: {
@@ -1597,7 +1328,7 @@ describe('core', () => {
     })
 
     expect(result.isFailed).toBe(false)
-    expect(ignoreThread).toHaveBeenCalledExactlyOnceWith('new-thread')
+    expect(requests).toEqual(['thread/start', 'turn/start'])
   })
 
   it('upserts repeated web messages by stable message id', () => {
@@ -1661,8 +1392,7 @@ describe('core', () => {
       ['server.host', '127.0.0.1'],
       ['agents.codex.command', 'codex'],
       ['agents.instruction', ''],
-      ['agents.codex.requestTimeoutSeconds', 120],
-      ['agents.codex.observe', { enabled: false,  intervalSeconds: 1 }]
+      ['agents.codex.requestTimeoutSeconds', 120]
     ])
     const client = createTestCodexClient({
       get: async (path: string) => values.get(path)
@@ -2318,7 +2048,7 @@ describe('core', () => {
     ])
   })
 
-  it('routes an unbound Codex thread through its thread id IoThread', async () => {
+  it('does not associate an unbound Codex thread with an IoThread', async () => {
     const sent: Message[] = []
     const outputManager = recordingMessageOutput((message) => sent.push(message))
     const configer = {
@@ -2334,29 +2064,23 @@ describe('core', () => {
     attachCodexAgentOutput(agent, assembler, outputManager)
     const completedMessage = {
       thread: {
-        id: 'vscode-thread',
-        name: 'VS Code thread'
+        id: 'external-thread',
+        name: 'External thread'
       },
-      turnId: 'vscode-turn',
+      turnId: 'external-turn',
       status: 'turnCompleted',
       role: 'assistant',
       text: '',
       messages: [{
-        itemId: 'vscode-agent-message',
+        itemId: 'external-agent-message',
         role: 'assistant',
-        text: 'VS Code reply'
+        text: 'External reply'
       }]
     } as const
     await agent['receiveCodexMessage'](completedMessage)
     await agent['receiveCodexMessage'](completedMessage)
-    expect(sent).toHaveLength(2)
-    expect(sent[0]).toMatchObject({
-      id: expect.any(String),
-      thread: { id: 'vscode-thread', name: 'VS Code thread' },
-      role: 'agent',
-      text: 'VS Code reply'
-    })
-    expect(sent[1].id).toBe(sent[0].id)
+    expect(sent).toEqual([])
+    expect(agent['ioThreadIdByThreadId'].size).toBe(0)
   })
 
   it('preserves known thread names and applies later Codex title updates', async () => {

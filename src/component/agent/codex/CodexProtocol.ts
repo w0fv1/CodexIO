@@ -24,20 +24,6 @@ export type CodexClientCompletedMessage = {
   sequence: number
 }
 
-export type CodexThreadSnapshotMessage = CodexClientCompletedMessage & {
-  turnId: string
-  completedAt: number
-  sequence: number
-}
-
-export type CodexThreadSnapshot = {
-  thread: {
-    id: string
-    name: string
-  }
-  messages: CodexThreadSnapshotMessage[]
-}
-
 type CodexClientMessageBase = {
   thread: {
     id: string
@@ -86,11 +72,6 @@ export type CodexClientLoginEvent = {
 export type CodexClientEventMap = {
   thread: (thread: CodexClientThread) => void
   message: (message: CodexClientMessage) => void
-  snapshot: (snapshot: CodexThreadSnapshot) => Promise<void>
   login: (login: CodexClientLoginEvent) => void
   error: (error: Error) => void
-}
-
-export type CodexRpcClient = {
-  request: (method: string, params?: unknown) => Promise<unknown>
 }

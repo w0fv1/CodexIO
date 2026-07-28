@@ -222,27 +222,6 @@ export const configDefinition = defineConfig({
         apply: '重启 Codex Agent',
         schema: positiveInt,
         default: 300
-      }),
-      observe: group({
-        title: 'VS Code Replies',
-        description: '将所有 VS Code Codex 新产生的完整 Agent 回复发送到 Codexio 输出通道。'
-      }, {
-        enabled: field({
-          label: 'Enabled',
-          description: '观察 VS Code Codex 新产生的 Agent 回复，不发送或补发历史消息。',
-          type: 'boolean',
-          apply: '重启 Codex Agent',
-          schema: z.boolean(),
-          default: false
-        }),
-        intervalSeconds: field({
-          label: 'Interval Seconds',
-          description: '检查新 Agent 回复的间隔秒数。',
-          type: 'number',
-          apply: '重启 Codex Agent',
-          schema: positiveInt,
-          default: 1
-        })
       })
     })
   }),
@@ -726,14 +705,6 @@ export function validateCodexioConfig(config: CodexioConfig): void {
   ].filter((agentConfig) => agentConfig.enabled)
   if (enabledAgents.length === 0) {
     issues.push('one agent must be enabled')
-  }
-  if (config.agents.codex.observe.enabled) {
-    if (!config.agents.codex.enabled) {
-      issues.push('agents.codex.enabled must be true when agents.codex.observe.enabled=true')
-    }
-    if (config.agents.codex.bundled) {
-      issues.push('agents.codex.bundled must be false when agents.codex.observe.enabled=true')
-    }
   }
   const enabledChanneli = Object.entries(config.channeli).filter(([, channelConfig]) => channelConfig?.enabled)
   const enabledChannelo = Object.entries(config.channelo).filter(([, channelConfig]) => channelConfig?.enabled)
