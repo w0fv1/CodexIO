@@ -20,7 +20,6 @@ export type CodexRuntimeConfig = {
   model: string
   reasoningEffort: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   requestTimeoutMs: number
-  turnTimeoutMs: number
 }
 
 type CodexCommand = {
@@ -47,8 +46,7 @@ export class CodexRuntimeResolver {
       instruction,
       model,
       reasoningEffort,
-      requestTimeoutSeconds,
-      turnTimeoutSeconds
+      requestTimeoutSeconds
     ] = await Promise.all([
       this.configer.get('agents.codex.bundled'),
       this.configer.get('proxy.enabled'),
@@ -60,8 +58,7 @@ export class CodexRuntimeResolver {
       this.configer.get('agents.instruction'),
       this.configer.get('agents.codex.model'),
       this.configer.get('agents.codex.reasoningEffort'),
-      this.configer.get('agents.codex.requestTimeoutSeconds'),
-      this.configer.get('agents.codex.turnTimeoutSeconds')
+      this.configer.get('agents.codex.requestTimeoutSeconds')
     ])
     const command = bundled
       ? bundledCodexCommand()
@@ -84,8 +81,7 @@ export class CodexRuntimeResolver {
       instruction,
       model,
       reasoningEffort,
-      requestTimeoutMs: requestTimeoutSeconds * 1000,
-      turnTimeoutMs: turnTimeoutSeconds * 1000
+      requestTimeoutMs: requestTimeoutSeconds * 1000
     }
   }
 }

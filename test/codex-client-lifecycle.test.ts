@@ -262,38 +262,29 @@ describe('Codex client lifecycle', () => {
     expect(messages[4].messages.map((message) => message.text)).toEqual(['visible'])
   })
 
-  it('interrupts and fails a turn that exceeds its execution timeout', async () => {
+  it('keeps a turn active after 300 seconds', async () => {
     vi.useFakeTimers()
+    const process = fakeProcess()
+    execaMock.mockReturnValue(process.child)
     const client = createClient()
     const messages: CodexClientMessage[] = []
-    const requests: Array<{ method: string, params?: unknown }> = []
     client.on('message', (message) => {
       messages.push(message)
     })
-    client['turnTimeoutMs'] = 1000
-    client['request'] = async (method: string, params?: unknown) => {
-      requests.push({ method, params })
-      return {}
-    }
+    expect((await client.start()).isFailed).toBe(false)
 
     client['handleNotification']('turn/started', {
       threadId: 'thread',
       turn: { id: 'turn' }
     })
-    await vi.advanceTimersByTimeAsync(1000)
+    await vi.advanceTimersByTimeAsync(300_001)
 
-    expect(requests).toEqual([{
-      method: 'turn/interrupt',
-      params: {
-        threadId: 'thread',
-        turnId: 'turn'
-      }
-    }])
-    expect(messages.at(-1)).toMatchObject({
-      status: 'failed',
-      text: 'Codex 执行超过 1 秒，已中断。'
-    })
-    expect(client['turnIdByThreadId'].has('thread')).toBe(false)
+    expect(process.requests.some((request) => request.method === 'turn/interrupt')).toBe(false)
+    expect(messages.map((message) => message.status)).toEqual(['started'])
+    expect(client['turnIdByThreadId'].get('thread')).toBe('turn')
+
+    process.exit()
+    await client.stop()
   })
 
   it('clears tracked live items at the turn boundary', () => {
@@ -393,8 +384,7 @@ function createClient(options: {
     instruction: '',
     model: 'gpt-5.6-sol',
     reasoningEffort: 'medium',
-    requestTimeoutMs: options.requestTimeoutMs ?? 10_000,
-    turnTimeoutMs: 300_000
+    requestTimeoutMs: options.requestTimeoutMs ?? 10_000
   })
   return client
 }

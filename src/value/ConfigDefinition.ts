@@ -214,14 +214,6 @@ export const configDefinition = defineConfig({
         apply: '重启 Codex Agent',
         schema: positiveInt,
         default: 120
-      }),
-      turnTimeoutSeconds: field({
-        label: 'Turn Timeout Seconds',
-        description: 'Codex 单轮任务的最长执行时间，超时后主动中断。',
-        type: 'number',
-        apply: '重启 Codex Agent',
-        schema: positiveInt,
-        default: 300
       })
     })
   }),

@@ -31,7 +31,6 @@ agents:
     model: gpt-5.6-sol
     reasoningEffort: medium
     requestTimeoutSeconds: 120
-    turnTimeoutSeconds: 300
 channeli:
   web:
     enabled: true

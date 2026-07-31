@@ -67,7 +67,6 @@ export class CodexClient {
   private readonly events = new EventEmitter()
   private readonly threads = new Map<string, CodexClientThread>()
   private readonly turnIdByThreadId = new Map<string, string>()
-  private readonly turnTimeoutByThreadId = new Map<string, { turnId: string, timeout: NodeJS.Timeout }>()
   private readonly liveItems = new CodexLiveItemTracker()
   private readonly workspaceResolver: ThreadWorkspaceResolver
   private readonly runtimeResolver: CodexRuntimeResolver
@@ -80,7 +79,6 @@ export class CodexClient {
   private stopPromise?: Promise<Result<void>>
   private loginStarted = false
   private loginEvent?: CodexClientLoginEvent
-  private turnTimeoutMs = 0
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
@@ -130,7 +128,6 @@ export class CodexClient {
       }
       try {
         const config = await this.readRuntimeConfig()
-        this.turnTimeoutMs = config.turnTimeoutMs
         await this.workspaceResolver.ensureBase()
         if (generation !== this.generation) {
           return Result.fail('codex client start superseded')
@@ -280,7 +277,6 @@ export class CodexClient {
     this.loginStarted = false
     this.loginEvent = undefined
     this.turnIdByThreadId.clear()
-    this.clearTurnTimeouts()
     this.liveItems.clear()
     this.threads.clear()
     const stopPromise = (async (): Promise<Result<void>> => {
@@ -627,7 +623,6 @@ export class CodexClient {
         if (threadId && turnId) {
           this.liveItems.clearThread(threadId)
           this.turnIdByThreadId.set(threadId, turnId)
-          this.scheduleTurnTimeout(threadId, turnId)
           this.emitMessage({
             thread: this.messageThread(threadId),
             turnId,
@@ -725,7 +720,6 @@ export class CodexClient {
       case 'thread/closed': {
         const threadId = readString(data, 'threadId')
         if (threadId) {
-          this.clearTurnTimeout(threadId)
           this.liveItems.clearThread(threadId)
           this.removeThread(threadId)
         }
@@ -740,7 +734,6 @@ export class CodexClient {
         const threadId = readString(data, 'threadId')
         const turnId = threadId ? this.turnIdByThreadId.get(threadId) : undefined
         if (threadId && turnId) {
-          this.clearTurnTimeout(threadId, turnId)
           this.emitMessage({
             thread: this.messageThread(threadId),
             turnId,
@@ -764,7 +757,6 @@ export class CodexClient {
     if (!threadId || !turnId) {
       return
     }
-    this.clearTurnTimeout(threadId, turnId)
     this.turnIdByThreadId.delete(threadId)
     this.upsertThread({
       id: threadId,
@@ -890,71 +882,6 @@ export class CodexClient {
     return this.runtimeResolver.resolve()
   }
 
-  private scheduleTurnTimeout(threadId: string, turnId: string): void {
-    this.clearTurnTimeout(threadId)
-    if (this.turnTimeoutMs <= 0) {
-      return
-    }
-    const timeout = setTimeout(() => {
-      void this.interruptTimedOutTurn(threadId, turnId)
-    }, this.turnTimeoutMs)
-    this.turnTimeoutByThreadId.set(threadId, {
-      turnId,
-      timeout
-    })
-  }
-
-  private async interruptTimedOutTurn(threadId: string, turnId: string): Promise<void> {
-    const scheduled = this.turnTimeoutByThreadId.get(threadId)
-    if (!scheduled || scheduled.turnId !== turnId || this.turnIdByThreadId.get(threadId) !== turnId) {
-      return
-    }
-    this.clearTurnTimeout(threadId, turnId)
-    this.turnIdByThreadId.delete(threadId)
-    this.liveItems.clearTurn(threadId, turnId)
-    this.upsertThread({
-      id: threadId,
-      title: this.threads.get(threadId)?.title ?? '',
-      isWorking: false
-    })
-    this.emitMessage({
-      thread: this.messageThread(threadId),
-      turnId,
-      status: 'failed',
-      role: 'assistant',
-      text: `Codex 执行超过 ${Math.ceil(this.turnTimeoutMs / 1000)} 秒，已中断。`,
-      messages: []
-    })
-    try {
-      await this.request('turn/interrupt', {
-        threadId,
-        turnId
-      })
-    } catch (error) {
-      Logger.error('codex turn interrupt failed', error)
-      const session = this.session
-      if (session) {
-        this.failSession(session, error instanceof Error ? error : new Error(String(error)))
-      }
-    }
-  }
-
-  private clearTurnTimeout(threadId: string, turnId?: string): void {
-    const scheduled = this.turnTimeoutByThreadId.get(threadId)
-    if (!scheduled || (turnId && scheduled.turnId !== turnId)) {
-      return
-    }
-    clearTimeout(scheduled.timeout)
-    this.turnTimeoutByThreadId.delete(threadId)
-  }
-
-  private clearTurnTimeouts(): void {
-    for (const scheduled of this.turnTimeoutByThreadId.values()) {
-      clearTimeout(scheduled.timeout)
-    }
-    this.turnTimeoutByThreadId.clear()
-  }
-
   private rejectPending(session: CodexSession, error: Error): void {
     for (const pending of session.pendingRequests.values()) {
       clearTimeout(pending.timeout)
@@ -974,7 +901,6 @@ export class CodexClient {
     }
     this.session = undefined
     this.started = false
-    this.clearTurnTimeouts()
     this.liveItems.clear()
     this.supervisor.sessionEnded()
     this.resetLogin()
@@ -988,7 +914,6 @@ export class CodexClient {
     }
     this.session = undefined
     this.started = false
-    this.clearTurnTimeouts()
     this.liveItems.clear()
     this.supervisor.sessionEnded()
     this.resetLogin()
