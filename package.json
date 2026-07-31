@@ -57,7 +57,7 @@
     "publish": [
       {
         "provider": "generic",
-        "url": "https://next.firco.cn/api/download/release/codexio"
+        "url": "https://next.firco.cn/api/release/codexio"
       }
     ]
   },

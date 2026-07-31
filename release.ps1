@@ -68,7 +68,7 @@ function Assert-ReadmeChanged {
         [Parameter(Mandatory)] [string] $Readme
     )
     $platformQuery = [uri]::EscapeDataString($Platform)
-    $uri = "$BaseUrl/api/download/release/$AppKey/latest?platform=$platformQuery"
+    $uri = "$BaseUrl/api/release/$AppKey/latest?platform=$platformQuery"
     try {
         $response = Invoke-RestMethod -Uri $uri -Method Get -TimeoutSec 30 -NoProxy
     } catch {
@@ -97,8 +97,8 @@ if ([string]::IsNullOrWhiteSpace($BaseUrl)) {
 }
 $baseUrl = $BaseUrl.TrimEnd("/")
 Assert-ReadmeChanged -BaseUrl $baseUrl -AppKey $releaseInfo.appKey -Platform $releaseInfo.platform -Readme $readme
-$createUri = "$baseUrl/apim/download/release/$($releaseInfo.appKey)"
-$completeUri = "$baseUrl/apim/download/release/$($releaseInfo.appKey)/$($releaseInfo.version)/complete"
+$createUri = "$baseUrl/apim/release/$($releaseInfo.appKey)"
+$completeUri = "$baseUrl/apim/release/$($releaseInfo.appKey)/$($releaseInfo.version)/complete"
 
 Write-Step "读取版本: $($releaseInfo.version)"
 Write-Step "发布文件: $artifactPath"
@@ -137,4 +137,4 @@ $completeBody = @{
 }
 Invoke-NfircoApi -Uri $completeUri -Body $completeBody | Out-Null
 
-Write-Step "发布完成: $baseUrl/download/release/$($releaseInfo.appKey)"
+Write-Step "发布完成: $baseUrl/release/$($releaseInfo.appKey)"

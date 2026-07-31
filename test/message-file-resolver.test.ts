@@ -23,7 +23,7 @@ describe('message file resolver', () => {
     const fetcher = vi.fn()
     vi.stubGlobal('fetch', fetcher)
     const resolver = new MessageFileResolver(new FileStore(new CodexioMetadata({ rootPath })))
-    const text = '[Codexio](https://next.firco.cn/download/release/codexio/latest?platform=electron)'
+    const text = '[Codexio](https://next.firco.cn/release/codexio/latest?platform=electron)'
 
     const resolved = await resolver.resolve(createMessage({
       id: 'agent-link',
