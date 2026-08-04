@@ -10,6 +10,7 @@ export type CodexClientInput = {
   threadId?: string
   text: string
   files?: import('../../../value/Message.js').MessageFile[]
+  threadResolved?: (threadId: string) => void | Promise<void>
 }
 
 export type CodexClientTurn = {

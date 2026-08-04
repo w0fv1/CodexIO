@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { describe, expect, it } from 'vitest'
-import { WebSocket, WebSocketServer } from 'ws'
+import { RawData, WebSocket, WebSocketServer } from 'ws'
 import * as Lark from '@larksuiteoapi/node-sdk'
 import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
 import { resolveAvailableServerPort } from '../src/util/Network.js'
@@ -131,7 +131,8 @@ describe('server', () => {
     expect(webPageHtml).toContain('id="messages"')
     expect(webPageHtml).toContain('id="form"')
     expect(webPageHtml).toContain('id="threads"')
-    expect(webPageHtml).toContain('newWebThreadId')
+    expect(webPageHtml).toContain("type: 'thread.create'")
+    expect(webPageHtml).toContain("event === 'thread.created'")
     expect(webPageHtml).toContain("message.type === 'agent'")
     expect(webPageHtml).toContain('replaceHistory')
     expect(webPageHtml).toContain('replaceThreads')
@@ -271,8 +272,10 @@ describe('server', () => {
     const { baseUrl, listener } = await startTestServer()
     const socket = await openWebSocket(baseUrl)
     const messages = recordWebSocket(socket)
+    const webThreadId = await createWebThread(socket)
     socket.send(JSON.stringify({
-      webThreadId: 'web-thread',
+      type: 'message.send',
+      webThreadId,
       sourceMessageId: 'web-message',
       text: 'hello'
     }))
@@ -280,14 +283,14 @@ describe('server', () => {
     expect(messages[0]).toMatchObject({
       event: 'message',
       role: 'user',
-      webThreadId: 'web-thread',
+      webThreadId,
       thread: { id: expect.any(String), name: 'hello' },
       text: 'hello'
     })
     expect(messages[1]).toMatchObject({
       event: 'message',
       role: 'agent',
-      webThreadId: 'web-thread',
+      webThreadId,
       thread: { id: expect.any(String), name: 'hello' },
       text: 'hello'
     })
@@ -299,8 +302,10 @@ describe('server', () => {
     const { baseUrl, listener } = await startTestServer()
     const socket = await openWebSocket(baseUrl)
     const messages = recordWebSocket(socket)
+    const webThreadId = await createWebThread(socket)
     const payload = JSON.stringify({
-      webThreadId: 'web-thread-idempotent',
+      type: 'message.send',
+      webThreadId,
       sourceMessageId: 'web-message-idempotent',
       text: 'hello'
     })
@@ -318,12 +323,36 @@ describe('server', () => {
     await closeTestServer(listener)
   })
 
+  it('rejects a message for a Web thread id that the server did not issue', async () => {
+    const { baseUrl, listener } = await startTestServer()
+    const socket = await openWebSocket(baseUrl)
+    const messages = recordAllWebSocket(socket)
+
+    socket.send(JSON.stringify({
+      type: 'message.send',
+      webThreadId: 'caller-created-thread',
+      sourceMessageId: 'caller-created-message',
+      text: 'must be rejected'
+    }))
+    await waitForWebSocketMessages(messages, 1)
+
+    expect(messages[0]).toEqual({
+      event: 'error',
+      webThreadId: 'caller-created-thread',
+      message: 'web thread not found'
+    })
+    await closeWebSocket(socket)
+    await closeTestServer(listener)
+  })
+
   it('restores conversation history on a new web connection', async () => {
     const { baseUrl, listener } = await startTestServer()
     const socket = await openWebSocket(baseUrl)
     const messages = recordWebSocket(socket)
+    const webThreadId = await createWebThread(socket)
     socket.send(JSON.stringify({
-      webThreadId: 'web-thread-history',
+      type: 'message.send',
+      webThreadId,
       sourceMessageId: 'web-message-history',
       text: 'message'
     }))
@@ -334,7 +363,7 @@ describe('server', () => {
       event: 'history',
       threads: [
         {
-          id: 'web-thread-history',
+          id: webThreadId,
           thread: { id: expect.any(String), name: 'message' }
         }
       ],
@@ -342,14 +371,14 @@ describe('server', () => {
         {
           event: 'message',
           role: 'user',
-          webThreadId: 'web-thread-history',
+          webThreadId,
           thread: { id: expect.any(String), name: 'message' },
           text: 'message'
         },
         {
           event: 'message',
           role: 'agent',
-          webThreadId: 'web-thread-history',
+          webThreadId,
           thread: { id: expect.any(String), name: 'message' },
           text: 'message'
         }
@@ -360,14 +389,43 @@ describe('server', () => {
     await closeTestServer(listener)
   })
 
+  it('restores web thread metadata after stopping and reopening the app data directory', async () => {
+    const dataPath = await mkdtemp(join(tmpdir(), 'codexio-app-restart-'))
+    const firstServer = await startTestServer(dataPath)
+    const firstSocket = await openWebSocket(firstServer.baseUrl)
+    const webThreadId = await createWebThread(firstSocket)
+    await closeWebSocket(firstSocket)
+    await closeTestServer(firstServer.listener)
+
+    const secondServer = await startTestServer(dataPath)
+    const restored = await openRecordedWebSocket(secondServer.baseUrl)
+    await waitForWebSocketMessages(restored.messages, 1)
+
+    expect(restored.messages[0]).toMatchObject({
+      event: 'history',
+      threads: [{
+        id: webThreadId,
+        thread: {
+          id: expect.any(String),
+          name: '新对话'
+        }
+      }],
+      messages: []
+    })
+    await closeWebSocket(restored.socket)
+    await closeTestServer(secondServer.listener)
+  })
+
   it('broadcasts web user input and echo output', async () => {
     const { baseUrl, listener } = await startTestServer()
     const first = await openWebSocket(baseUrl)
     const second = await openWebSocket(baseUrl)
     const firstMessages = recordWebSocket(first)
     const secondMessages = recordWebSocket(second)
+    const webThreadId = await createWebThread(first)
     first.send(JSON.stringify({
-      webThreadId: 'web-thread-shared',
+      type: 'message.send',
+      webThreadId,
       sourceMessageId: 'web-message-shared',
       text: 'shared input'
     }))
@@ -376,28 +434,28 @@ describe('server', () => {
     expect(firstMessages[0]).toMatchObject({
       event: 'message',
       role: 'user',
-      webThreadId: 'web-thread-shared',
+      webThreadId,
       thread: { id: expect.any(String), name: 'shared input' },
       text: 'shared input'
     })
     expect(secondMessages[0]).toMatchObject({
       event: 'message',
       role: 'user',
-      webThreadId: 'web-thread-shared',
+      webThreadId,
       thread: { id: expect.any(String), name: 'shared input' },
       text: 'shared input'
     })
     expect(firstMessages[1]).toMatchObject({
       event: 'message',
       role: 'agent',
-      webThreadId: 'web-thread-shared',
+      webThreadId,
       thread: { id: expect.any(String), name: 'shared input' },
       text: 'shared input'
     })
     expect(secondMessages[1]).toMatchObject({
       event: 'message',
       role: 'agent',
-      webThreadId: 'web-thread-shared',
+      webThreadId,
       thread: { id: expect.any(String), name: 'shared input' },
       text: 'shared input'
     })
@@ -1177,12 +1235,12 @@ describe('server', () => {
   })
 })
 
-async function startTestServer(): Promise<{
+async function startTestServer(dataPath?: string): Promise<{
   baseUrl: string
   listener: HttpServer
 }> {
   const port = await resolveAvailableServerPort('127.0.0.1', 8787)
-  const dir = await mkdtemp(join(tmpdir(), 'codexio-app-'))
+  const dir = dataPath ?? await mkdtemp(join(tmpdir(), 'codexio-app-'))
   const configPath = join(dir, 'config.yaml')
   await writeFile(configPath, [
     'server:',
@@ -1223,7 +1281,8 @@ async function createTestCodexioApp(configer: Configer): Promise<{
   })
   const eventBus = new EventBus()
   const fileStore = new FileStore(metadata)
-  const threadRegistry = createThreadRegistry()
+  const threadRegistry = new ThreadRegistry(metadata)
+  await threadRegistry.init()
   const workspaceResolver = new ThreadWorkspaceResolver(configer, metadata)
   const codexClient = new CodexClient(configer, metadata, workspaceResolver)
   const webThreadManager = new WebThreadManager(threadRegistry)
@@ -1259,6 +1318,7 @@ async function createTestCodexioApp(configer: Configer): Promise<{
     await ignoreStopFailure(inputManager.stop())
     await ignoreStopFailure(agentManager.stop())
     await ignoreStopFailure(outputManager.stop())
+    await threadRegistry.close()
     return Result.successVoid()
   }
   eventBus.on(AppEvent.StopRequested, () => {
@@ -1321,6 +1381,34 @@ async function openRecordedWebSocket(baseUrl: string): Promise<{
     socket,
     messages
   }
+}
+
+async function createWebThread(socket: WebSocket): Promise<string> {
+  const requestId = randomUUID()
+  return new Promise<string>((resolve, reject) => {
+    const onMessage = (data: RawData) => {
+      const message = JSON.parse(data.toString()) as {
+        event?: string
+        requestId?: string
+        thread?: { id?: string }
+      }
+      if (message.event !== 'thread.created' || message.requestId !== requestId) {
+        return
+      }
+      socket.off('message', onMessage)
+      const webThreadId = message.thread?.id
+      if (!webThreadId) {
+        reject(new Error('created web thread id missing'))
+        return
+      }
+      resolve(webThreadId)
+    }
+    socket.on('message', onMessage)
+    socket.send(JSON.stringify({
+      type: 'thread.create',
+      requestId
+    }))
+  })
 }
 
 function recordWebSocket(socket: WebSocket): Array<Record<string, unknown>> {

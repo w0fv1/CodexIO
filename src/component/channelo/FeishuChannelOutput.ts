@@ -100,6 +100,7 @@ export class FeishuChannelOutput implements ChannelOutput {
       appSecret: this.config.appSecret
     })
     this.chatId = this.config.chatId?.trim() ?? ''
+    this.threadRegistry.reconcileFeishuChat(this.chatId)
     return true
   }
 
@@ -117,7 +118,15 @@ export class FeishuChannelOutput implements ChannelOutput {
       return Result.fail('feishu chat not ready')
     }
     try {
-      const registeredFeishuThreadId = this.feishuThreadId(message.thread.id)
+      const route = this.threadRegistry.getFeishuRoute(message.thread.id, this.chatId)
+      if (route.state === 'retired') {
+        Logger.info('feishu output skipped for retired conversation', {
+          ioThreadId: message.thread.id,
+          currentChatId: this.chatId
+        })
+        return Result.successVoid()
+      }
+      const registeredFeishuThreadId = route.state === 'active' ? route.threadId : undefined
       Logger.info('feishu openapi send started', {
         messageId: message.id,
         ioThreadId: message.thread.id,
@@ -302,7 +311,7 @@ export class FeishuChannelOutput implements ChannelOutput {
             returnedFeishuThreadId: repliedThreadId ?? null,
             registeredFeishuThreadId: registeredFeishuThreadId ?? null
           })
-          if (repliedThreadId && !this.feishuThreadId(message.thread.id)) {
+          if (repliedThreadId && route.state === 'unbound') {
             this.threadRegistry.bind(message.thread.id, {
               source: 'feishu',
               id: `${this.chatId}:thread:${repliedThreadId}`
@@ -340,7 +349,7 @@ export class FeishuChannelOutput implements ChannelOutput {
         if (createdMessageId) {
           rootMessageId = createdMessageId
         }
-        if (!registeredFeishuThreadId) {
+        if (route.state === 'unbound') {
           if (!createdThreadId) {
             throw new Error('feishu thread_id missing')
           }
@@ -386,9 +395,4 @@ export class FeishuChannelOutput implements ChannelOutput {
     return Result.successVoid()
   }
 
-  private feishuThreadId(ioThreadId: string): string | undefined {
-    const channelThreadId = this.threadRegistry.getChannelThreadIds(ioThreadId)
-      .find((item) => item.source === 'feishu' && item.id.includes(':thread:'))
-    return channelThreadId?.id.split(':thread:').at(1)?.trim()
-  }
 }

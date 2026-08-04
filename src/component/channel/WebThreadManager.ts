@@ -42,6 +42,11 @@ export class WebThreadManager {
   constructor(
     @inject(ThreadRegistry) private readonly threadRegistry: ThreadRegistry
   ) {
+    this.syncThreads()
+    this.threadRegistry.on('changed', () => {
+      this.syncThreads()
+      this.emitThreads()
+    })
     this.threadRegistry.on('renamed', (thread) => {
       let changed = false
       for (const webThread of this.threads.values()) {
@@ -69,12 +74,29 @@ export class WebThreadManager {
     }
   }
 
-  appendMessage(message: Message, webThreadId?: string): WebThreadMessage {
+  createThread(): WebThread {
+    const identity = this.threadRegistry.createWebThread()
+    const thread = this.threads.get(identity.id)
+    if (!thread) {
+      throw new Error(`web thread projection not found: ${identity.id}`)
+    }
+    return {
+      ...thread,
+      thread: { ...thread.thread }
+    }
+  }
+
+  hasThread(webThreadId: string): boolean {
+    return this.threads.has(webThreadId.trim())
+  }
+
+  appendMessage(message: Message): WebThreadMessage {
     const existing = this.messages.get(message.id)
     if (existing) {
       return existing
     }
-    const targetWebThreadId = webThreadId?.trim() || this.displayThreadId(message.thread.id)
+    const canonicalThread = this.threadRegistry.ensure(message.thread.id, message.thread.name)
+    const targetWebThreadId = this.displayThreadId(canonicalThread.id)
     let thread = this.threads.get(targetWebThreadId)
     if (!thread) {
       thread = {
@@ -145,8 +167,35 @@ export class WebThreadManager {
   }
 
   private displayThreadId(ioThreadId: string): string {
-    return this.threadRegistry.getChannelThreadIds(ioThreadId)
-      .find((item) => item.source === 'web')?.id ?? `io:${ioThreadId}`
+    const webThreadId = this.threadRegistry.getWebThreadId(ioThreadId)
+    if (!webThreadId) {
+      throw new Error(`web thread identity not found: ${ioThreadId}`)
+    }
+    return webThreadId
+  }
+
+  private syncThreads(): void {
+    const identities = this.threadRegistry.listWebThreads()
+    const activeIds = new Set(identities.map((identity) => identity.id))
+    for (const id of this.threads.keys()) {
+      if (!activeIds.has(id)) {
+        this.threads.delete(id)
+      }
+    }
+    for (const identity of identities) {
+      const existing = this.threads.get(identity.id)
+      if (existing) {
+        existing.thread = { ...identity.thread }
+        existing.updatedAt = Math.max(existing.updatedAt, identity.updatedAt)
+        continue
+      }
+      this.threads.set(identity.id, {
+        id: identity.id,
+        thread: { ...identity.thread },
+        isWorking: false,
+        updatedAt: identity.updatedAt
+      })
+    }
   }
 
   private emitThreads(): void {

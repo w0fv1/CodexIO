@@ -20,7 +20,7 @@ export class CodexioMetadata {
   readonly logPath: string
   readonly filePath: string
   readonly serverStatePath: string
-  readonly ioThreadStatePath: string
+  readonly threadIdentityStatePath: string
 
   constructor(options: CodexioMetadataOptions = {}) {
     this.rootPath = options.rootPath ?? (() => {
@@ -39,7 +39,7 @@ export class CodexioMetadata {
     this.logPath = join(this.dataPath, 'log')
     this.filePath = join(this.dataPath, 'file')
     this.serverStatePath = join(this.dataPath, 'state', `server-${pid}.json`)
-    this.ioThreadStatePath = join(this.dataPath, 'state', 'io-thread.json')
+    this.threadIdentityStatePath = join(this.dataPath, 'state', 'thread-identity.sqlite3')
   }
 
   readVersion(): string {

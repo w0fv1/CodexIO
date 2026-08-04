@@ -10,7 +10,7 @@ import { CodexClientEventMap } from '../src/component/agent/codex/CodexProtocol.
 import { CodexMessageAssembler } from '../src/component/agent/codex/CodexMessageAssembler.js'
 import { WebThreadManager } from '../src/component/channel/WebThreadManager.js'
 import { Result } from '../src/value/Result.js'
-import { Message } from '../src/value/Message.js'
+import { createMessage, Message } from '../src/value/Message.js'
 import { ChannelOutputManager } from '../src/component/channelo/ChannelOutputManager.js'
 
 describe('Codex agent ingestion', () => {
@@ -28,15 +28,15 @@ describe('Codex agent ingestion', () => {
     })
     await context.agent['mailbox'].drain()
 
-    expect(context.agent['ioThreadIdByThreadId'].size).toBe(0)
-    expect(context.agent['threadIdByIoThreadId'].size).toBe(0)
+    expect(context.registry.getIoThreadIdByAgentThread('codex', 'default', 'codex-thread')).toBeUndefined()
     await context.agent.stop()
   })
 
   it('serializes the production live listener without losing concurrent completions', async () => {
     const context = fixture()
     await context.agent.start(context.receiver)
-    context.agent['bindThread']('codex-thread', 'codex-thread')
+    context.registry.ensure('codex-thread')
+    context.registry.bindAgentThread('codex-thread', 'codex', 'default', 'codex-thread')
 
     for (let index = 0; index < 5; index += 1) {
       context.client.emitMessage(completedMessage(index))
@@ -56,7 +56,8 @@ describe('Codex agent ingestion', () => {
   it('publishes completed commentary as a channel progress message', async () => {
     const context = fixture()
     await context.agent.start(context.receiver)
-    context.agent['bindThread']('codex-thread', 'codex-thread')
+    context.registry.ensure('codex-thread')
+    context.registry.bindAgentThread('codex-thread', 'codex', 'default', 'codex-thread')
 
     context.client.emitMessage({
       thread: { id: 'codex-thread', name: 'Codexio thread' },
@@ -75,20 +76,50 @@ describe('Codex agent ingestion', () => {
     }))
     await context.agent.stop()
   })
+
+  it('resumes the persisted Codex thread after the registry is reopened', async () => {
+    const metadata = new CodexioMetadata({
+      dataPath: join(tmpdir(), `codexio-agent-restart-${randomUUID()}`)
+    })
+    const first = fixture(metadata)
+    await first.agent.receive(createMessage({
+      id: 'first',
+      thread: { id: 'io-thread', name: 'Persistent thread' },
+      role: 'user',
+      text: 'first'
+    }))
+
+    expect(first.client.sentThreadIds).toEqual([undefined])
+    await first.agent.stop()
+    await first.registry.close()
+
+    const second = fixture(metadata)
+    await second.agent.receive(createMessage({
+      id: 'second',
+      thread: { id: 'io-thread', name: 'Persistent thread' },
+      role: 'user',
+      text: 'second'
+    }))
+
+    expect(second.client.sentThreadIds).toEqual(['new-codex-thread'])
+    await second.agent.stop()
+    await second.registry.close()
+  })
 })
 
-function fixture(): {
+function fixture(metadata = new CodexioMetadata({
+  dataPath: join(tmpdir(), `codexio-agent-ingestion-${randomUUID()}`)
+})): {
   agent: CodexAgent
   client: RecordingCodexClient
+  registry: ThreadRegistry
   web: WebThreadManager
   events: Message[]
   receiver: {
     receiveAgentOutput: (message: Message) => Promise<Result<void>>
   }
 } {
-  const registry = new ThreadRegistry(new CodexioMetadata({
-    dataPath: join(tmpdir(), `codexio-agent-ingestion-${randomUUID()}`)
-  }))
+  const registry = new ThreadRegistry(metadata)
   const web = new WebThreadManager(registry)
   const events: Message[] = []
   const outputManager = {
@@ -111,7 +142,7 @@ function fixture(): {
   }
   Reflect.set(agent, 'outputReceiver', receiver)
   assembler.start(receiver)
-  return { agent, client, web, events, receiver }
+  return { agent, client, registry, web, events, receiver }
 }
 
 function completedMessage(index: number): CodexClientMessage {
@@ -130,6 +161,7 @@ function completedMessage(index: number): CodexClientMessage {
 }
 
 class RecordingCodexClient {
+  readonly sentThreadIds: Array<string | undefined> = []
   private readonly listeners = new Map<keyof CodexClientEventMap, Set<(...args: never[]) => unknown>>()
 
   on<K extends keyof CodexClientEventMap>(event: K, listener: CodexClientEventMap[K]): () => void {
@@ -151,9 +183,19 @@ class RecordingCodexClient {
     return Result.success(true)
   }
 
-  async send(input: { threadId?: string }): Promise<Result<{ threadId: string, turnId: string }>> {
+  async identityScope(): Promise<string> {
+    return 'default'
+  }
+
+  async send(input: {
+    threadId?: string
+    threadResolved?: (threadId: string) => void | Promise<void>
+  }): Promise<Result<{ threadId: string, turnId: string }>> {
+    this.sentThreadIds.push(input.threadId)
+    const threadId = input.threadId ?? 'new-codex-thread'
+    await input.threadResolved?.(threadId)
     return Result.success({
-      threadId: input.threadId ?? 'new-codex-thread',
+      threadId,
       turnId: 'turn'
     })
   }

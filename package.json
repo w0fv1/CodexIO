@@ -1,7 +1,7 @@
 {
   "name": "codexio",
   "private": true,
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "Thin Electron tray wrapper for the Codexio local channel bridge.",
   "author": "w0fv1",
   "type": "module",
@@ -12,7 +12,7 @@
     "bundle": "tsup src/CodexioApplication.ts --format esm --platform node --target node22 --out-dir bundle --no-splitting --sourcemap --clean",
     "dev": "tsx src/CodexioApplication.ts",
     "electron:dev": "pnpm build && electron .",
-    "test": "vitest run --pool=threads --dir test",
+    "test": "vitest run --config tsconfig.json --pool=threads --dir test",
     "lint": "tsc -p tsconfig.json --noEmit",
     "package:windows": "node scripts/package-windows.mjs",
     "release": "pnpm package:windows"

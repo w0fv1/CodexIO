@@ -14,8 +14,7 @@ export class CodexAgent implements Agent {
   readonly type = 'codex'
   private started = false
   private loginIoThreadId?: string
-  private readonly threadIdByIoThreadId = new Map<string, string>()
-  private readonly ioThreadIdByThreadId = new Map<string, string>()
+  private agentScope?: string
   private readonly lastOccurredAtByThreadId = new Map<string, number>()
   private readonly disposers: Array<() => void> = []
   private readonly mailbox = new KeyedSerialQueue()
@@ -49,6 +48,7 @@ export class CodexAgent implements Agent {
       if (generation !== this.lifecycleGeneration) {
         return Result.fail('codex agent start superseded')
       }
+      this.agentScope = await this.client.identityScope()
       this.disposers.push(
         this.client.on('message', (message) => {
           void this.mailbox.run(message.thread.id, () => this.receiveCodexMessage(message)).catch((error) => {
@@ -113,7 +113,8 @@ export class CodexAgent implements Agent {
     if (!loggedIn.data) {
       return Result.successVoid()
     }
-    const mappedThreadId = this.threadIdByIoThreadId.get(message.thread.id)
+    const agentScope = this.requireAgentScope()
+    const mappedThreadId = this.threadRegistry.getAgentThreadId(message.thread.id, this.type, agentScope)
     Logger.info('codex agent routing channel message', {
       messageId: message.id,
       ioThreadId: message.thread.id,
@@ -124,13 +125,18 @@ export class CodexAgent implements Agent {
       thread: message.thread,
       threadId: mappedThreadId,
       text: message.text,
-      files: message.files
+      files: message.files,
+      threadResolved: (threadId) => {
+        this.threadRegistry.bindAgentThread(message.thread.id, this.type, agentScope, threadId)
+        Logger.info('codex agent bound thread identity', {
+          ioThreadId: message.thread.id,
+          threadId,
+          agentScope
+        })
+      }
     })
     if (sent.isFailed) {
       return Result.fail(sent.message)
-    }
-    if (sent.data) {
-      this.bindThread(message.thread.id, sent.data.threadId)
     }
     Logger.info('codex agent received channel message', {
       ioThreadId: message.thread.id,
@@ -154,8 +160,7 @@ export class CodexAgent implements Agent {
       const stopped = await this.client.stop()
       await this.mailbox.drain()
       this.loginIoThreadId = undefined
-      this.threadIdByIoThreadId.clear()
-      this.ioThreadIdByThreadId.clear()
+      this.agentScope = undefined
       this.lastOccurredAtByThreadId.clear()
       this.messageAssembler.clear()
       this.outputReceiver = undefined
@@ -276,7 +281,9 @@ export class CodexAgent implements Agent {
   }
 
   private receiveCodexThread(thread: CodexClientThread): void {
-    const ioThreadId = this.ioThreadIdByThreadId.get(thread.id)
+    const ioThreadId = this.agentScope
+      ? this.threadRegistry.getIoThreadIdByAgentThread(this.type, this.agentScope, thread.id)
+      : undefined
     if (!ioThreadId || thread.deleted || !thread.title.trim()) {
       return
     }
@@ -284,7 +291,9 @@ export class CodexAgent implements Agent {
   }
 
   private resolveThread(agentThread: CodexClientMessage['thread']): Message['thread'] | undefined {
-    const ioThreadId = this.ioThreadIdByThreadId.get(agentThread.id)
+    const ioThreadId = this.agentScope
+      ? this.threadRegistry.getIoThreadIdByAgentThread(this.type, this.agentScope, agentThread.id)
+      : undefined
     if (!ioThreadId) {
       return undefined
     }
@@ -310,18 +319,11 @@ export class CodexAgent implements Agent {
     return error.message
   }
 
-  private bindThread(ioThreadId: string, threadId: string): void {
-    const previousThreadId = this.threadIdByIoThreadId.get(ioThreadId)
-    const previousIoThreadId = this.ioThreadIdByThreadId.get(threadId)
-    this.threadIdByIoThreadId.set(ioThreadId, threadId)
-    this.ioThreadIdByThreadId.set(threadId, ioThreadId)
-    Logger.info('codex agent bound thread identity', {
-      ioThreadId,
-      threadId,
-      previousThreadId: previousThreadId ?? null,
-      previousIoThreadId: previousIoThreadId ?? null,
-      changed: previousThreadId !== threadId || previousIoThreadId !== ioThreadId
-    })
+  private requireAgentScope(): string {
+    if (!this.agentScope) {
+      throw new Error('codex agent scope not initialized')
+    }
+    return this.agentScope
   }
 
   private nextOccurredAt(threadId: string): number {

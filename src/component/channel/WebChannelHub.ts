@@ -10,12 +10,23 @@ import { Result } from '../../value/Result.js'
 import { ChannelInputReceiver } from '../../controller/channeli/ChannelInput.js'
 import { WebThreadManager } from './WebThreadManager.js'
 
+const WebSocketCreateThreadSchema = z.object({
+  type: z.literal('thread.create'),
+  requestId: z.string().min(1)
+})
+
 const WebSocketInputSchema = z.object({
+  type: z.literal('message.send'),
   webThreadId: z.string().min(1),
   sourceMessageId: z.string().min(1),
   text: z.string().default(''),
   files: z.array(z.string()).default([])
 })
+
+const WebSocketRequestSchema = z.discriminatedUnion('type', [
+  WebSocketCreateThreadSchema,
+  WebSocketInputSchema
+])
 
 @injectable()
 export class WebChannelHub {
@@ -131,7 +142,7 @@ export class WebChannelHub {
         body = JSON.parse(raw)
       } catch {
       }
-      const parsed = WebSocketInputSchema.safeParse(body)
+      const parsed = WebSocketRequestSchema.safeParse(body)
       if (!parsed.success) {
         Logger.warn('web socket input invalid')
         socket.send(JSON.stringify({
@@ -140,8 +151,25 @@ export class WebChannelHub {
         }))
         return
       }
+      if (parsed.data.type === 'thread.create') {
+        const thread = this.webThreadManager.createThread()
+        socket.send(JSON.stringify({
+          event: 'thread.created',
+          requestId: parsed.data.requestId,
+          thread
+        }))
+        return
+      }
       const text = parsed.data.text
       const webThreadId = parsed.data.webThreadId.trim()
+      if (!this.webThreadManager.hasThread(webThreadId)) {
+        socket.send(JSON.stringify({
+          event: 'error',
+          webThreadId,
+          message: 'web thread not found'
+        }))
+        return
+      }
       let files: MessageFile[] = []
       try {
         files = this.fileStore.resolveMany(parsed.data.files)
@@ -197,8 +225,8 @@ export class WebChannelHub {
     })
   }
 
-  send(message: Message, webThreadId?: string): Result<void> {
-    this.webThreadManager.appendMessage(message, webThreadId)
+  send(message: Message): Result<void> {
+    this.webThreadManager.appendMessage(message)
     return Result.successVoid()
   }
 

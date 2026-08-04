@@ -320,6 +320,7 @@ describe('Codex agent lifecycle', () => {
     attachOutput(agent, assembler, outputManager)
     const first = agent.receive(receivedEvent('one'))
     const second = agent.receive(receivedEvent('two'))
+    await Promise.resolve()
 
     expect(client.startCalls).toBe(1)
     expect(client.listenerCount).toBe(4)
@@ -494,7 +495,15 @@ class GatedCodexClient {
     return Result.success(true)
   }
 
-  async send(input: { thread: { id: string } }): Promise<Result<{ threadId: string; turnId: string }>> {
+  async identityScope(): Promise<string> {
+    return 'default'
+  }
+
+  async send(input: {
+    thread: { id: string }
+    threadResolved?: (threadId: string) => void | Promise<void>
+  }): Promise<Result<{ threadId: string; turnId: string }>> {
+    await input.threadResolved?.(input.thread.id)
     return Result.success({
       threadId: input.thread.id,
       turnId: input.thread.id
@@ -522,7 +531,15 @@ class ReadyCodexClient {
     return Result.success(true)
   }
 
-  async send(input: { thread: { id: string } }): Promise<Result<{ threadId: string; turnId: string }>> {
+  async identityScope(): Promise<string> {
+    return 'default'
+  }
+
+  async send(input: {
+    thread: { id: string }
+    threadResolved?: (threadId: string) => void | Promise<void>
+  }): Promise<Result<{ threadId: string; turnId: string }>> {
+    await input.threadResolved?.(input.thread.id)
     return Result.success({
       threadId: input.thread.id,
       turnId: input.thread.id

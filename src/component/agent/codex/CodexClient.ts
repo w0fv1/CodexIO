@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import { createHash } from 'node:crypto'
 import { createInterface } from 'node:readline'
 import { dirname, isAbsolute } from 'node:path'
 import { inject, injectable } from 'inversify'
@@ -368,6 +369,7 @@ export class CodexClient {
       } else {
         threadId = (await this.resumeThread(normalizedThreadId, input.thread.name)).id
       }
+      await input.threadResolved?.(threadId)
       if (model === undefined || reasoningEffort === undefined) {
         [model, reasoningEffort] = await Promise.all([
           this.configer.get('agents.codex.model'),
@@ -433,6 +435,13 @@ export class CodexClient {
     } catch (error) {
       return failFromError(error)
     }
+  }
+
+  async identityScope(): Promise<string> {
+    const config = await this.readRuntimeConfig()
+    const home = config.codexHomePath?.trim() || process.env.CODEX_HOME?.trim() || 'system-default'
+    const mode = config.bundled ? 'bundled' : 'external'
+    return createHash('sha256').update(`${mode}\u0000${home}`).digest('base64url')
   }
 
   private async resumeThread(threadId: string, fallbackTitle: string): Promise<CodexClientThread> {

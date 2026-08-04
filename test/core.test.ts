@@ -1087,26 +1087,31 @@ describe('core', () => {
       role: 'agent',
       text: 'world'
     }))
-    expect(manager.snapshot()).toMatchObject({
+    const snapshot = manager.snapshot()
+    expect(snapshot).toMatchObject({
       threads: [
         {
-          id: 'io:external-io-thread',
+          id: expect.any(String),
           thread: { id: 'external-io-thread', name: '新对话' }
         }
       ],
       messages: [
         {
           role: 'user',
-          webThreadId: 'io:external-io-thread',
+          webThreadId: expect.any(String),
           text: 'hello'
         },
         {
           role: 'agent',
-          webThreadId: 'io:external-io-thread',
+          webThreadId: expect.any(String),
           text: 'world'
         }
       ]
     })
+    expect(snapshot.messages.map((message) => message.webThreadId)).toEqual([
+      snapshot.threads[0].id,
+      snapshot.threads[0].id
+    ])
   })
 
   it('continues an explicit Codex thread without requiring a process-local cache entry', async () => {
@@ -1562,7 +1567,7 @@ describe('core', () => {
     const manager = createThreadRegistry()
     manager.bind('io-thread-feishu', {
       source: 'feishu',
-      id: 'same-id'
+      id: 'chat:thread:same-id'
     })
     manager.bind('io-thread-email', {
       source: 'email',
@@ -1570,7 +1575,7 @@ describe('core', () => {
     })
     expect(manager.resolve({
       source: 'feishu',
-      id: 'same-id'
+      id: 'chat:thread:same-id'
     }).id).toBe('io-thread-feishu')
     expect(manager.resolve({
       source: 'email',
@@ -1592,97 +1597,6 @@ describe('core', () => {
       source: 'feishu',
       id: 'chat:thread:omt_1'
     }).id).toBe('io-thread')
-  })
-
-  it('restores io thread identities from disk', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'codexio-io-thread-'))
-    const metadata = new CodexioMetadata({
-      rootPath: testMetadata.rootPath,
-      dataPath: dir
-    })
-    const manager = new ThreadRegistry(metadata)
-    const ioThreadId = manager.resolve({
-      source: 'feishu',
-      id: 'chat-1:thread:omt_1'
-    }, 'Saved thread').id
-    manager.bind(ioThreadId, {
-      source: 'web',
-      id: 'web-thread'
-    })
-    await manager.flush()
-    const persisted = JSON.parse(await readFile(metadata.ioThreadStatePath, 'utf8')) as {
-      lastActiveThreadId?: string
-    }
-    expect(persisted.lastActiveThreadId).toBe(ioThreadId)
-    const restored = new ThreadRegistry(metadata)
-    await restored.init()
-    expect(restored.resolve({
-      source: 'feishu',
-      id: 'chat-1:thread:omt_1'
-    }).id).toBe(ioThreadId)
-    expect(restored.resolve({
-      source: 'web',
-      id: 'web-thread'
-    }).id).toBe(ioThreadId)
-    expect(restored.getLastActive()?.id).toBe(ioThreadId)
-  })
-
-  it('rejects duplicated io thread ids in persisted state', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'codexio-io-thread-duplicated-'))
-    const metadata = new CodexioMetadata({
-      rootPath: testMetadata.rootPath,
-      dataPath: dir
-    })
-    await mkdir(join(dir, 'state'), {
-      recursive: true
-    })
-    await writeFile(metadata.ioThreadStatePath, JSON.stringify({
-      version: 3,
-      threads: [
-        {
-          id: 'io-thread',
-          name: '新对话',
-          channelThreadIds: [
-            {
-              source: 'feishu',
-              id: 'chat-1:thread:omt_1'
-            }
-          ],
-          createdAt: 1,
-          updatedAt: 1
-        },
-        {
-          id: 'io-thread',
-          name: '新对话',
-          channelThreadIds: [
-            {
-              source: 'feishu',
-              id: 'chat-1:thread:omt_2'
-            }
-          ],
-          createdAt: 1,
-          updatedAt: 1
-        }
-      ]
-    }), 'utf8')
-    const manager = new ThreadRegistry(metadata)
-    await expect(manager.init()).rejects.toThrow('thread id duplicated in state')
-  })
-
-  it('reports io thread persist failures through flush', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'codexio-io-thread-failed-'))
-    const blockedDataPath = join(dir, 'data-file')
-    await writeFile(blockedDataPath, 'not a directory')
-    const metadata = new CodexioMetadata({
-      rootPath: testMetadata.rootPath,
-      dataPath: blockedDataPath
-    })
-    const manager = new ThreadRegistry(metadata)
-    manager.resolve({
-      source: 'feishu',
-      id: 'chat-1:thread:omt_1'
-    })
-    await expect(manager.flush()).rejects.toThrow()
   })
 
   it('broadcasts channel messages without storing conversation history', async () => {
@@ -2062,13 +1976,15 @@ describe('core', () => {
       get: async () => false
     } as unknown as Configer
     const assembler = createCodexMessageAssembler(outputManager)
+    const registry = createThreadRegistry()
     const agent = new CodexAgent(
       configer,
-      createThreadRegistry(),
+      registry,
       {} as CodexClient,
       assembler
     )
     attachCodexAgentOutput(agent, assembler, outputManager)
+    Reflect.set(agent, 'agentScope', 'default')
     const completedMessage = {
       thread: {
         id: 'external-thread',
@@ -2087,7 +2003,7 @@ describe('core', () => {
     await agent['receiveCodexMessage'](completedMessage)
     await agent['receiveCodexMessage'](completedMessage)
     expect(sent).toEqual([])
-    expect(agent['ioThreadIdByThreadId'].size).toBe(0)
+    expect(registry.getIoThreadIdByAgentThread('codex', 'default', 'external-thread')).toBeUndefined()
   })
 
   it('preserves known thread names and applies later Codex title updates', async () => {
@@ -2103,7 +2019,8 @@ describe('core', () => {
       assembler
     )
     attachCodexAgentOutput(agent, assembler, outputManager)
-    agent['bindThread']('io-thread', 'codex-thread')
+    Reflect.set(agent, 'agentScope', 'default')
+    registry.bindAgentThread('io-thread', 'codex', 'default', 'codex-thread')
     await agent['receiveCodexMessage']({
       thread: {
         id: 'codex-thread',

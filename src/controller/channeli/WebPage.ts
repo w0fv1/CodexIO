@@ -327,6 +327,7 @@ export const webPageHtml = `<!doctype html>
         copiedId: null,
         theme: 'light',
         nextId: 1,
+        pendingThreadCreates: {},
         init() {
           this.theme = this.getInitialTheme()
           this.messages = []
@@ -349,25 +350,21 @@ export const webPageHtml = `<!doctype html>
           }
         },
         createThread(activate) {
-          const thread = {
-            id: this.newWebThreadId(),
-            title: '',
-            messages: [],
-            unread: 0,
-            isWorking: false,
-            updatedAt: Date.now()
+          if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+            this.scheduleReconnect()
+            return Promise.resolve(null)
           }
-          this.threads.unshift(thread)
-          if (activate || !this.activeThreadId) {
-            this.switchThread(thread.id)
-          }
-          return thread
-        },
-        newWebThreadId() {
-          if (window.crypto && typeof window.crypto.randomUUID === 'function') {
-            return window.crypto.randomUUID()
-          }
-          return Date.now().toString(36) + '_' + Math.random().toString(36).slice(2)
+          const requestId = crypto.randomUUID()
+          return new Promise((resolve) => {
+            this.pendingThreadCreates[requestId] = {
+              activate,
+              resolve
+            }
+            this.socket.send(JSON.stringify({
+              type: 'thread.create',
+              requestId
+            }))
+          })
         },
         switchThread(id) {
           if (!id) {
@@ -402,12 +399,15 @@ export const webPageHtml = `<!doctype html>
           return thread.title || '新对话'
         },
         ensureThread(id) {
+          if (!id) {
+            throw new Error('web thread id is required')
+          }
           let thread = this.threads.find((item) => item.id === id)
           if (thread) {
             return thread
           }
           thread = {
-            id: id || this.newWebThreadId(),
+            id,
             title: '',
             messages: [],
             unread: 0,
@@ -512,6 +512,7 @@ export const webPageHtml = `<!doctype html>
             }
             this.connected = false
             this.connecting = false
+            this.finishPendingThreadCreates()
             this.scheduleReconnect()
           })
           socket.addEventListener('error', () => {
@@ -540,10 +541,9 @@ export const webPageHtml = `<!doctype html>
           try {
             message = JSON.parse(data)
           } catch {
-            if (!this.activeThreadId) {
-              this.createThread(true)
+            if (this.activeThreadId) {
+              this.append(this.activeThreadId, 'error', 'Invalid message')
             }
-            this.append(this.activeThreadId, 'error', 'Invalid message')
             return
           }
           if (message.event === 'ready') {
@@ -557,6 +557,27 @@ export const webPageHtml = `<!doctype html>
             this.replaceThreads(message.threads || [])
             return
           }
+          if (message.event === 'thread.created') {
+            const pending = this.pendingThreadCreates[message.requestId]
+            delete this.pendingThreadCreates[message.requestId]
+            const input = message.thread
+            if (!input || !input.id) {
+              if (pending) {
+                pending.resolve(null)
+              }
+              return
+            }
+            const thread = this.ensureThread(input.id)
+            thread.title = input.thread && typeof input.thread.name === 'string' ? input.thread.name : ''
+            thread.updatedAt = Number.isFinite(Number(input.updatedAt)) ? Number(input.updatedAt) : Date.now()
+            if ((pending && pending.activate) || !this.activeThreadId) {
+              this.switchThread(thread.id)
+            }
+            if (pending) {
+              pending.resolve(thread)
+            }
+            return
+          }
           if (message.event === 'error') {
             this.append(message.webThreadId || (message.thread && message.thread.id), 'error', message.message || 'Request failed')
             return
@@ -566,19 +587,23 @@ export const webPageHtml = `<!doctype html>
           }
           this.appendMessage(message, false)
         },
-        send() {
+        async send() {
           const value = this.draft.trim()
           if (!value && this.draftFiles.length === 0) {
             return
           }
           if (!this.activeThreadId) {
-            this.createThread(true)
+            const created = await this.createThread(true)
+            if (!created) {
+              return
+            }
           }
           if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
             this.scheduleReconnect()
             return
           }
           const payload = {
+            type: 'message.send',
             sourceMessageId: crypto.randomUUID(),
             text: value,
             files: this.draftFiles.map((file) => file.id)
@@ -593,6 +618,12 @@ export const webPageHtml = `<!doctype html>
             this.resizeInput()
             this.$refs.text.focus()
           })
+        },
+        finishPendingThreadCreates() {
+          for (const pending of Object.values(this.pendingThreadCreates)) {
+            pending.resolve(null)
+          }
+          this.pendingThreadCreates = {}
         },
         append(threadId, type, text, html, files) {
           const message = {

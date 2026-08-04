@@ -110,7 +110,10 @@ export class CodexioApplication {
       Logger.error('channel output stop failed', new Error(outputStopped.message))
     }
     await this.threadRegistry.flush().catch((error) => {
-      Logger.error('ioThread state flush failed', error)
+      Logger.error('thread identity state flush failed', error)
+    })
+    await this.threadRegistry.close().catch((error) => {
+      Logger.error('thread identity state close failed', error)
     })
     await rm(this.codexioMetadata.serverStatePath, {
       force: true
