@@ -1,7 +1,11 @@
+export const desktopSettingCommands = ['setStartAtLogin', 'setPreventSystemSleep'] as const
+
+export type DesktopSettingCommand = typeof desktopSettingCommands[number]
+
 export type DesktopRequest = {
   type: 'desktop.request'
   id: string
-  command: 'setStartAtLogin'
+  command: DesktopSettingCommand
   value: boolean
 }
 
@@ -18,7 +22,7 @@ export function isDesktopRequest(value: unknown): value is DesktopRequest {
   const message = value as Partial<DesktopRequest>
   return message.type === 'desktop.request'
     && typeof message.id === 'string'
-    && message.command === 'setStartAtLogin'
+    && desktopSettingCommands.some((command) => command === message.command)
     && typeof message.value === 'boolean'
 }
 

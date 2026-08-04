@@ -50,6 +50,7 @@ describe('core', () => {
     const config = createDefaultConfig()
     expect(config.app.id).toBe('')
     expect(config.app.startAtLogin).toBe(false)
+    expect(config.app.preventSystemSleep).toBe(true)
     expect(config.server.host).toBe('127.0.0.1')
     expect(config.agents.instruction).toContain('Markdown reference')
     expect(config.agents.instruction).toContain('previews without a file path')
@@ -74,6 +75,12 @@ describe('core', () => {
       description: '在已经引入 Codexio 的飞书群聊中，或与 Codexio 私聊时，输入 $bind ${app.id} 即可在飞书中绑定 Codexio。'
     })
     expect(configDescriptor.fields.find((field) => field.path === 'channeli.feishu.enabled')?.groupPath).toBe('channeli.feishu')
+    expect(configDescriptor.fields.find((field) => field.path === 'app.preventSystemSleep')).toEqual(expect.objectContaining({
+      groupPath: 'app',
+      label: '阻止系统睡眠',
+      type: 'boolean',
+      apply: '立即生效'
+    }))
   })
 
   it('does not expose cross-client Codex thread observation', () => {

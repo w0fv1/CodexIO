@@ -1,28 +1,41 @@
 import { randomUUID } from 'node:crypto'
 import { inject, injectable } from 'inversify'
 import { Configer } from '../Configer.js'
-import { DesktopRequest, isDesktopResponse } from '../../value/DesktopMessage.js'
+import { DesktopRequest, DesktopSettingCommand, isDesktopResponse } from '../../value/DesktopMessage.js'
+
+const desktopSettings = [
+  {
+    path: 'app.startAtLogin',
+    command: 'setStartAtLogin'
+  },
+  {
+    path: 'app.preventSystemSleep',
+    command: 'setPreventSystemSleep'
+  }
+] as const
 
 @injectable()
 export class DesktopIntegration {
   constructor(@inject(Configer) private readonly configer: Configer) {}
 
   async start(): Promise<void> {
-    await requestStartAtLogin(await this.configer.get('app.startAtLogin'))
-    this.configer.beforeChange('app.startAtLogin', async ({ currentValue }) => {
-      await requestStartAtLogin(currentValue)
-    })
+    for (const setting of desktopSettings) {
+      await requestDesktopSetting(setting.command, await this.configer.get(setting.path))
+      this.configer.beforeChange(setting.path, async ({ currentValue }) => {
+        await requestDesktopSetting(setting.command, currentValue)
+      })
+    }
   }
 }
 
-export async function requestStartAtLogin(value: boolean): Promise<void> {
+export async function requestDesktopSetting(command: DesktopSettingCommand, value: boolean): Promise<void> {
   if (!process.send) {
     return
   }
   const request: DesktopRequest = {
     type: 'desktop.request',
     id: randomUUID(),
-    command: 'setStartAtLogin',
+    command,
     value
   }
   await new Promise<void>((resolve, reject) => {

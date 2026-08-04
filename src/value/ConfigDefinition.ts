@@ -83,6 +83,14 @@ export const configDefinition = defineConfig({
       schema: z.boolean(),
       default: false
     }),
+    preventSystemSleep: field({
+      label: '阻止系统睡眠',
+      description: 'Codexio 运行期间阻止系统自动进入睡眠，允许屏幕关闭。仅桌面版生效。',
+      type: 'boolean',
+      apply: '立即生效',
+      schema: z.boolean(),
+      default: true
+    }),
     workspace: group({
       title: 'Workspace',
       description: 'Codexio Agent 使用的默认工作区。'

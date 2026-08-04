@@ -1,6 +1,7 @@
 app:
   id: ''
   startAtLogin: false
+  preventSystemSleep: true
   workspace:
     path: workspace
     perIoThread: false

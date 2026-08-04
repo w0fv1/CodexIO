@@ -8,6 +8,7 @@ import type { NativeImage, Tray as ElectronTray } from 'electron'
 import { CodexioUpdater } from './CodexioUpdater.js'
 import { DesktopLogExporter } from './component/desktop/DesktopLogExporter.js'
 import { LoginItemManager } from './component/desktop/LoginItemManager.js'
+import { PowerSaveBlockerManager } from './component/desktop/PowerSaveBlockerManager.js'
 import { DesktopResponse, isDesktopRequest } from './value/DesktopMessage.js'
 
 type ServerState = {
@@ -18,7 +19,7 @@ type ServerState = {
 
 type MenuIconName = 'message' | 'settings' | 'refresh' | 'fileText' | 'download' | 'power'
 
-const { app, clipboard, Menu, nativeImage, shell, Tray, Notification } = electron
+const { app, clipboard, Menu, nativeImage, powerSaveBlocker, shell, Tray, Notification } = electron
 const iconPath = 'assets/icon.png'
 
 class CodexioDesktop {
@@ -38,6 +39,7 @@ class CodexioDesktop {
   private serverFailureNotified = false
   private readonly loginItems = new LoginItemManager(app, app.isPackaged, process.platform, process.execPath)
   private readonly logExporter = new DesktopLogExporter(clipboard)
+  private readonly powerSaveBlockers = new PowerSaveBlockerManager(powerSaveBlocker)
   private readonly notifications = new Set<electron.Notification>()
 
   async start(): Promise<void> {
@@ -94,6 +96,7 @@ class CodexioDesktop {
     }
     app.on('before-quit', () => {
       this.quitting = true
+      this.powerSaveBlockers.stop()
       this.stopServer()
     })
   }
@@ -198,7 +201,18 @@ class CodexioDesktop {
         id: message.id
       }
       try {
-        this.loginItems.apply(message.value)
+        switch (message.command) {
+          case 'setStartAtLogin':
+            this.loginItems.apply(message.value)
+            break
+          case 'setPreventSystemSleep':
+            this.powerSaveBlockers.apply(message.value)
+            break
+          default: {
+            const unsupportedCommand: never = message.command
+            throw new Error(`unsupported desktop setting command: ${unsupportedCommand}`)
+          }
+        }
       } catch (error) {
         response.error = normalizeErrorMessage(error)
       }
