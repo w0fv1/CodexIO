@@ -171,6 +171,30 @@ describe('Codex client lifecycle', () => {
     expect(execaMock).toHaveBeenCalledTimes(1)
   })
 
+  it('reads the current account without proactively refreshing its token', async () => {
+    const process = fakeProcess()
+    execaMock.mockReturnValue(process.child)
+    const client = createClient()
+    expect((await client.start()).isFailed).toBe(false)
+
+    const login = client.login()
+    await vi.waitFor(() => {
+      expect(process.requests.some((request) => request.method === 'account/read')).toBe(true)
+    })
+    expect(process.requests.findLast((request) => request.method === 'account/read')?.params).toEqual({
+      refreshToken: false
+    })
+    process.respond('account/read', {
+      account: {
+        type: 'chatgpt'
+      }
+    })
+
+    expect((await login).data).toBe(true)
+    process.exit()
+    await client.stop()
+  })
+
   it('tracks live item phase and millisecond timestamps across notifications', () => {
     const client = createClient()
     const messages: CodexClientMessage[] = []
@@ -390,19 +414,25 @@ function createClient(options: {
   return client
 }
 
+type FakeRequest = {
+  id: number
+  method: string
+  params?: unknown
+}
+
 function fakeProcess(options: {
   exitAfterInitialize?: boolean
 } = {}): {
   child: never
   kill: ReturnType<typeof vi.fn>
-  requests: Array<{ id: number; method: string }>
+  requests: FakeRequest[]
   respond: (method: string, result: unknown) => void
   exit: (result?: { exitCode?: number; signal?: string }) => void
 } {
   const stdin = new PassThrough()
   const stdout = new PassThrough()
   const stderr = new PassThrough()
-  const requests: Array<{ id: number; method: string }> = []
+  const requests: FakeRequest[] = []
   let resolveExit!: (value: { exitCode?: number; signal?: string; stderr?: string }) => void
   const childPromise = new Promise<{ exitCode?: number; signal?: string; stderr?: string }>((resolve) => {
     resolveExit = resolve
@@ -416,11 +446,11 @@ function fakeProcess(options: {
   })
   stdin.on('data', (data: Buffer) => {
     for (const line of data.toString('utf8').trim().split('\n')) {
-      const request = JSON.parse(line) as { id?: number; method: string }
+      const request = JSON.parse(line) as { id?: number; method: string; params?: unknown }
       if (request.id === undefined) {
         continue
       }
-      requests.push({ id: request.id, method: request.method })
+      requests.push({ id: request.id, method: request.method, params: request.params })
       if (request.method === 'initialize') {
         queueMicrotask(() => {
           stdout.write(`${JSON.stringify({ id: request.id, result: {} })}\n`)

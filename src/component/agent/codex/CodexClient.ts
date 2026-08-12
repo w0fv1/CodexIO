@@ -302,7 +302,7 @@ export class CodexClient {
   async login(): Promise<Result<boolean>> {
     try {
       const account = await this.request('account/read', {
-        refreshToken: true
+        refreshToken: false
       })
       if (account && typeof account === 'object' && (account as Record<string, unknown>).account) {
         return Result.success(true)
