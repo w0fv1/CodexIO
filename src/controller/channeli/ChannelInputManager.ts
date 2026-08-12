@@ -110,7 +110,28 @@ export class ChannelInputManager implements ChannelInputReceiver {
       }
       const received = await this.agentManager.receive(message)
       if (received.isFailed) {
-        return Result.fail(received.message)
+        Logger.warn('agent input failed', {
+          source,
+          sourceMessageId,
+          ioThreadId: message.thread.id,
+          message: received.message
+        })
+        const reported = await this.outputManager.send(createMessage({
+          id: deriveMessageId('agent-input-error', message.id),
+          occurredAt: Math.max(Date.now(), message.occurredAt + 1),
+          thread: message.thread,
+          role: 'agent',
+          text: received.message
+        }), {
+          source,
+          sourceMessageId
+        })
+        if (reported.isFailed) {
+          return Result.fail(`${received.message}\n${reported.message}`)
+        }
+        return Result.success({
+          ioThreadId: message.thread.id
+        })
       }
       return Result.success({
         ioThreadId: message.thread.id

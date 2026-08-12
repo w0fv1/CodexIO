@@ -64,15 +64,46 @@ export type CodexClientMessage = CodexClientMessageBase & ({
   messages: []
 })
 
-export type CodexClientLoginEvent = {
+export type CodexClientLoginRequired = {
+  status: 'loginRequired'
+  loginId: string
   verificationUrl: string
   userCode: string
-  loginCompleted: boolean
+}
+
+export type CodexClientLoginState = {
+  status: 'authenticated'
+} | CodexClientLoginRequired
+
+export type CodexClientLoginCompletion = {
+  loginId: string
+  success: boolean
+  error?: string
 }
 
 export type CodexClientEventMap = {
   thread: (thread: CodexClientThread) => void
   message: (message: CodexClientMessage) => void
-  login: (login: CodexClientLoginEvent) => void
-  error: (error: Error) => void
+  login: (login: CodexClientLoginCompletion) => void
+}
+
+export function readString(value: unknown, key: string): string | null {
+  if (!value || typeof value !== 'object') {
+    return null
+  }
+  const item = (value as Record<string, unknown>)[key]
+  return typeof item === 'string' ? item : null
+}
+
+export function readEpochSecondsAsMilliseconds(value: unknown, key: string): number | undefined {
+  const item = readNumber(value, key)
+  return item === undefined ? undefined : item * 1000
+}
+
+export function readNumber(value: unknown, key: string): number | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+  const item = (value as Record<string, unknown>)[key]
+  return typeof item === 'number' ? item : undefined
 }

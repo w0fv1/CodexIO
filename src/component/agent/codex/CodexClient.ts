@@ -14,20 +14,28 @@ import { MessageThread } from '../../../value/Message.js'
 import { CodexRuntimeConfig, CodexRuntimeResolver } from './CodexRuntimeResolver.js'
 import { CodexSessionSupervisor } from './CodexSessionSupervisor.js'
 import { CodexLiveItemTracker } from './CodexLiveItemTracker.js'
+import { isCodexAuthenticationInvalidated } from './CodexAuthentication.js'
 import {
   CodexClientEventMap,
   CodexClientCompletedMessage,
   CodexClientInput,
-  CodexClientLoginEvent,
+  CodexClientLoginCompletion,
+  CodexClientLoginRequired,
+  CodexClientLoginState,
   CodexClientMessage,
   CodexClientThread,
-  CodexClientTurn
+  CodexClientTurn,
+  readEpochSecondsAsMilliseconds,
+  readNumber,
+  readString
 } from './CodexProtocol.js'
 
 export type {
   CodexClientCompletedMessage,
   CodexClientInput,
-  CodexClientLoginEvent,
+  CodexClientLoginCompletion,
+  CodexClientLoginRequired,
+  CodexClientLoginState,
   CodexClientMessage,
   CodexClientThread,
   CodexClientTurn
@@ -78,8 +86,8 @@ export class CodexClient {
   private started = false
   private startPromise?: Promise<Result<void>>
   private stopPromise?: Promise<Result<void>>
-  private loginStarted = false
-  private loginEvent?: CodexClientLoginEvent
+  private loginState?: CodexClientLoginRequired
+  private loginPromise?: Promise<Result<CodexClientLoginState>>
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
@@ -182,10 +190,6 @@ export class CodexClient {
             text,
             generation
           })
-          const error = readCodexStderrError(text)
-          if (error) {
-            this.emitError(error)
-          }
         })
         void child.then((result) => {
           Logger.info('codex app-server exited', {
@@ -238,7 +242,7 @@ export class CodexClient {
           }
           await this.terminateSession(session)
         }
-        return failFromError(error)
+        return Result.fromError(error)
       }
     })()
     this.startPromise = startPromise
@@ -275,8 +279,6 @@ export class CodexClient {
     }
     this.resetLogin()
     this.started = false
-    this.loginStarted = false
-    this.loginEvent = undefined
     this.turnIdByThreadId.clear()
     this.liveItems.clear()
     this.threads.clear()
@@ -299,48 +301,59 @@ export class CodexClient {
     return stopPromise
   }
 
-  async login(): Promise<Result<boolean>> {
-    try {
-      const account = await this.request('account/read', {
-        refreshToken: false
-      })
-      if (account && typeof account === 'object' && (account as Record<string, unknown>).account) {
-        return Result.success(true)
-      }
-    } catch (error) {
-      if (!this.isAuthenticationInvalidated(error)) {
-        return failFromError(error)
-      }
+  login(): Promise<Result<CodexClientLoginState>> {
+    if (this.loginState) {
+      return Promise.resolve(Result.success(this.loginState))
     }
+    if (this.loginPromise) {
+      return this.loginPromise
+    }
+    const loginPromise = (async (): Promise<Result<CodexClientLoginState>> => {
+      try {
+        const account = await this.request('account/read', {
+          refreshToken: false
+        })
+        if (account && typeof account === 'object' && (account as Record<string, unknown>).account) {
+          return Result.success({ status: 'authenticated' })
+        }
+      } catch (error) {
+        if (!isCodexAuthenticationInvalidated(error)) {
+          return Result.fail(Result.fromError(error).message)
+        }
+      }
 
-    if (this.loginStarted) {
-      return Result.success(false)
-    }
-
-    try {
-      const response = await this.request('account/login/start', {
-        type: 'chatgptDeviceCode'
-      })
-      if (!response || typeof response !== 'object') {
-        return Result.fail('codex login response not found')
+      try {
+        const response = await this.request('account/login/start', {
+          type: 'chatgptDeviceCode'
+        })
+        if (!response || typeof response !== 'object') {
+          return Result.fail('codex login response not found')
+        }
+        const loginId = readString(response, 'loginId')
+        const verificationUrl = readString(response, 'verificationUrl')
+        const userCode = readString(response, 'userCode')
+        if (!loginId || !verificationUrl || !userCode) {
+          return Result.fail('codex login response is incomplete')
+        }
+        const login: CodexClientLoginRequired = {
+          status: 'loginRequired',
+          loginId,
+          verificationUrl,
+          userCode
+        }
+        this.loginState = login
+        return Result.success(login)
+      } catch (error) {
+        return Result.fail(Result.fromError(error).message)
       }
-      const verificationUrl = (response as Record<string, unknown>).verificationUrl
-      const userCode = (response as Record<string, unknown>).userCode
-      if (typeof verificationUrl !== 'string' || typeof userCode !== 'string') {
-        return Result.fail('codex login URL not found')
+    })()
+    this.loginPromise = loginPromise
+    void loginPromise.finally(() => {
+      if (this.loginPromise === loginPromise) {
+        this.loginPromise = undefined
       }
-      const login = {
-        verificationUrl,
-        userCode,
-        loginCompleted: false
-      }
-      this.loginEvent = login
-      this.loginStarted = true
-      this.events.emit('login', login)
-      return Result.success(false)
-    } catch (error) {
-      return failFromError(error)
-    }
+    })
+    return loginPromise
   }
 
   async send(input: CodexClientInput): Promise<Result<CodexClientTurn>> {
@@ -416,7 +429,7 @@ export class CodexClient {
         threadId: readString(response, 'threadId') ?? readString(turn, 'threadId') ?? threadId,
         turnId
       }
-      this.turnIdByThreadId.set(threadId, turnId)
+      this.turnIdByThreadId.set(result.threadId, turnId)
       Logger.info('codex client turn started', {
         ioThreadId: input.thread.id,
         requestedThreadId: normalizedThreadId || null,
@@ -433,7 +446,7 @@ export class CodexClient {
       })
       return Result.success(result)
     } catch (error) {
-      return failFromError(error)
+      return Result.fail(Result.fromError(error).message)
     }
   }
 
@@ -582,14 +595,22 @@ export class CodexClient {
 
   private handleNotification(method: string, params: unknown): void {
     if (method === 'account/login/completed') {
-      this.loginStarted = false
-      if (this.loginEvent) {
-        this.loginEvent = {
-          ...this.loginEvent,
-          loginCompleted: true
-        }
-        this.events.emit('login', this.loginEvent)
+      const loginId = readString(params, 'loginId')
+      if (!loginId || loginId !== this.loginState?.loginId) {
+        Logger.warn('codex ignored unbound login completion', {
+          loginId
+        })
+        return
       }
+      const data = params as Record<string, unknown>
+      const error = readString(data, 'error')
+      const completion: CodexClientLoginCompletion = {
+        loginId,
+        success: data.success === true,
+        ...(error ? { error } : {})
+      }
+      this.loginState = undefined
+      this.events.emit('login', completion)
       return
     }
     if (!params || typeof params !== 'object') {
@@ -736,25 +757,34 @@ export class CodexClient {
       }
       case 'error': {
         const error = data.error
-        if (this.isAuthenticationInvalidated(error)) {
-          void this.login()
+        const threadId = readString(data, 'threadId')
+        const turnId = readString(data, 'turnId')
+        if (!threadId || !turnId || this.turnIdByThreadId.get(threadId) !== turnId) {
+          Logger.warn('codex ignored unbound turn error', {
+            threadId,
+            turnId
+          })
           return
         }
-        const threadId = readString(data, 'threadId')
-        const turnId = threadId ? this.turnIdByThreadId.get(threadId) : undefined
-        if (threadId && turnId) {
-          this.emitMessage({
-            thread: this.messageThread(threadId),
+        if (data.willRetry === true) {
+          Logger.warn('codex turn error will retry', {
+            threadId,
             turnId,
-            status: 'failed',
-            role: 'assistant',
-            text: readString(error, 'message') ?? 'codex notification error',
-            messages: []
+            message: readString(error, 'message')
           })
-          this.liveItems.clearTurn(threadId, turnId)
-          this.turnIdByThreadId.delete(threadId)
+          return
         }
-        this.emitError(new Error(readString(error, 'message') ?? 'codex notification error'))
+        this.emitMessage({
+          thread: this.messageThread(threadId),
+          turnId,
+          status: 'failed',
+          role: 'assistant',
+          text: readString(error, 'message') ?? 'codex notification error',
+          messages: []
+        })
+        this.liveItems.clearTurn(threadId, turnId)
+        this.turnIdByThreadId.delete(threadId)
+        return
       }
     }
   }
@@ -874,19 +904,6 @@ export class CodexClient {
     return Boolean(value && typeof value === 'object' && (value as Record<string, unknown>).type === 'active')
   }
 
-  private isAuthenticationInvalidated(error: unknown): boolean {
-    const values = collectValues(error).join('\n').toLowerCase()
-    return [
-      'refresh_token_invalidated',
-      'token_invalidated',
-      'refresh token was revoked',
-      'authentication token has been invalidated',
-      'session has ended',
-      'please log out and sign in again',
-      'please try signing in again'
-    ].some((value) => values.includes(value))
-  }
-
   private async readRuntimeConfig(): Promise<CodexRuntimeConfig> {
     return this.runtimeResolver.resolve()
   }
@@ -897,10 +914,6 @@ export class CodexClient {
       pending.reject(error)
     }
     session.pendingRequests.clear()
-  }
-
-  private emitError(error: unknown): void {
-    this.events.emit('error', error instanceof Error ? error : new Error(String(error)))
   }
 
   private handleChildClosed(session: CodexSession, error: Error): void {
@@ -962,62 +975,9 @@ export class CodexClient {
   }
 
   private resetLogin(): void {
-    this.loginStarted = false
-    this.loginEvent = undefined
+    this.loginState = undefined
+    this.loginPromise = undefined
   }
-}
-
-function readString(value: unknown, key: string): string | null {
-  if (!value || typeof value !== 'object') {
-    return null
-  }
-  const item = (value as Record<string, unknown>)[key]
-  return typeof item === 'string' ? item : null
-}
-
-function readEpochSecondsAsMilliseconds(value: unknown, key: string): number | undefined {
-  if (!value || typeof value !== 'object') {
-    return undefined
-  }
-  const item = (value as Record<string, unknown>)[key]
-  return typeof item === 'number' ? item * 1000 : undefined
-}
-
-function readNumber(value: unknown, key: string): number | undefined {
-  if (!value || typeof value !== 'object') {
-    return undefined
-  }
-  const item = (value as Record<string, unknown>)[key]
-  return typeof item === 'number' ? item : undefined
-}
-
-function collectValues(value: unknown): string[] {
-  if (!value) {
-    return []
-  }
-  if (typeof value === 'string') {
-    return [
-      value
-    ]
-  }
-  if (value instanceof Error) {
-    return [
-      value.name,
-      value.message,
-      value.stack ?? ''
-    ].filter((item) => item.length > 0)
-  }
-  if (typeof value !== 'object') {
-    return [
-      String(value)
-    ]
-  }
-  return Object.values(value as Record<string, unknown>).flatMap((item) => collectValues(item))
-}
-
-function failFromError<T>(error: unknown): Result<T> {
-  const failed = Result.fromError(error)
-  return Result.fail(failed.message)
 }
 
 function formatChildExit(result: CodexChildExit): string {
@@ -1030,32 +990,4 @@ function formatChildExit(result: CodexChildExit): string {
     ? `: ${result.stderr.trim()}`
     : ''
   return `codex app-server exited with ${reason}${stderr}`
-}
-
-function readCodexStderrError(text: string): Error | null {
-  const normalized = stripAnsi(text)
-  const lower = normalized.toLowerCase()
-  if (lower.includes('unsupported_country_region_territory')) {
-    return new Error([
-      'Codex 登录刷新失败：当前网络所在国家、地区或区域不受支持。',
-      '请开启可访问 ChatGPT/OpenAI 的代理后重试。'
-    ].join('\n'))
-  }
-  if (lower.includes('failed to refresh token')) {
-    return new Error([
-      'Codex 登录刷新失败。',
-      normalized.trim()
-    ].join('\n'))
-  }
-  if (lower.includes('mcp authorization is invalid')) {
-    return new Error('Codex MCP 授权无效，请重新登录 Codex。')
-  }
-  if (lower.includes('https://chatgpt.com/backend-api/ps/mcp') && lower.includes('http/request failed')) {
-    return new Error('Codex MCP 网络请求失败，请检查代理或网络连接。')
-  }
-  return null
-}
-
-function stripAnsi(value: string): string {
-  return value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
 }

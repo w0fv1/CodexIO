@@ -6,14 +6,14 @@ import { ThreadRegistry } from '../ThreadRegistry.js'
 import { Logger } from '../Logger.js'
 import { KeyedSerialQueue } from '../KeyedSerialQueue.js'
 import { Agent, AgentOutputReceiver } from './Agent.js'
-import { CodexClient, CodexClientLoginEvent, CodexClientMessage, CodexClientThread } from './codex/CodexClient.js'
+import { CodexClient, CodexClientLoginCompletion, CodexClientLoginRequired, CodexClientMessage, CodexClientThread } from './codex/CodexClient.js'
 import { codexCompletedMessageId, CodexMessageAssembler } from './codex/CodexMessageAssembler.js'
 
 @injectable()
 export class CodexAgent implements Agent {
   readonly type = 'codex'
   private started = false
-  private loginIoThreadId?: string
+  private readonly loginIoThreadIdsByLoginId = new Map<string, Set<string>>()
   private agentScope?: string
   private readonly lastOccurredAtByThreadId = new Map<string, number>()
   private readonly disposers: Array<() => void> = []
@@ -58,17 +58,9 @@ export class CodexAgent implements Agent {
         this.client.on('thread', (thread) => {
           this.receiveCodexThread(thread)
         }),
-        this.client.on('login', (login) => {
-          void this.receiveLogin(login).catch((error) => {
+        this.client.on('login', (completion) => {
+          void this.receiveLoginCompletion(completion).catch((error) => {
             Logger.error('codex login message failed', error)
-          })
-        }),
-        this.client.on('error', (error) => {
-          Logger.warn('codex agent client error', {
-            message: error.message
-          })
-          void this.receiveClientError(error).catch((receiveError) => {
-            Logger.error('codex client error message failed', receiveError)
           })
         })
       )
@@ -105,13 +97,15 @@ export class CodexAgent implements Agent {
     if (started.isFailed) {
       return started
     }
-    this.loginIoThreadId = message.thread.id
-    const loggedIn = await this.client.login()
-    if (loggedIn.isFailed) {
-      return Result.fail(loggedIn.message)
+    const login = await this.client.login()
+    if (login.isFailed) {
+      return Result.fail(await this.formatClientError(new Error(login.message)))
     }
-    if (!loggedIn.data) {
-      return Result.successVoid()
+    if (login.data?.status === 'loginRequired') {
+      const ioThreadIds = this.loginIoThreadIdsByLoginId.get(login.data.loginId) ?? new Set<string>()
+      ioThreadIds.add(message.thread.id)
+      this.loginIoThreadIdsByLoginId.set(login.data.loginId, ioThreadIds)
+      return this.receiveLoginRequired(message.thread.id, login.data)
     }
     const agentScope = this.requireAgentScope()
     const mappedThreadId = this.threadRegistry.getAgentThreadId(message.thread.id, this.type, agentScope)
@@ -136,7 +130,7 @@ export class CodexAgent implements Agent {
       }
     })
     if (sent.isFailed) {
-      return Result.fail(sent.message)
+      return Result.fail(await this.formatClientError(new Error(sent.message)))
     }
     Logger.info('codex agent received channel message', {
       ioThreadId: message.thread.id,
@@ -159,7 +153,7 @@ export class CodexAgent implements Agent {
     const stopPromise = (async (): Promise<Result<void>> => {
       const stopped = await this.client.stop()
       await this.mailbox.drain()
-      this.loginIoThreadId = undefined
+      this.loginIoThreadIdsByLoginId.clear()
       this.agentScope = undefined
       this.lastOccurredAtByThreadId.clear()
       this.messageAssembler.clear()
@@ -179,23 +173,36 @@ export class CodexAgent implements Agent {
     return stopPromise
   }
 
-  private async receiveLogin(login: CodexClientLoginEvent): Promise<void> {
-    const ioThreadId = this.loginIoThreadId ?? this.threadRegistry.getLastActive()?.id
-    if (!ioThreadId) {
-      return
-    }
-    await this.sendAgent(createMessage({
-      id: deriveMessageId('codex-login', ioThreadId),
+  private receiveLoginRequired(ioThreadId: string, login: CodexClientLoginRequired): Promise<Result<void>> {
+    return this.sendAgent(createMessage({
+      id: deriveMessageId('codex-login-required', login.loginId, ioThreadId),
       thread: this.threadRegistry.ensure(ioThreadId),
       role: 'agent',
-      text: login.loginCompleted
-        ? 'Codex 登录已完成。'
-        : [
-            'Codex 需要登录。',
-            `打开：${login.verificationUrl}`,
-            `验证码：${login.userCode}`
-          ].join('\n')
+      text: [
+        'Codex 需要登录。',
+        `打开：${login.verificationUrl}`,
+        `验证码：${login.userCode}`
+      ].join('\n')
     }))
+  }
+
+  private async receiveLoginCompletion(completion: CodexClientLoginCompletion): Promise<void> {
+    const ioThreadIds = this.loginIoThreadIdsByLoginId.get(completion.loginId)
+    if (!ioThreadIds) {
+      Logger.warn('codex ignored login completion without input context', {
+        loginId: completion.loginId
+      })
+      return
+    }
+    this.loginIoThreadIdsByLoginId.delete(completion.loginId)
+    await Promise.all([...ioThreadIds].map((ioThreadId) => this.sendAgent(createMessage({
+      id: deriveMessageId('codex-login-completed', completion.loginId, ioThreadId),
+      thread: this.threadRegistry.ensure(ioThreadId),
+      role: 'agent',
+      text: completion.success
+        ? 'Codex 登录已完成。'
+        : `Codex 登录失败。${completion.error ? `\n${completion.error}` : ''}`
+    }))))
   }
 
   private async receiveCodexMessage(message: CodexClientMessage): Promise<void> {
@@ -264,20 +271,6 @@ export class CodexAgent implements Agent {
         text: message.text
       }))
     }
-  }
-
-  private async receiveClientError(error: Error): Promise<void> {
-    const ioThreadId = this.loginIoThreadId ?? this.threadRegistry.getLastActive()?.id
-    if (!ioThreadId) {
-      return
-    }
-    const text = await this.formatClientError(error)
-    await this.sendAgent(createMessage({
-      id: deriveMessageId('codex-client-error', ioThreadId, text),
-      thread: this.threadRegistry.ensure(ioThreadId),
-      role: 'agent',
-      text
-    }))
   }
 
   private receiveCodexThread(thread: CodexClientThread): void {

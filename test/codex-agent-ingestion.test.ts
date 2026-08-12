@@ -6,7 +6,7 @@ import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
 import { ThreadRegistry } from '../src/component/ThreadRegistry.js'
 import { CodexAgent } from '../src/component/agent/CodexAgent.js'
 import { CodexClient, CodexClientMessage } from '../src/component/agent/codex/CodexClient.js'
-import { CodexClientEventMap } from '../src/component/agent/codex/CodexProtocol.js'
+import { CodexClientEventMap, CodexClientLoginCompletion, CodexClientLoginState } from '../src/component/agent/codex/CodexProtocol.js'
 import { CodexMessageAssembler } from '../src/component/agent/codex/CodexMessageAssembler.js'
 import { WebThreadManager } from '../src/component/channel/WebThreadManager.js'
 import { Result } from '../src/value/Result.js'
@@ -74,6 +74,44 @@ describe('Codex agent ingestion', () => {
       role: 'agent',
       text: '图片正在生成中。'
     }))
+    await context.agent.stop()
+  })
+
+  it('routes login results only to threads that requested that login', async () => {
+    const context = fixture()
+    context.registry.ensure('unrelated-thread')
+    context.client.requireLogin({
+      status: 'loginRequired',
+      loginId: 'login-1',
+      verificationUrl: 'https://auth.openai.com/codex/device',
+      userCode: 'CODE-1'
+    })
+
+    expect((await context.agent.receive(createMessage({
+      id: 'login-input',
+      thread: { id: 'requesting-thread', name: 'Requesting thread' },
+      role: 'user',
+      text: 'run'
+    }))).isFailed).toBe(false)
+
+    context.client.emitLogin({
+      loginId: 'login-1',
+      success: false,
+      error: 'device code expired'
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+
+    expect(context.events).toMatchObject([
+      {
+        thread: { id: 'requesting-thread' },
+        text: expect.stringContaining('Codex 需要登录')
+      },
+      {
+        thread: { id: 'requesting-thread' },
+        text: 'Codex 登录失败。\ndevice code expired'
+      }
+    ])
+    expect(context.events.some((message) => message.thread.id === 'unrelated-thread')).toBe(false)
     await context.agent.stop()
   })
 
@@ -163,6 +201,7 @@ function completedMessage(index: number): CodexClientMessage {
 class RecordingCodexClient {
   readonly sentThreadIds: Array<string | undefined> = []
   private readonly listeners = new Map<keyof CodexClientEventMap, Set<(...args: never[]) => unknown>>()
+  private loginState: CodexClientLoginState = { status: 'authenticated' }
 
   on<K extends keyof CodexClientEventMap>(event: K, listener: CodexClientEventMap[K]): () => void {
     const listeners = this.listeners.get(event) ?? new Set()
@@ -179,8 +218,8 @@ class RecordingCodexClient {
     return Result.successVoid()
   }
 
-  async login(): Promise<Result<boolean>> {
-    return Result.success(true)
+  async login() {
+    return Result.success(this.loginState)
   }
 
   async identityScope(): Promise<string> {
@@ -203,6 +242,16 @@ class RecordingCodexClient {
   emitMessage(message: CodexClientMessage): void {
     for (const listener of this.listeners.get('message') ?? []) {
       listener(message as never)
+    }
+  }
+
+  requireLogin(login: CodexClientLoginState): void {
+    this.loginState = login
+  }
+
+  emitLogin(completion: CodexClientLoginCompletion): void {
+    for (const listener of this.listeners.get('login') ?? []) {
+      listener(completion as never)
     }
   }
 }
