@@ -48,7 +48,7 @@ Codexio 可以作为无桌面容器服务运行。容器模式适合部署在一
 容器入口文件：
 
 ```bash
-cd app/_sub/codexio
+cd codexio
 cp container/.env.example container/.env
 podman-compose --env-file container/.env up -d --build
 ```

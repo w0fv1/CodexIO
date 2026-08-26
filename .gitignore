@@ -1,0 +1,11 @@
+node_modules/
+dist/
+bundle/
+release/
+release-portable/
+.tmp/
+.codexio/
+config.yaml
+container/.env
+coverage/
+*.log
