@@ -1,18 +1,28 @@
 param(
     [string] $AppDomain = "next.firco.cn",
     [string] $BaseUrl = "",
-    [string] $CredentialProfile = "prod",
+    [string] $AdminUsername = "",
+    [string] $AdminPassword = "",
     [string] $ReleaseInfoPath = ""
 )
 
 $ErrorActionPreference = "Stop"
 $scriptRoot = $PSScriptRoot
-$repoRoot = Split-Path -Path (Split-Path -Path (Split-Path -Path $scriptRoot -Parent) -Parent) -Parent
-Import-Module (Join-Path $repoRoot "script\NfircoBackendApiCredential.psm1") -Force
-$adminApiCredential = Read-NfircoBackendApiCredential -RepoRoot $repoRoot -Profile $CredentialProfile
-$adminApiUsername = [string]$adminApiCredential.Username
-$adminApiPassword = [string]$adminApiCredential.Password
-$adminApiHeaders = @{ Authorization = "Basic " + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("${adminApiUsername}:${adminApiPassword}")) }
+if ([string]::IsNullOrWhiteSpace($AdminUsername)) {
+    $AdminUsername = ([string](Read-Host '管理员账号')).Trim()
+}
+if ([string]::IsNullOrWhiteSpace($AdminPassword)) {
+    $securePassword = Read-Host '管理员密码' -AsSecureString
+    try {
+        $AdminPassword = [PSCredential]::new($AdminUsername, $securePassword).GetNetworkCredential().Password
+    } finally {
+        if ($null -ne $securePassword) { $securePassword.Dispose() }
+    }
+}
+if ([string]::IsNullOrWhiteSpace($AdminUsername) -or [string]::IsNullOrWhiteSpace($AdminPassword)) {
+    throw '管理员账号和密码不能为空'
+}
+$adminApiHeaders = @{ Authorization = "Basic " + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("${AdminUsername}:${AdminPassword}")) }
 
 function Write-Step {
     param([Parameter(Mandatory)] [string] $Text)
