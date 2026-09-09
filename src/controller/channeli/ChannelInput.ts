@@ -8,7 +8,6 @@ export type ChannelType = keyof CodexioConfig['channeli']
 
 export type ChannelInputMessage = {
   channelThreadId: ChannelThreadId
-  threadName?: string
   sourceMessageId: string
   text: string
   files?: MessageFile[]

@@ -1,4 +1,5 @@
 import { inject, injectable } from 'inversify'
+import { UserverAgentClient } from '@w0fv1/uclient-js/agent'
 import { createMessage, deriveMessageId, Message } from '../../value/Message.js'
 import { Result } from '../../value/Result.js'
 import { Configer } from '../Configer.js'
@@ -6,7 +7,7 @@ import { ThreadRegistry } from '../ThreadRegistry.js'
 import { Logger } from '../Logger.js'
 import { KeyedSerialQueue } from '../KeyedSerialQueue.js'
 import { Agent, AgentOutputReceiver } from './Agent.js'
-import { CodexClient, CodexClientLoginCompletion, CodexClientLoginRequired, CodexClientMessage, CodexClientThread } from './codex/CodexClient.js'
+import { CodexClient, CodexClientLoginCompletion, CodexClientLoginRequired, CodexClientMessage } from './codex/CodexClient.js'
 import { codexCompletedMessageId, CodexMessageAssembler } from './codex/CodexMessageAssembler.js'
 
 @injectable()
@@ -53,10 +54,9 @@ export class CodexAgent implements Agent {
         this.client.on('message', (message) => {
           void this.mailbox.run(message.thread.id, () => this.receiveCodexMessage(message)).catch((error) => {
             Logger.error('codex live message ingestion failed', error)
+            const thread = this.resolveThread(message.thread)
+            if (thread) this.outputReceiver?.completeAgentTurn?.(thread.id, String(error))
           })
-        }),
-        this.client.on('thread', (thread) => {
-          this.receiveCodexThread(thread)
         }),
         this.client.on('login', (completion) => {
           void this.receiveLoginCompletion(completion).catch((error) => {
@@ -105,7 +105,8 @@ export class CodexAgent implements Agent {
       const ioThreadIds = this.loginIoThreadIdsByLoginId.get(login.data.loginId) ?? new Set<string>()
       ioThreadIds.add(message.thread.id)
       this.loginIoThreadIdsByLoginId.set(login.data.loginId, ioThreadIds)
-      return this.receiveLoginRequired(message.thread.id, login.data)
+      const notified = await this.receiveLoginRequired(message.thread.id, login.data)
+      return notified.isFailed ? notified : Result.fail('Codex login required')
     }
     const agentScope = this.requireAgentScope()
     const mappedThreadId = this.threadRegistry.getAgentThreadId(message.thread.id, this.type, agentScope)
@@ -115,11 +116,21 @@ export class CodexAgent implements Agent {
       mappedThreadId: mappedThreadId ?? null,
       bindings: this.threadRegistry.getChannelThreadIds(message.thread.id)
     })
+    const connection = await this.configer.get('channeli.userver')
+    const binding = this.threadRegistry.getChannelThreadIds(message.thread.id).find(value => value.source === 'userver')
+    let mcpServers: import('./codex/CodexProtocol.js').CodexClientInput['mcpServers']
+    if (binding && connection?.mcpUrl) {
+      const identity = await new UserverAgentClient(connection).me()
+      const [origin, site, agent] = JSON.parse(binding.id) as [string, number, string]
+      if (origin !== new URL(connection.baseUrl).origin || site !== connection.websiteId || agent !== identity.uuid) return Result.fail('Userver Agent connection does not match thread')
+      mcpServers = { site: { url: connection.mcpUrl, http_headers: { Authorization: `Bearer ${connection.secret}` }, required: true } }
+    }
     const sent = await this.client.send({
       thread: message.thread,
       threadId: mappedThreadId,
       text: message.text,
       files: message.files,
+      mcpServers,
       threadResolved: (threadId) => {
         this.threadRegistry.bindAgentThread(message.thread.id, this.type, agentScope, threadId)
         Logger.info('codex agent bound thread identity', {
@@ -257,9 +268,11 @@ export class CodexAgent implements Agent {
           text: completed.text
         }
       }))
+      this.outputReceiver?.completeAgentTurn?.(thread.id)
       return
     }
     if (message.status === 'failed') {
+      this.outputReceiver?.completeAgentTurn?.(thread.id, message.text || 'Codex turn failed')
       this.messageAssembler.clearTurn(message.thread.id, message.turnId)
       if (message.text.trim().length === 0) {
         return
@@ -273,16 +286,6 @@ export class CodexAgent implements Agent {
     }
   }
 
-  private receiveCodexThread(thread: CodexClientThread): void {
-    const ioThreadId = this.agentScope
-      ? this.threadRegistry.getIoThreadIdByAgentThread(this.type, this.agentScope, thread.id)
-      : undefined
-    if (!ioThreadId || thread.deleted || !thread.title.trim()) {
-      return
-    }
-    this.threadRegistry.rename(ioThreadId, thread.title)
-  }
-
   private resolveThread(agentThread: CodexClientMessage['thread']): Message['thread'] | undefined {
     const ioThreadId = this.agentScope
       ? this.threadRegistry.getIoThreadIdByAgentThread(this.type, this.agentScope, agentThread.id)
@@ -290,10 +293,7 @@ export class CodexAgent implements Agent {
     if (!ioThreadId) {
       return undefined
     }
-    const currentThread = this.threadRegistry.ensure(ioThreadId)
-    return agentThread.name === '新对话' && currentThread.name !== '新对话'
-      ? currentThread
-      : this.threadRegistry.rename(ioThreadId, agentThread.name)
+    return this.threadRegistry.ensure(ioThreadId)
   }
 
   private async formatClientError(error: Error): Promise<string> {

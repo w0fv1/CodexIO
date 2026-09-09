@@ -43,6 +43,8 @@ class CodexioDesktop {
   private readonly notifications = new Set<electron.Notification>()
 
   async start(): Promise<void> {
+    app.disableHardwareAcceleration()
+    app.commandLine.appendSwitch('in-process-gpu')
     await app.whenReady()
     this.appRoot = app.getAppPath()
     app.setAppUserModelId('dev.w0fv1.codexio')

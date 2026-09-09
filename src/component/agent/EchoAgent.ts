@@ -28,7 +28,7 @@ export class EchoAgent implements Agent {
     if (!this.receiver) {
       return Result.fail('echo agent output receiver not ready')
     }
-    return this.receiver.receiveAgentOutput(createMessage({
+    const result = await this.receiver.receiveAgentOutput(createMessage({
       id: deriveMessageId('echo', message.id),
       occurredAt: Math.max(Date.now(), message.occurredAt + 1),
       thread: message.thread,
@@ -36,5 +36,7 @@ export class EchoAgent implements Agent {
       text: message.text,
       files: message.files
     }))
+    this.receiver.completeAgentTurn?.(message.thread.id, result.isFailed ? result.message : undefined)
+    return result
   }
 }

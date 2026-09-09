@@ -4,7 +4,7 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { RawData, WebSocket, WebSocketServer } from 'ws'
 import * as Lark from '@larksuiteoapi/node-sdk'
 import { CodexioMetadata } from '../src/component/CodexioMetadata.js'
@@ -21,14 +21,13 @@ import { MessageFileResolver } from '../src/component/MessageFileResolver.js'
 import { WebChannelInput } from '../src/controller/channeli/WebChannelInput.js'
 import { FeishuChannelInput } from '../src/controller/channeli/FeishuChannelInput.js'
 import { EmailChannelInput } from '../src/controller/channeli/EmailChannelInput.js'
-import { NfircoThreadInput } from '../src/controller/channeli/NfircoThreadInput.js'
+import { UserverThreadInput } from '../src/controller/channeli/UserverThreadInput.js'
 import { WebChannelHub } from '../src/component/channel/WebChannelHub.js'
 import { WebThreadManager } from '../src/component/channel/WebThreadManager.js'
 import { WebChannelOutput } from '../src/component/channelo/WebChannelOutput.js'
 import { FeishuChannelOutput } from '../src/component/channelo/FeishuChannelOutput.js'
 import { FeishuWebhookChannelOutput } from '../src/component/channelo/FeishuWebhookChannelOutput.js'
 import { EmailChannelOutput } from '../src/component/channelo/EmailChannelOutput.js'
-import { NfircoThreadOutput } from '../src/component/channelo/NfircoThreadOutput.js'
 import { deriveExternalDeliveryId } from '../src/component/channelo/ExternalDeliveryIdentity.js'
 import { EventBus } from '../src/component/EventBus.js'
 import { AppEvent } from '../src/value/Event.js'
@@ -46,7 +45,6 @@ import { ServerRuntime } from '../src/component/ServerRuntime.js'
 const testToken = 'test-message-token'
 const testMetadata = new CodexioMetadata()
 const testServerStops = new WeakMap<HttpServer, () => Promise<Result<void>>>()
-const nfircoAuthorization = `Basic ${Buffer.from('用户+Book:pass+密码', 'utf8').toString('base64')}`
 type FeishuWsClientOptions = ConstructorParameters<typeof Lark.WSClient>[0]
 
 class FakeFeishuWsClient {
@@ -795,444 +793,72 @@ describe('server', () => {
     await input.stop()
   })
 
-  it('reconnects nfirco thread input when the socket stops responding to pings', async () => {
-    const port = await resolveAvailableServerPort('127.0.0.1', 8787)
-    const httpServer = new HttpServer((request, response) => {
-      if (request.url === '/asset/readme.txt') {
-        response.setHeader('Content-Type', 'text/plain')
-        response.end('attachment body')
-        return
-      }
-      response.statusCode = 404
-      response.end()
-    })
-    const wsServer = new WebSocketServer({
-      server: httpServer,
-      path: '/api/threadio/ws',
-      autoPong: false
-    })
-    const sockets: WebSocket[] = []
-    const connectionHeaders: IncomingHttpHeaders[] = []
-    let connectionCount = 0
-    wsServer.on('connection', (socket, request) => {
-      sockets.push(socket)
-      connectionHeaders.push(request.headers)
-      connectionCount += 1
-      const currentConnection = connectionCount
-      socket.on('ping', (data) => {
-        if (currentConnection > 1) {
-          socket.pong(data)
-        }
-      })
-      socket.send(JSON.stringify({
-        type: 'ready',
-        accessId: 'self-access'
-      }))
-      socket.on('message', (data) => {
-        const message = JSON.parse(data.toString()) as Record<string, unknown>
-        if (message.type === 'thread.section.subscribe') {
-          socket.send(JSON.stringify({
-            type: 'thread.section.subscribed',
-            section: message.section
-          }))
-        }
-      })
-    })
-    httpServer.listen(port, '127.0.0.1')
-    await new Promise<void>((resolve, reject) => {
-      httpServer.once('listening', resolve)
-      httpServer.once('error', reject)
-    })
-    const dir = await mkdtemp(join(tmpdir(), 'codexio-nfirco-input-'))
-    const configPath = join(dir, 'config.yaml')
-    await writeFile(configPath, [
-      'server:',
-      '  host: 127.0.0.1',
-      'channeli:',
-      '  nfirco:',
-      '    enabled: true',
-      `    baseUrl: http://127.0.0.1:${port}`,
-      '    account: 用户+Book',
-      '    password: pass+密码',
-      '    section: section-1',
-      'channelo:',
-      '  web:',
-      '    enabled: true'
-    ].join('\n'))
-    const metadata = new CodexioMetadata({
-      rootPath: testMetadata.rootPath,
-      configPath
-    })
-    const input = new NfircoThreadInput(new Configer(metadata), new FileStore(metadata))
-    ;(input as unknown as { reconnectDelayMs: number }).reconnectDelayMs = 10
-    ;(input as unknown as { heartbeatIntervalMs: number }).heartbeatIntervalMs = 10
-    const received: Array<Record<string, unknown>> = []
-    await input.start({
-      receive: async (source, message) => {
-        received.push({
-          source,
-          text: message.text,
-          channelThreadId: message.channelThreadId.id,
-          files: (message.files ?? []).map((file) => ({
-            name: file.name,
-            mime: file.mime,
-            path: file.path
-          }))
-        })
-        return Result.success({
-          ioThreadId: 'io-thread'
-        })
-      }
-    })
-    const startedAt = Date.now()
-    while (connectionCount < 2) {
-      if (Date.now() - startedAt > 4000) {
-        throw new Error(`nfirco reconnect timeout: ${connectionCount}`)
-      }
-      await new Promise((resolve) => {
-        setTimeout(resolve, 5)
-      })
-    }
-    expect(connectionHeaders[0].authorization).toBe(nfircoAuthorization)
-    sockets[1].send(JSON.stringify({
-      type: 'thread.message.created',
-      eventId: 'event-1',
-      threadUuid: 'thread-1',
-      section: 'section-1',
-      authorAccessId: 'external-access',
-      messageUuid: 'message-1',
-      text: 'hello',
-      files: [
-        {
-          id: 1,
-          originalFilename: 'readme.txt',
-          mimeType: 'text/plain',
-          size: 15,
-          url: `http://127.0.0.1:${port}/asset/readme.txt`
-        }
-      ]
-    }))
-    sockets[1].send(JSON.stringify({
-      type: 'thread.created',
-      eventId: 'thread-2',
-      threadUuid: 'thread-2',
-      section: 'section-1',
-      authorAccessId: 'external-access',
-      text: 'thread body'
-    }))
-    sockets[1].send(JSON.stringify({
-      type: 'thread.message.created',
-      eventId: 'event-self',
-      threadUuid: 'thread-self',
-      section: 'section-1',
-      authorAccessId: 'self-access',
-      messageUuid: 'message-self',
-      text: 'self body'
-    }))
-    await waitForWebSocketMessages(received, 2)
-    expect(received).toEqual([
-      {
-        source: 'nfirco',
-        text: 'hello',
-        channelThreadId: 'thread-1',
-        files: [
-          {
-            name: 'readme.txt',
-            mime: 'text/plain',
-            path: expect.any(String)
-          }
-        ]
-      },
-      {
-        source: 'nfirco',
-        text: 'thread body',
-        channelThreadId: 'thread-2',
-        files: []
-      }
-    ])
-    const firstFiles = received[0].files as Array<{ path: string }>
-    expect(await readFile(firstFiles[0].path, 'utf8')).toBe('attachment body')
-    await input.stop()
-    for (const socket of sockets) {
-      if (socket.readyState !== WebSocket.CLOSED) {
-        socket.close()
-      }
-    }
-    await new Promise<void>((resolve) => {
-      wsServer.close(() => resolve())
-    })
-    await new Promise<void>((resolve) => {
-      httpServer.close(() => resolve())
-    })
-  })
 
-  it('uploads nfirco output files before sending thread messages', async () => {
-    const port = await resolveAvailableServerPort('127.0.0.1', 8787)
-    let uploadedBody = ''
-    let messageBody: Record<string, unknown> | undefined
-    let uploadHeaders: IncomingHttpHeaders | undefined
-    let messageHeaders: IncomingHttpHeaders | undefined
-    const httpServer = new HttpServer((request, response) => {
-      if (request.method === 'POST' && request.url === '/api/threadio/file/upload-url') {
-        uploadHeaders = request.headers
-        response.setHeader('Content-Type', 'application/json')
-        response.end(JSON.stringify({
-          code: '1',
-          data: {
-            id: 66,
-            filename: 'agent.png',
-            originalFilename: 'agent.png',
-            size: 10,
-            uploadUrl: `http://127.0.0.1:${port}/upload/66`,
-            downloadUrl: `http://127.0.0.1:${port}/download/66`
-          }
-        }))
-        return
-      }
-      if (request.method === 'PUT' && request.url === '/upload/66') {
-        request.on('data', (chunk) => {
-          uploadedBody += chunk.toString()
-        })
-        request.on('end', () => {
-          response.statusCode = 200
-          response.end()
-        })
-        return
-      }
-      if (request.method === 'POST' && request.url === '/api/threadio/thread/thread-1/message') {
-        messageHeaders = request.headers
-        let body = ''
-        request.on('data', (chunk) => {
-          body += chunk.toString()
-        })
-        request.on('end', () => {
-          messageBody = JSON.parse(body) as Record<string, unknown>
-          response.setHeader('Content-Type', 'application/json')
-          response.end(JSON.stringify({
-            code: '1',
-            data: {}
-          }))
-        })
-        return
-      }
-      response.statusCode = 404
-      response.end()
-    })
-    httpServer.listen(port, '127.0.0.1')
-    await new Promise<void>((resolve, reject) => {
-      httpServer.once('listening', resolve)
-      httpServer.once('error', reject)
-    })
-    const dir = await mkdtemp(join(tmpdir(), 'codexio-nfirco-output-'))
-    const configPath = join(dir, 'config.yaml')
-    await writeFile(configPath, [
-      'app:',
-      '  workspace:',
-      `    path: ${JSON.stringify(dir)}`,
-      'channelo:',
-      '  nfirco:',
-      '    enabled: true',
-      `    baseUrl: http://127.0.0.1:${port}`,
-      '    account: 用户+Book',
-      '    password: pass+密码',
-      '    section: section-1'
-    ].join('\n'))
-    const metadata = new CodexioMetadata({
-      rootPath: testMetadata.rootPath,
-      configPath
-    })
-    const fileStore = new FileStore(metadata)
-    const file = await fileStore.importBuffer({
-      buffer: Buffer.from('image-body'),
-      name: 'agent.png',
-      mime: 'image/png'
-    })
-    const threadRegistry = createThreadRegistry()
-    threadRegistry.bind('io-thread', {
-      source: 'nfirco',
-      id: 'thread-1'
-    })
-    const output = new NfircoThreadOutput(new Configer(metadata), threadRegistry)
-    expect(await output.start()).toBe(true)
-    const message = createMessage({
-      id: 'nfirco-existing-message',
-      thread: { id: 'io-thread', name: '看图' },
-      role: 'agent',
-      text: '看图',
-      files: [
-        file
-      ]
-    })
-    const result = await output.send(message, {
-      source: 'nfirco'
-    })
-    expect(result.isFailed).toBe(false)
-    expect(uploadedBody).toBe('image-body')
-    expect(uploadHeaders?.authorization).toBe(nfircoAuthorization)
-    expect(messageHeaders?.authorization).toBe(nfircoAuthorization)
-    expect(messageBody).toMatchObject({
-      requestId: deriveExternalDeliveryId('nfirco', message, 'message'),
-      text: '看图',
-      fileIds: [],
-      imageIds: [
-        66
-      ]
-    })
-    await new Promise<void>((resolve) => {
-      httpServer.close(() => resolve())
-    })
-  })
 
-  it('creates a nfirco thread before sending output when the io thread has no nfirco thread uuid', async () => {
-    const port = await resolveAvailableServerPort('127.0.0.1', 8787)
-    let uploadedBody = ''
-    let createdThreadBody: Record<string, unknown> | undefined
-    let messageBody: Record<string, unknown> | undefined
-    let threadHeaders: IncomingHttpHeaders | undefined
-    let messageHeaders: IncomingHttpHeaders | undefined
-    const httpServer = new HttpServer((request, response) => {
-      if (request.method === 'POST' && request.url === '/api/threadio/file/upload-url') {
-        response.setHeader('Content-Type', 'application/json')
-        response.end(JSON.stringify({
-          code: '1',
-          data: {
-            id: 66,
-            uploadUrl: `http://127.0.0.1:${port}/upload/66`
-          }
-        }))
-        return
-      }
-      if (request.method === 'PUT' && request.url === '/upload/66') {
-        request.on('data', (chunk) => {
-          uploadedBody += chunk.toString()
-        })
-        request.on('end', () => {
-          response.statusCode = 200
-          response.end()
-        })
-        return
-      }
-      if (request.method === 'POST' && request.url === '/api/threadio/thread') {
-        threadHeaders = request.headers
-        let body = ''
-        request.on('data', (chunk) => {
-          body += chunk.toString()
-        })
-        request.on('end', () => {
-          createdThreadBody = JSON.parse(body) as Record<string, unknown>
-          response.setHeader('Content-Type', 'application/json')
-          response.end(JSON.stringify({
-            code: '1',
-            data: {
-              threadUuid: 'thread-created',
-              section: 'section-1',
-              title: '看图'
-            }
-          }))
-        })
-        return
-      }
-      if (request.method === 'POST' && request.url === '/api/threadio/thread/thread-created/message') {
-        messageHeaders = request.headers
-        let body = ''
-        request.on('data', (chunk) => {
-          body += chunk.toString()
-        })
-        request.on('end', () => {
-          messageBody = JSON.parse(body) as Record<string, unknown>
-          response.setHeader('Content-Type', 'application/json')
-          response.end(JSON.stringify({
-            code: '1',
-            data: {}
-          }))
-        })
-        return
-      }
-      response.statusCode = 404
-      response.end()
-    })
-    httpServer.listen(port, '127.0.0.1')
-    await new Promise<void>((resolve, reject) => {
-      httpServer.once('listening', resolve)
-      httpServer.once('error', reject)
-    })
-    const dir = await mkdtemp(join(tmpdir(), 'codexio-nfirco-create-output-'))
-    const configPath = join(dir, 'config.yaml')
-    await writeFile(configPath, [
-      'app:',
-      '  workspace:',
-      `    path: ${JSON.stringify(dir)}`,
-      'channelo:',
-      '  nfirco:',
-      '    enabled: true',
-      `    baseUrl: http://127.0.0.1:${port}`,
-      '    account: 用户+Book',
-      '    password: pass+密码',
-      '    section: section-1'
-    ].join('\n'))
-    const metadata = new CodexioMetadata({
-      rootPath: testMetadata.rootPath,
-      configPath
-    })
-    const fileStore = new FileStore(metadata)
-    const file = await fileStore.importBuffer({
-      buffer: Buffer.from('image-body'),
-      name: 'agent.png',
-      mime: 'image/png'
-    })
-    const threadRegistry = createThreadRegistry()
-    const output = new NfircoThreadOutput(new Configer(metadata), threadRegistry)
-    expect(await output.start()).toBe(true)
-    const createMessageInput = createMessage({
-      id: 'nfirco-create-message',
-      thread: { id: 'io-thread', name: '看图' },
-      role: 'agent',
-      text: '看图',
-      files: [
-        file
-      ]
-    })
-    const createResult = await output.send(createMessageInput, {
-      source: 'feishu'
-    })
-    const followupMessage = createMessage({
-      id: 'nfirco-followup-message',
-      thread: { id: 'io-thread', name: '看图' },
-      role: 'agent',
-      text: '继续'
-    })
-    const messageResult = await output.send(followupMessage, {
-      source: 'feishu'
-    })
-    expect(createResult.isFailed).toBe(false)
-    expect(messageResult.isFailed).toBe(false)
-    expect(uploadedBody).toBe('image-body')
-    expect(threadHeaders?.authorization).toBe(nfircoAuthorization)
-    expect(messageHeaders?.authorization).toBe(nfircoAuthorization)
-    expect(createdThreadBody).toMatchObject({
-      requestId: deriveExternalDeliveryId('nfirco', createMessageInput, 'thread'),
-      section: 'section-1',
-      title: '看图',
-      text: '看图',
-      fileIds: [],
-      imageIds: [
-        66
-      ]
-    })
-    expect(messageBody).toMatchObject({
-      requestId: deriveExternalDeliveryId('nfirco', followupMessage, 'message'),
-      text: '继续'
-    })
-    expect(threadRegistry.getChannelThreadIds('io-thread')).toEqual([
-      {
-        source: 'nfirco',
-        id: 'thread-created'
-      }
-    ])
-    await new Promise<void>((resolve) => {
-      httpServer.close(() => resolve())
-    })
+})
+
+it('drives an Agent from read-only Userver WebSocket events and resumes its checkpoint', async () => {
+  const received = vi.spyOn(EchoAgent.prototype, 'receive')
+  const cursors: number[] = []
+  let writes = 0
+  let origin = ''
+  const service = createServer((request, response) => {
+    expect(request.headers.authorization).toBe('Bearer userver-site-secret')
+    if (request.method !== 'GET') writes++
+    const url = new URL(request.url!, 'http://localhost')
+    const data = url.pathname === '/subscription'
+      ? { url: origin.replace('http:', 'ws:') + '/live?ticket=test', expiresAt: new Date(Date.now() + 60000).toISOString(), websiteId: 7, threadUuid: null, userAccessId: 'owner', agentUuid: 'agent-1' }
+      : url.pathname.endsWith('/me')
+        ? { uuid: 'agent-1', ownerAccessId: 'owner', websiteId: 7, permission: 'READ_WRITE' }
+        : { uuid: 'thread-1', title: '协作', content: '继续验证实现', files: [{ id: 42, filename: 'restricted.zip', url: null }] }
+    response.setHeader('Content-Type', 'application/json')
+    response.end(JSON.stringify({ code: '1', data }))
   })
+  const sockets = new WebSocketServer({ server: service })
+  sockets.on('connection', (socket, request) => {
+    socket.on('message', () => { writes++ })
+    const after = Number(new URL(request.url!, 'http://localhost').searchParams.get('after'))
+    cursors.push(after)
+    for (const event of [
+      { messageUuid: 'message-1', cursor: 1, type: 'thread.message.created', threadUuid: 'thread-1', actorAccessId: 'human' },
+      { cursor: 2, type: 'thread.created', threadUuid: 'thread-2', actorAccessId: 'another-human' },
+      { cursor: 3, type: 'thread.message.created', threadUuid: 'thread-1', actorAgentUuid: 'agent-1' }
+    ]) if (event.cursor > after) socket.send(JSON.stringify(event))
+  })
+  await new Promise<void>(resolve => service.listen(0, '127.0.0.1', resolve))
+  const address = service.address() as { port: number }
+  origin = `http://127.0.0.1:${address.port}`
+  const dir = await mkdtemp(join(tmpdir(), 'codexio-userver-'))
+  const configPath = join(dir, 'config.yaml')
+  await writeFile(configPath, JSON.stringify({
+    app: { workspace: { path: dir } },
+    agents: { codex: { enabled: false }, echo: { enabled: true } },
+    channeli: { userver: { enabled: true, baseUrl: origin, subscriptionUrl: origin + '/subscription', mcpUrl: origin + '/mcp', websiteId: 7, secret: 'userver-site-secret' } }
+  }))
+  const configer = new Configer(new CodexioMetadata({ rootPath: testMetadata.rootPath, configPath }))
+  let app = await createTestCodexioApp(configer)
+  try {
+    await expect.poll(() => received.mock.calls.length).toBe(2)
+    const metadata = new CodexioMetadata({ rootPath: testMetadata.rootPath, configPath })
+    const check = new ThreadRegistry(metadata)
+    const key = JSON.stringify([origin, 7, 'agent-1', null])
+    await expect.poll(() => check.checkpoint(key).load()).toBe(3)
+    await check.close()
+    await app.stop()
+    app = await createTestCodexioApp(configer)
+    await expect.poll(() => cursors).toEqual([0, 3])
+    expect(received).toHaveBeenCalledTimes(2)
+    expect(JSON.stringify(received.mock.calls)).toContain('restricted.zip')
+    expect(JSON.stringify(received.mock.calls)).toContain('尚未下载')
+    expect(received.mock.calls[0][0].thread.id).not.toBe(received.mock.calls[1][0].thread.id)
+    expect(writes).toBe(0)
+  } finally {
+    await app.stop()
+    received.mockRestore()
+    for (const socket of sockets.clients) socket.terminate()
+    await new Promise<void>((resolve, reject) => sockets.close(error => error ? reject(error) : resolve()))
+    await new Promise<void>((resolve, reject) => service.close(error => error ? reject(error) : resolve()))
+  }
 })
 
 async function startTestServer(dataPath?: string): Promise<{
@@ -1294,21 +920,19 @@ async function createTestCodexioApp(configer: Configer): Promise<{
   const feishuOutput = new FeishuChannelOutput(configer, threadRegistry)
   const emailInput = new EmailChannelInput(configer)
   const emailOutput = new EmailChannelOutput(configer)
-  const nfircoInput = new NfircoThreadInput(configer, fileStore)
-  const nfircoOutput = new NfircoThreadOutput(configer, threadRegistry)
   const outputManager = new ChannelOutputManager(
     configer,
     threadRegistry,
     webOutput,
     feishuOutput,
     new FeishuWebhookChannelOutput(configer),
-    emailOutput,
-    nfircoOutput
+    emailOutput
   )
   const codexAgent = new CodexAgent(configer, threadRegistry, codexClient, new CodexMessageAssembler())
   const echoAgent = new EchoAgent()
   const agentManager = new AgentManager(configer, codexAgent, echoAgent, workspaceResolver, new MessageFileResolver(fileStore), outputManager)
-  const inputManager = new ChannelInputManager(configer, threadRegistry, outputManager, agentManager, new CommandExecutor(outputManager), webInput, feishuInput, emailInput, nfircoInput)
+  const userverInput = new UserverThreadInput(configer, fileStore, threadRegistry, agentManager)
+  const inputManager = new ChannelInputManager(configer, threadRegistry, outputManager, agentManager, new CommandExecutor(outputManager), webInput, feishuInput, emailInput, userverInput)
   const apiController = new CodexioApiController(configer, outputManager, fileStore, webHub, eventBus, metadata, serverRuntime)
   await outputManager.start()
   await agentManager.start()

@@ -9,6 +9,29 @@ import { FeishuChannelOutput } from '../src/component/channelo/FeishuChannelOutp
 import { createMessage } from '../src/value/Message.js'
 
 describe('thread identity persistence', () => {
+  it.each(['web', 'email', 'feishu', 'userver'] as const)('uses the first message prefix for %s and keeps it after restart', async source => {
+    const metadata = await createMetadata()
+    const before = new ThreadRegistry(metadata)
+    const key = { source, id: source === 'feishu' ? 'chat:thread:first-message-thread' : 'first-message-thread' }
+    const placeholder = before.resolve(key)
+    expect(placeholder.name).toBe('新对话')
+    expect(before.resolve(key, '一二三四五六七八九十甲乙丙丁').name).toBe('一二三四五六七八九十甲乙')
+    expect(before.resolve(key, '后来的消息').name).toBe('一二三四五六七八九十甲乙')
+    await before.close()
+    const after = new ThreadRegistry(metadata)
+    expect(after.resolve(key, '重启后的消息').name).toBe('一二三四五六七八九十甲乙')
+    await after.close()
+  })
+
+  it.each(['', '新对话', '😀一二三四五六七八九十甲乙'])('initializes a title exactly once even for %j', async text => {
+    const registry = new ThreadRegistry(await createMetadata())
+    const key = { source: 'web' as const, id: 'edge-case' }
+    const first = registry.resolve(key, text)
+    expect(first.name).toBe(text ? Array.from(text).slice(0, 12).join('') : '新对话')
+    expect(registry.resolve(key, 'another message').name).toBe(first.name)
+    await registry.close()
+  })
+
   it('creates authoritative web identities on the server', async () => {
     const registry = new ThreadRegistry(await createMetadata())
     await registry.init()
@@ -45,7 +68,7 @@ describe('thread identity persistence', () => {
       id: 'web-thread',
       thread: {
         id: thread.id,
-        name: 'Persistent thread'
+        name: 'Persistent t'
       }
     }])
     await after.close()

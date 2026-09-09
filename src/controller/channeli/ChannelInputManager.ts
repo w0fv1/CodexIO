@@ -12,7 +12,7 @@ import { CommandExecutor } from '../CommandExecutor.js'
 import { ChannelInput, ChannelInputMessage, ChannelInputReceiver, ChannelType } from './ChannelInput.js'
 import { EmailChannelInput } from './EmailChannelInput.js'
 import { FeishuChannelInput } from './FeishuChannelInput.js'
-import { NfircoThreadInput } from './NfircoThreadInput.js'
+import { UserverThreadInput } from './UserverThreadInput.js'
 import { WebChannelInput } from './WebChannelInput.js'
 
 @injectable()
@@ -32,13 +32,13 @@ export class ChannelInputManager implements ChannelInputReceiver {
     @inject(WebChannelInput) web: ChannelInput,
     @inject(FeishuChannelInput) feishu: ChannelInput,
     @inject(EmailChannelInput) email: ChannelInput,
-    @inject(NfircoThreadInput) nfirco: ChannelInput
+    @inject(UserverThreadInput) userver: ChannelInput
   ) {
     this.availableInputs = [
       web,
       feishu,
       email,
-      nfirco
+      userver
     ]
   }
 
@@ -71,8 +71,8 @@ export class ChannelInputManager implements ChannelInputReceiver {
       sourceMessageId
     }
     const messageId = deriveMessageId('channel', source, channelThreadId.source, channelThreadId.id, sourceMessageId)
-    return this.inbox.run(messageId, async () => {
-      const thread = this.threadRegistry.resolve(channelThreadId, input.threadName, input.text)
+    const process = async (): Promise<Result<ChannelInputReceiveResult>> => {
+      const thread = this.threadRegistry.resolve(channelThreadId, input.text)
       Logger.info('channel input resolved thread', {
         source,
         channelSource: channelThreadId.source,
@@ -129,14 +129,13 @@ export class ChannelInputManager implements ChannelInputReceiver {
         if (reported.isFailed) {
           return Result.fail(`${received.message}\n${reported.message}`)
         }
-        return Result.success({
-          ioThreadId: message.thread.id
-        })
+        return Result.fail(received.message)
       }
       return Result.success({
         ioThreadId: message.thread.id
       })
-    })
+    }
+    return source === 'userver' ? process() : this.inbox.run(messageId, process)
   }
 
   async stop(): Promise<Result<void>> {

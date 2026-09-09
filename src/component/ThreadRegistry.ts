@@ -8,7 +8,7 @@ import { MessageThread } from '../value/Message.js'
 import { CodexioMetadata } from './CodexioMetadata.js'
 import { Logger } from './Logger.js'
 
-export type IoThreadSource = 'web' | 'feishu' | 'email' | 'nfirco'
+export type IoThreadSource = 'web' | 'feishu' | 'email' | 'userver'
 
 export type ChannelThreadId = {
   source: IoThreadSource
@@ -56,7 +56,7 @@ type NormalizedChannelIdentity = {
   externalThreadId: string
 }
 
-const schemaVersion = 1
+const schemaVersion = 3
 
 @injectable()
 export class ThreadRegistry {
@@ -109,18 +109,11 @@ export class ThreadRegistry {
     }
   }
 
-  resolve(channelThreadId: ChannelThreadId, preferredName?: string, initialName?: string): MessageThread {
+  resolve(channelThreadId: ChannelThreadId, firstMessage?: string): MessageThread {
     const identity = normalizeChannelIdentity(channelThreadId)
     const existing = this.findByChannel(identity)
     if (existing) {
-      const resolvedName = preferredName?.trim()
-        ? preferredName
-        : existing.name === '新对话' && initialName?.trim()
-          ? initialName
-          : undefined
-      if (resolvedName) {
-        this.rename(existing.io_thread_id, resolvedName)
-      }
+      if (firstMessage !== undefined) this.setFirstMessage(existing.io_thread_id, firstMessage)
       this.touch(existing.io_thread_id)
       const value = this.requireThread(existing.io_thread_id)
       Logger.info('thread registry resolved channel thread', {
@@ -134,7 +127,7 @@ export class ThreadRegistry {
     }
     const ioThreadId = randomUUID()
     const webThreadId = identity.source === 'web' ? identity.externalThreadId : randomUUID()
-    const name = normalizeThreadName(preferredName ?? initialName)
+    const name = normalizeThreadName(firstMessage)
     const now = Date.now()
     this.transaction(() => {
       this.requireDatabase().prepare(`
@@ -147,6 +140,7 @@ export class ThreadRegistry {
           last_active_at
         ) VALUES (?, ?, ?, ?, ?, ?)
       `).run(ioThreadId, webThreadId, name, now, now, now)
+      if (firstMessage !== undefined) this.requireDatabase().prepare('UPDATE conversation SET title_initialized=1 WHERE io_thread_id=?').run(ioThreadId)
       if (identity.source !== 'web') {
         this.insertChannelBinding(ioThreadId, identity)
       }
@@ -167,9 +161,6 @@ export class ThreadRegistry {
     const normalizedId = normalizeRequired(id, 'thread id')
     const existing = this.findById(normalizedId)
     if (existing) {
-      if (preferredName?.trim()) {
-        return this.rename(normalizedId, preferredName)
-      }
       this.touch(normalizedId)
       return toMessageThread(existing)
     }
@@ -367,18 +358,16 @@ export class ThreadRegistry {
       : { state: 'active', threadId: active.external_thread_id }
   }
 
-  rename(threadId: string, name: string): MessageThread {
+  private setFirstMessage(threadId: string, name: string): MessageThread {
     const thread = this.ensure(threadId)
     const normalizedName = normalizeThreadName(name)
-    if (thread.name === normalizedName) {
-      return thread
-    }
     const now = Date.now()
-    this.requireDatabase().prepare(`
+    const result = this.requireDatabase().prepare(`
       UPDATE conversation
-      SET name = ?, updated_at = ?
-      WHERE io_thread_id = ?
+      SET name = ?, updated_at = ?, title_initialized = 1
+      WHERE io_thread_id = ? AND title_initialized = 0
     `).run(normalizedName, now, thread.id)
+    if (!result.changes) return thread
     const value = { id: thread.id, name: normalizedName }
     this.events.emit('renamed', value)
     this.events.emit('changed')
@@ -418,7 +407,7 @@ export class ThreadRegistry {
         CREATE TABLE channel_binding (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           io_thread_id TEXT NOT NULL REFERENCES conversation(io_thread_id) ON DELETE CASCADE,
-          source TEXT NOT NULL CHECK (source IN ('feishu', 'email', 'nfirco')),
+          source TEXT NOT NULL CHECK (source IN ('feishu', 'email', 'userver')),
           scope_id TEXT NOT NULL,
           external_thread_id TEXT NOT NULL,
           state TEXT NOT NULL CHECK (state IN ('active', 'retired')),
@@ -443,6 +432,37 @@ export class ThreadRegistry {
         COMMIT;
       `)
       }
+      if (version.user_version === 1) {
+        database.exec(`
+          BEGIN IMMEDIATE;
+          DROP INDEX channel_binding_active_source;
+          ALTER TABLE channel_binding RENAME TO old_channel_binding;
+          CREATE TABLE channel_binding (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            io_thread_id TEXT NOT NULL REFERENCES conversation(io_thread_id) ON DELETE CASCADE,
+            source TEXT NOT NULL CHECK (source IN ('feishu', 'email', 'userver')),
+            scope_id TEXT NOT NULL, external_thread_id TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('active', 'retired')),
+            created_at INTEGER NOT NULL, retired_at INTEGER,
+            UNIQUE(source, scope_id, external_thread_id)
+          );
+          INSERT INTO channel_binding SELECT * FROM old_channel_binding WHERE source IN ('feishu', 'email');
+          DROP TABLE old_channel_binding;
+          CREATE UNIQUE INDEX channel_binding_active_source ON channel_binding(io_thread_id, source) WHERE state='active';
+          PRAGMA user_version = 2;
+          COMMIT;
+        `)
+      }
+      if (version.user_version < 3) {
+        database.exec(`
+          BEGIN IMMEDIATE;
+          ALTER TABLE conversation ADD COLUMN title_initialized INTEGER NOT NULL DEFAULT 0;
+          UPDATE conversation SET title_initialized=1 WHERE name <> '新对话';
+          PRAGMA user_version=3;
+          COMMIT;
+        `)
+      }
+      database.exec('CREATE TABLE IF NOT EXISTS thread_checkpoint (subscription TEXT PRIMARY KEY, cursor INTEGER NOT NULL)')
       this.database = database
       this.selectConversationById = database.prepare('SELECT * FROM conversation WHERE io_thread_id = ?')
       this.selectConversationByWebId = database.prepare('SELECT * FROM conversation WHERE web_thread_id = ?')
@@ -458,6 +478,13 @@ export class ThreadRegistry {
     } catch (error) {
       database.close()
       throw error
+    }
+  }
+
+  checkpoint(subscription: string): { load(): number; save(cursor: number): void } {
+    return {
+      load: () => (this.requireDatabase().prepare('SELECT cursor FROM thread_checkpoint WHERE subscription=?').get(subscription) as { cursor: number } | undefined)?.cursor ?? 0,
+      save: cursor => { this.requireDatabase().prepare('INSERT INTO thread_checkpoint(subscription, cursor) VALUES (?, ?) ON CONFLICT(subscription) DO UPDATE SET cursor=excluded.cursor').run(subscription, cursor) }
     }
   }
 
@@ -554,7 +581,7 @@ export class ThreadRegistry {
 
 export function normalizeThreadName(value?: string): string {
   const normalized = value?.replace(/\s+/g, ' ').trim() ?? ''
-  return normalized ? normalized.slice(0, 80) : '新对话'
+  return normalized ? Array.from(normalized).slice(0, 12).join('') : '新对话'
 }
 
 function normalizeChannelIdentity(value: ChannelThreadId): NormalizedChannelIdentity {

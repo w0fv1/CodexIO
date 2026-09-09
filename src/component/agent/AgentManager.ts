@@ -16,6 +16,29 @@ export type AgentManagerStatus = 'idle' | 'online'
 export class AgentManager implements AgentOutputReceiver {
   private statusValue: AgentManagerStatus = 'idle'
   private subscription?: ConfigSubscription
+  private readonly turnWaiters = new Map<string, (error?: string) => void>()
+
+  async runUntilComplete(ioThreadId: string, dispatch: () => Promise<void>, signal: AbortSignal): Promise<void> {
+    if (this.turnWaiters.has(ioThreadId)) throw new Error('Thread already has pending work')
+    let settle!: (error?: string) => void
+    const completed = new Promise<void>((resolve, reject) => {
+      settle = error => error ? reject(new Error(error)) : resolve()
+    })
+    const abort = () => settle('Agent listener stopped')
+    this.turnWaiters.set(ioThreadId, settle)
+    signal.addEventListener('abort', abort, { once: true })
+    if (signal.aborted) abort()
+    try {
+      await Promise.all([dispatch(), completed])
+    } finally {
+      signal.removeEventListener('abort', abort)
+      this.turnWaiters.delete(ioThreadId)
+    }
+  }
+
+  completeAgentTurn(ioThreadId: string, error?: string): void {
+    this.turnWaiters.get(ioThreadId)?.(error)
+  }
 
   constructor(
     @inject(Configer) private readonly configer: Configer,
@@ -41,7 +64,8 @@ export class AgentManager implements AgentOutputReceiver {
         'agents',
         'proxy',
         'app.workspace',
-        'server'
+        'server',
+        'channeli.userver.secret', 'channeli.userver.mcpUrl', 'channeli.userver.baseUrl', 'channeli.userver.websiteId'
       ], async () => {
         const applied = await this.applyConfig()
         if (applied.isFailed) {

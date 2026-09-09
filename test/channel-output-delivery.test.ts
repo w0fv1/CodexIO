@@ -124,8 +124,7 @@ function managerWith(...outputs: ChannelOutput[]): ChannelOutputManager {
     output('web'),
     output('feishu'),
     output('feishuWebhook'),
-    output('email'),
-    output('nfirco')
+    output('email')
   )
   manager['activeOutputs'] = outputs
   return manager

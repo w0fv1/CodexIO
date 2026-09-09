@@ -340,3 +340,9 @@ Web 页面重连或 Codexio 重启后会恢复会话列表、标题和映射，�
 当前 README 适用于版本 `0.16.2`。
 
 如果发布页显示的版本和本文顶部的 `version` 不一致，请以发布页版本为准，并下载对应版本的说明。
+
+## Userver 主题监听
+
+Userver 输入通过 `@w0fv1/uclient-js/thread` 直连 Userver 的只读 WebSocket。配置与本机 API 入口见 [ConfigDefinition](src/value/ConfigDefinition.ts) 和 [CodexioApiController](src/controller/CodexioApiController.ts)；监听执行入口见 [UserverThreadInput](src/controller/channeli/UserverThreadInput.ts)。SDK 来自工作区的 `app/uclient/uclient-js`，构建时需要保留该依赖目录。
+
+在输入配置中填写站点 Agent 密钥、Userver 地址、站点 ID、本站监听链接签发接口，以及本站 MCP 地址。Codexio 自动监听该 Agent 在本站全部可访问主题，每个主题绑定独立对话，新增主题无需手工添加。回复与业务操作通过本站 MCP 完成。游标保存在本机 SQLite 中，成功完成 Agent 回合后确认；未确认事件可在重启后重放。

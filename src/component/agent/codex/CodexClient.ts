@@ -372,15 +372,13 @@ export class CodexClient {
       let threadId: string
       let model: string | undefined
       let reasoningEffort: CodexRuntimeConfig['reasoningEffort'] | undefined
-      if (normalizedThreadId.length === 0) {
-        const config = await this.readRuntimeConfig()
-        threadId = (await this.startThread(input.thread, config)).id
-        model = config.model
-        reasoningEffort = config.reasoningEffort
-      } else if (this.threads.has(normalizedThreadId)) {
+      if (normalizedThreadId && this.threads.has(normalizedThreadId)) {
         threadId = normalizedThreadId
       } else {
-        threadId = (await this.resumeThread(normalizedThreadId, input.thread.name)).id
+        const config = await this.readRuntimeConfig()
+        threadId = (await this.openThread(input.thread, config, input.mcpServers, normalizedThreadId || undefined)).id
+        model = config.model
+        reasoningEffort = config.reasoningEffort
       }
       await input.threadResolved?.(threadId)
       if (model === undefined || reasoningEffort === undefined) {
@@ -457,49 +455,20 @@ export class CodexClient {
     return createHash('sha256').update(`${mode}\u0000${home}`).digest('base64url')
   }
 
-  private async resumeThread(threadId: string, fallbackTitle: string): Promise<CodexClientThread> {
-    Logger.info('codex client resuming thread', {
-      threadId
-    })
-    const response = await this.request('thread/resume', {
-      threadId,
-      excludeTurns: true
-    })
-    if (!response || typeof response !== 'object') {
-      throw new Error('codex thread resume response not found')
-    }
-    const thread = this.readThread((response as Record<string, unknown>).thread)
-    if (!thread) {
-      throw new Error('codex resumed thread id not found')
-    }
-    if (thread.id !== threadId) {
-      throw new Error(`codex resumed unexpected thread: ${thread.id}`)
-    }
-    if (!thread.title.trim()) {
-      thread.title = fallbackTitle
-    }
-    this.upsertThread(thread)
-    Logger.info('codex client thread resumed', {
-      threadId: thread.id,
-      title: thread.title,
-      isWorking: thread.isWorking
-    })
-    return thread
-  }
-
-  private async startThread(messageThread: MessageThread, config?: CodexRuntimeConfig): Promise<CodexClientThread> {
-    const runtimeConfig = config ?? await this.readRuntimeConfig()
+  private async openThread(messageThread: MessageThread, runtimeConfig: CodexRuntimeConfig,
+    mcpServers?: CodexClientInput['mcpServers'], threadId?: string): Promise<CodexClientThread> {
     const cwd = await this.workspaceResolver.ensure(messageThread.id)
     const codexExecutablePath = runtimeConfig.bundled && runtimeConfig.args[0] && isAbsolute(runtimeConfig.args[0])
       ? runtimeConfig.args[0]
       : runtimeConfig.command
     const codexExecutableDirectory = isAbsolute(codexExecutablePath) ? dirname(codexExecutablePath) : ''
-    const response = await this.request('thread/start', {
+    const response = await this.request(threadId ? 'thread/resume' : 'thread/start', {
+      ...(threadId ? { threadId, excludeTurns: true } : { ephemeral: false }),
       ...(runtimeConfig.model ? { model: runtimeConfig.model } : {}),
       cwd,
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
-      ephemeral: false,
+      ...(mcpServers ? { config: { mcp_servers: mcpServers } } : {}),
       developerInstructions: [
         runtimeConfig.instruction,
         codexExecutableDirectory.length > 0
@@ -516,6 +485,9 @@ export class CodexClient {
     const thread = this.readThread((response as Record<string, unknown>).thread)
     if (!thread) {
       throw new Error('codex thread id not found')
+    }
+    if (threadId && thread.id !== threadId) {
+      throw new Error(`codex resumed unexpected thread: ${thread.id}`)
     }
     if (!thread.title.trim()) {
       thread.title = messageThread.name
@@ -802,6 +774,16 @@ export class CodexClient {
       title: this.threads.get(threadId)?.title ?? '',
       isWorking: false
     })
+    const status = readString(turn, 'status')
+    if (status === 'failed' || status === 'interrupted') {
+      this.liveItems.clearTurn(threadId, turnId)
+      this.emitMessage({
+        thread: this.messageThread(threadId), turnId, status: 'failed', role: 'assistant',
+        text: readString((turn as Record<string, unknown>).error, 'message') ?? `Codex turn ${status}`,
+        messages: []
+      })
+      return
+    }
     const items = turn && typeof turn === 'object' && Array.isArray((turn as Record<string, unknown>).items)
       ? (turn as Record<string, unknown>).items as unknown[]
       : []

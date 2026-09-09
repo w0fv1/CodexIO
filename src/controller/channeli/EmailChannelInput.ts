@@ -149,7 +149,6 @@ export class EmailChannelInput implements ChannelInput {
           }
           const result = await receiver.receive('email', {
             channelThreadId,
-            threadName: parsed.subject ?? undefined,
             sourceMessageId: parsed.messageId?.trim() || `${mailbox}:uid:${message.uid}`,
             text
           })

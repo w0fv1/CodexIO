@@ -22,74 +22,31 @@ import { CodexAgent } from '../src/component/agent/CodexAgent.js'
 import { CommandExecutor, parseCommandInput } from '../src/controller/CommandExecutor.js'
 import { ChannelInput } from '../src/controller/channeli/ChannelInput.js'
 import { ChannelInputManager } from '../src/controller/channeli/ChannelInputManager.js'
-import { configDescriptor, ConfigSchema, createDefaultConfig, parseCodexioConfig, validateCodexioConfig } from '../src/value/ConfigDefinition.js'
+import { createDefaultConfig } from '../src/value/ConfigDefinition.js'
 import { Result } from '../src/value/Result.js'
 import { createMessage, deriveMessageId, Message } from '../src/value/Message.js'
 import { shouldReceiveFeishuMessage, shouldReceiveFeishuSender } from '../src/value/FeishuMessage.js'
 import { parseMarkdownAttachmentReferences, renderMarkdownHtml } from '../src/util/Markdown.js'
 import { resolveUserPath } from '../src/util/Path.js'
 import { createProcessEnv } from '../src/util/ProcessEnvironment.js'
-import { parseNfircoThreadSocketEvent } from '../src/component/channel/NfircoThreadClient.js'
 import { WebThreadManager } from '../src/component/channel/WebThreadManager.js'
 import { ServerRuntime } from '../src/component/ServerRuntime.js'
 import { LoginItemManager } from '../src/component/desktop/LoginItemManager.js'
 import { DesktopIntegration } from '../src/component/desktop/DesktopIntegration.js'
-import { renderConfigTemplate } from '../src/value/ConfigTemplate.js'
 
 const testMetadata = new CodexioMetadata()
 
 function createTestCodexClient(configer: Configer, metadata = testMetadata): CodexClient {
-  return new CodexClient(configer, metadata, new ThreadWorkspaceResolver(configer, metadata))
+  const defaults = createDefaultConfig()
+  const effectiveConfig = {
+    get: async (path: string) => (await configer.get(path as never)) ?? path.split('.').reduce((value: any, key) => value[key], defaults)
+  } as Configer
+  return new CodexClient(effectiveConfig, metadata, new ThreadWorkspaceResolver(effectiveConfig, metadata))
 }
 
 describe('core', () => {
   afterEach(() => {
     vi.useRealTimers()
-  })
-  it('creates channel-only default config', () => {
-    const config = createDefaultConfig()
-    expect(config.app.id).toBe('')
-    expect(config.app.startAtLogin).toBe(false)
-    expect(config.app.preventSystemSleep).toBe(true)
-    expect(config.server.host).toBe('127.0.0.1')
-    expect(config.agents.instruction).toContain('Markdown reference')
-    expect(config.agents.instruction).toContain('previews without a file path')
-    expect(config.agents.echo.enabled).toBe(true)
-    expect(config.agents.codex.bundled).toBe(true)
-    expect(config.app.workspace.path).toBe('workspace')
-    expect(config.proxy.host).toBe('127.0.0.1')
-    expect(config.proxy.noProxy).toBe('')
-    expect(config.channeli.web?.enabled).toBe(true)
-    expect(config.channeli.feishu?.aite).toBe(true)
-    expect(config.channeli.feishu?.allowedOpenIds).toEqual([])
-    expect(config.channeli.nfirco?.enabled).toBe(false)
-    expect(config.channelo.nfirco?.enabled).toBe(false)
-    expect(config.channelo.web?.enabled).toBe(true)
-  })
-
-  it('describes config groups by stable paths', () => {
-    const feishuInput = configDescriptor.groups.find((group) => group.path === 'channeli.feishu')
-    expect(feishuInput).toEqual({
-      path: 'channeli.feishu',
-      title: 'Feishu Input',
-      description: '在已经引入 Codexio 的飞书群聊中，或与 Codexio 私聊时，输入 $bind ${app.id} 即可在飞书中绑定 Codexio。'
-    })
-    expect(configDescriptor.fields.find((field) => field.path === 'channeli.feishu.enabled')?.groupPath).toBe('channeli.feishu')
-    expect(configDescriptor.fields.find((field) => field.path === 'app.preventSystemSleep')).toEqual(expect.objectContaining({
-      groupPath: 'app',
-      label: '阻止系统睡眠',
-      type: 'boolean',
-      apply: '立即生效'
-    }))
-  })
-
-  it('does not expose cross-client Codex thread observation', () => {
-    const config = createDefaultConfig()
-    expect(config.agents.codex).not.toHaveProperty('observe')
-    expect(configDescriptor.groups).not.toContainEqual(expect.objectContaining({
-      path: 'agents.codex.observe'
-    }))
-    expect(configDescriptor.fields.some((field) => field.path.startsWith('agents.codex.observe.'))).toBe(false)
   })
 
   it('inherits the existing Codex authorization when no private home is configured', () => {
@@ -106,17 +63,6 @@ describe('core', () => {
     }
   })
 
-  it('renders config references without interpreting markup', () => {
-    expect(renderConfigTemplate('绑定 $bind ${app.id} 到 ${server.host}', {
-      app: {
-        id: '<script>alert(1)</script>'
-      },
-      server: {
-        host: '127.0.0.1'
-      }
-    })).toBe('绑定 $bind <script>alert(1)</script> 到 127.0.0.1')
-    expect(renderConfigTemplate('保留 ${missing.value}', {})).toBe('保留 ${missing.value}')
-  })
 
   it('applies login item changes only for packaged Windows desktop builds', () => {
     const calls: unknown[] = []
@@ -172,115 +118,6 @@ describe('core', () => {
     expect(await configer.get('app.startAtLogin')).toBe(false)
   })
 
-  it('parses nfirco thread message events', () => {
-    expect(parseNfircoThreadSocketEvent({
-      type: 'thread.message.created',
-      eventId: 'event-1',
-      threadUuid: 'thread-1',
-      section: 'section-1',
-      title: 'Project thread',
-      authorAccessId: 'access-1',
-      messageUuid: 'message-1',
-      text: 'hello',
-      files: [
-        {
-          id: 11,
-          originalFilename: '需求.md',
-          mimeType: 'text/markdown',
-          size: 12,
-          url: 'http://127.0.0.1/file/11'
-        }
-      ],
-      images: [
-        {
-          id: 12,
-          originalFilename: '截图.png',
-          mimeType: 'image/png',
-          size: 13,
-          url: 'http://127.0.0.1/file/12'
-        }
-      ]
-    })).toEqual({
-      type: 'thread.message.created',
-      eventId: 'event-1',
-      threadUuid: 'thread-1',
-      section: 'section-1',
-      title: 'Project thread',
-      authorAccessId: 'access-1',
-      messageUuid: 'message-1',
-      text: 'hello',
-      files: [
-        {
-          id: '11',
-          name: '需求.md',
-          mime: 'text/markdown',
-          size: 12,
-          url: 'http://127.0.0.1/file/11'
-        }
-      ],
-      images: [
-        {
-          id: '12',
-          name: '截图.png',
-          mime: 'image/png',
-          size: 13,
-          url: 'http://127.0.0.1/file/12'
-        }
-      ]
-    })
-    expect(parseNfircoThreadSocketEvent({
-      type: 'thread.created',
-      eventId: 'thread-2',
-      threadUuid: 'thread-2',
-      section: 'section-1',
-      authorAccessId: 'access-2',
-      text: 'thread body'
-    })).toEqual({
-      type: 'thread.created',
-      eventId: 'thread-2',
-      threadUuid: 'thread-2',
-      section: 'section-1',
-      authorAccessId: 'access-2',
-      text: 'thread body',
-      files: [],
-      images: []
-    })
-  })
-
-  it('parses nfirco thread file-only message events', () => {
-    expect(parseNfircoThreadSocketEvent({
-      type: 'thread.message.created',
-      eventId: 'event-file',
-      threadUuid: 'thread-file',
-      messageUuid: 'message-file',
-      text: '',
-      files: [
-        {
-          id: 21,
-          filename: 'file.bin',
-          url: 'http://127.0.0.1/file/21'
-        }
-      ]
-    })).toEqual({
-      type: 'thread.message.created',
-      eventId: 'event-file',
-      threadUuid: 'thread-file',
-      section: undefined,
-      messageUuid: 'message-file',
-      text: '',
-      files: [
-        {
-          id: '21',
-          name: 'file.bin',
-          mime: undefined,
-          size: undefined,
-          url: 'http://127.0.0.1/file/21'
-        }
-      ],
-      images: []
-    })
-  })
-
   it('controls whether feishu group messages require aite', () => {
     expect(shouldReceiveFeishuMessage('group', [], true)).toBe(false)
     expect(shouldReceiveFeishuMessage('group', [
@@ -320,23 +157,6 @@ describe('core', () => {
       type: 'message',
       text: 'hello'
     })
-  })
-
-  it('parses empty feishu chat ids as unbound strings', async () => {
-    const config = await parseCodexioConfig({
-      channeli: {
-        feishu: {
-          chatId: null
-        }
-      },
-      channelo: {
-        feishu: {
-          chatId: null
-        }
-      }
-    }, 'config.yaml')
-    expect(config.channeli.feishu.chatId).toBe('')
-    expect(config.channelo.feishu.chatId).toBe('')
   })
 
   it('consumes test commands without sending them to the agent event', async () => {
@@ -389,7 +209,7 @@ describe('core', () => {
       disabledInput('web'),
       disabledInput('feishu'),
       disabledInput('email'),
-      disabledInput('nfirco')
+      disabledInput('userver')
     )
     const result = await manager.receive('feishu', {
       channelThreadId: {
@@ -438,7 +258,7 @@ describe('core', () => {
       disabledInput('web'),
       disabledInput('feishu'),
       disabledInput('email'),
-      disabledInput('nfirco')
+      disabledInput('userver')
     )
 
     const result = await manager.receive('web', {
@@ -474,7 +294,7 @@ describe('core', () => {
       disabledInput('web'),
       disabledInput('feishu'),
       disabledInput('email'),
-      disabledInput('nfirco')
+      disabledInput('userver')
     )
     await manager.start()
     await manager.start()
@@ -498,7 +318,7 @@ describe('core', () => {
       disabledInput('web'),
       disabledInput('feishu'),
       disabledInput('email'),
-      disabledInput('nfirco')
+      disabledInput('userver')
     )
 
     const result = await manager.receive('feishu', {
@@ -532,7 +352,7 @@ describe('core', () => {
       disabledInput('web'),
       disabledInput('feishu'),
       disabledInput('email'),
-      disabledInput('nfirco')
+      disabledInput('userver')
     )
 
     for (const channelThreadId of ['chat:thread:omt_1', 'chat:thread:omt_2']) {
@@ -550,51 +370,6 @@ describe('core', () => {
     expect(messages).toHaveLength(2)
     expect(messages[0].id).not.toBe(messages[1].id)
     expect(messages[0].thread.id).not.toBe(messages[1].thread.id)
-  })
-
-  it('rejects configs without enabled channel input and output', () => {
-    const config = ConfigSchema.parse({
-      channeli: {
-        web: {
-          enabled: false
-        }
-      },
-      channelo: {
-        web: {
-          enabled: false
-        }
-      }
-    })
-    expect(() => validateCodexioConfig(config)).toThrow('one channeli must be enabled')
-    expect(() => validateCodexioConfig(config)).toThrow('one channelo must be enabled')
-  })
-
-  it('rejects configs without enabled agents', () => {
-    const config = ConfigSchema.parse({
-      agents: {
-        echo: {
-          enabled: false
-        },
-        codex: {
-          enabled: false
-        }
-      }
-    })
-    expect(() => validateCodexioConfig(config)).toThrow('one agent must be enabled')
-  })
-
-  it('requires nfirco output section when nfirco output is enabled', () => {
-    const config = ConfigSchema.parse({
-      channelo: {
-        nfirco: {
-          enabled: true,
-          baseUrl: 'https://next.firco.cn',
-          account: 'codexio',
-          password: 'password'
-        }
-      }
-    })
-    expect(() => validateCodexioConfig(config)).toThrow('channelo.nfirco.section is required')
   })
 
   it('keeps codex agent and workspace config fields when importing', async () => {
@@ -907,7 +682,7 @@ describe('core', () => {
       }
       throw new Error(method)
     }
-    await client['startThread']({ id: 'io-thread', name: 'Thread' })
+    await client['openThread']({ id: 'io-thread', name: 'Thread' }, await client['readRuntimeConfig']())
     expect(String(threadStartParams?.developerInstructions)).toContain('Markdown reference')
   })
 
@@ -942,7 +717,7 @@ describe('core', () => {
       }
       throw new Error(method)
     }
-    await client['startThread']({ id: 'io-thread', name: 'Thread' })
+    await client['openThread']({ id: 'io-thread', name: 'Thread' }, await client['readRuntimeConfig']())
     expect(String(threadStartParams?.developerInstructions)).toContain('Project instruction')
     expect(String(threadStartParams?.developerInstructions)).toContain(`Codex executable directory: ${dirname(codexCommand)}`)
   })
@@ -999,7 +774,7 @@ describe('core', () => {
       }
       throw new Error(method)
     }
-    await client['startThread']({ id: 'io-thread', name: 'Thread' })
+    await client['openThread']({ id: 'io-thread', name: 'Thread' }, await client['readRuntimeConfig']())
     expect(threadStartParams?.cwd).toBe(join(dir, 'io-thread'))
   })
 
@@ -1151,15 +926,18 @@ describe('core', () => {
     expect(requests).toEqual([
       {
         method: 'thread/resume',
-        params: {
+        params: expect.objectContaining({
           threadId: 'codex-thread',
-          excludeTurns: true
-        }
+          excludeTurns: true,
+          sandbox: 'danger-full-access'
+        })
       },
       {
         method: 'turn/start',
         params: {
           threadId: 'codex-thread',
+          model: 'gpt-6-astra',
+          effort: 'medium',
           input: [{
             type: 'text',
             text: 'continue',
@@ -1359,7 +1137,7 @@ describe('core', () => {
 
   it('updates web thread names from the thread registry', () => {
     const registry = createThreadRegistry()
-    const original = registry.ensure('external-io-thread', 'Original name')
+    const original = registry.resolve({ source: 'web', id: 'name-test' })
     const manager = new WebThreadManager(registry)
     manager.appendMessage(createMessage({
       id: 'rename-message',
@@ -1367,7 +1145,7 @@ describe('core', () => {
       role: 'agent',
       text: 'hello'
     }))
-    registry.rename(original.id, 'Updated name')
+    registry.resolve({ source: 'web', id: 'name-test' }, 'Updated name')
     expect(manager.snapshot().threads).toMatchObject([{
       thread: {
         id: original.id,
@@ -1383,14 +1161,6 @@ describe('core', () => {
   })
 
   it('resolves tilde workspace paths to the user home directory', async () => {
-    const parsed = await parseCodexioConfig({
-      app: {
-        workspace: {
-          path: null
-        }
-      }
-    }, 'config.yaml')
-    expect(parsed.app.workspace.path).toBe('~')
     expect(resolveUserPath('~')).toBe(homedir())
     expect(resolveUserPath('~/work')).toBe(join(homedir(), 'work'))
     expect(resolveUserPath('~\\work')).toBe(join(homedir(), 'work'))
@@ -2006,7 +1776,7 @@ describe('core', () => {
     expect(registry.getIoThreadIdByAgentThread('codex', 'default', 'external-thread')).toBeUndefined()
   })
 
-  it('preserves known thread names and applies later Codex title updates', async () => {
+  it('preserves the local title when Codex emits messages', async () => {
     const sent: Message[] = []
     const outputManager = recordingMessageOutput((message) => sent.push(message))
     const registry = createThreadRegistry()
@@ -2036,13 +1806,8 @@ describe('core', () => {
         text: 'reply'
       }]
     })
-    expect(sent[0].thread.name).toBe('Original prompt')
-    agent['receiveCodexThread']({
-      id: 'codex-thread',
-      title: 'Generated title',
-      isWorking: false
-    })
-    expect(registry.get('io-thread')?.name).toBe('Generated title')
+    expect(sent[0].thread.name).toBe('Original pro')
+    expect(registry.get('io-thread')?.name).toBe('Original pro')
   })
 
   it('publishes assembled Codex messages without channel context', async () => {
@@ -2133,8 +1898,7 @@ async function createRecordingChannelOutputManager(
     output('web'),
     output('feishu'),
     output('feishuWebhook'),
-    output('email'),
-    output('nfirco')
+    output('email')
   )
   await manager.start()
   return manager

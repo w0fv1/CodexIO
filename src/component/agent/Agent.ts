@@ -3,6 +3,7 @@ import { Result } from '../../value/Result.js'
 
 export interface AgentOutputReceiver {
   receiveAgentOutput(message: Message): Promise<Result<void>>
+  completeAgentTurn?(ioThreadId: string, error?: string): void
 }
 
 export interface Agent {

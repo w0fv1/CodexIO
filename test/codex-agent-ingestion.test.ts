@@ -77,6 +77,22 @@ describe('Codex agent ingestion', () => {
     await context.agent.stop()
   })
 
+  it('keeps the external Thread title when Codex emits a prompt preview', async () => {
+    const context = fixture()
+    await context.agent.start(context.receiver)
+    const thread = context.registry.resolve({ source: 'userver', id: '["http://localhost",153,"agent","thread"]' }, '协作标题')
+    context.registry.bindAgentThread(thread.id, 'codex', 'recording-scope', 'codex-thread')
+    Reflect.set(context.agent, 'agentScope', 'recording-scope')
+    await context.agent['receiveCodexMessage']({
+      thread: { id: 'codex-thread', name: 'Userver internal prompt' },
+      turnId: 'turn', status: 'progressCompleted', itemId: 'progress', role: 'assistant', text: 'checking', messages: []
+    })
+    expect(context.registry.get(thread.id)?.name).toBe('协作标题')
+    expect(context.events.at(-1)?.thread.name).toBe('协作标题')
+    await context.agent.stop()
+    await context.registry.close()
+  })
+
   it('routes login results only to threads that requested that login', async () => {
     const context = fixture()
     context.registry.ensure('unrelated-thread')
@@ -92,7 +108,7 @@ describe('Codex agent ingestion', () => {
       thread: { id: 'requesting-thread', name: 'Requesting thread' },
       role: 'user',
       text: 'run'
-    }))).isFailed).toBe(false)
+    }))).isFailed).toBe(true)
 
     context.client.emitLogin({
       loginId: 'login-1',

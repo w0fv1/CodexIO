@@ -205,7 +205,7 @@ export const configDefinition = defineConfig({
         type: 'string',
         apply: '重启 Codex Agent',
         schema: z.string().min(1),
-        default: 'gpt-5.6-sol'
+        default: 'gpt-6-astra'
       }),
       reasoningEffort: field({
         label: 'Reasoning Effort',
@@ -425,49 +425,13 @@ export const configDefinition = defineConfig({
         default: 30
       })
     }),
-    nfirco: group({
-      title: 'Nfirco Thread Input'
-    }, {
-      enabled: field({
-        label: 'Enabled',
-        description: '启用 Nfirco Thread 输入通道。',
-        type: 'boolean',
-        apply: '重连 Nfirco Thread 输入',
-        schema: z.boolean(),
-        default: false
-      }),
-      baseUrl: field({
-        label: 'Base URL',
-        description: 'Nfirco 后端基础地址。',
-        type: 'string',
-        apply: '重连 Nfirco Thread 输入',
-        schema: z.string(),
-        default: ''
-      }),
-      account: field({
-        label: 'Account',
-        description: '连接 Nfirco Thread API 的账号。',
-        type: 'string',
-        apply: '重连 Nfirco Thread 输入',
-        schema: z.string(),
-        default: ''
-      }),
-      password: field({
-        label: 'Password',
-        description: '连接 Nfirco Thread API 的密码。',
-        type: 'password',
-        apply: '重连 Nfirco Thread 输入',
-        schema: z.string(),
-        default: ''
-      }),
-      section: field({
-        label: 'Section',
-        description: '订阅的 Nfirco Thread 分区。',
-        type: 'string',
-        apply: '重连 Nfirco Thread 输入',
-        schema: z.string(),
-        default: ''
-      })
+    userver: group({ title: 'Userver Thread Input' }, {
+      subscriptionUrl: field({ label: 'Site Thread Subscription URL', description: '站点签发 Agent 全部可接收主题只读监听链接的接口。', type: 'string', apply: '重连 Userver', schema: z.string(), default: '' }),
+      mcpUrl: field({ label: 'Site MCP URL', description: '本站 MCP 地址，绑定到此 Agent 的执行主题。', type: 'string', apply: '重启 Agent', schema: z.string(), default: '' }),
+      enabled: field({ label: 'Enabled', description: '自动监听本站 Agent 全部可接收主题，每个主题独立对话。', type: 'boolean', apply: '重连 Userver', schema: z.boolean(), default: false }),
+      baseUrl: field({ label: 'Userver URL', description: 'Userver 服务基础地址。', type: 'string', apply: '重连 Userver', schema: z.string(), default: '' }),
+      websiteId: field({ label: 'Website ID', description: 'Agent 授权所属站点。', type: 'number', apply: '重连 Userver', schema: positiveInt, default: 1 }),
+      secret: field({ label: 'Agent Secret', description: '本站专属 Agent 密钥。', type: 'password', apply: '重连 Userver', schema: z.string(), default: '' }),
     })
   },
   channelo: {
@@ -612,50 +576,6 @@ export const configDefinition = defineConfig({
           })
         })
       }
-    }),
-    nfirco: group({
-      title: 'Nfirco Thread Output'
-    }, {
-      enabled: field({
-        label: 'Enabled',
-        description: '启用 Nfirco Thread 输出通道。',
-        type: 'boolean',
-        apply: '重连 Nfirco Thread 输出',
-        schema: z.boolean(),
-        default: false
-      }),
-      baseUrl: field({
-        label: 'Base URL',
-        description: 'Nfirco 后端基础地址。',
-        type: 'string',
-        apply: '重连 Nfirco Thread 输出',
-        schema: z.string(),
-        default: ''
-      }),
-      account: field({
-        label: 'Account',
-        description: '连接 Nfirco Thread API 的账号。',
-        type: 'string',
-        apply: '重连 Nfirco Thread 输出',
-        schema: z.string(),
-        default: ''
-      }),
-      password: field({
-        label: 'Password',
-        description: '连接 Nfirco Thread API 的密码。',
-        type: 'password',
-        apply: '重连 Nfirco Thread 输出',
-        schema: z.string(),
-        default: ''
-      }),
-      section: field({
-        label: 'Section',
-        description: '创建 Nfirco Thread 主题的分区。',
-        type: 'string',
-        apply: '重连 Nfirco Thread 输出',
-        schema: z.string(),
-        default: ''
-      })
     })
   }
 })
@@ -732,12 +652,11 @@ export function validateCodexioConfig(config: CodexioConfig): void {
     requireValue(issues, email.account.imap.user, 'channeli.email.account.imap.user is required')
     requireValue(issues, email.account.imap.password, 'channeli.email.account.imap.password is required')
   }
-  if (config.channeli.nfirco?.enabled) {
-    const nfirco = config.channeli.nfirco
-    requireValue(issues, nfirco.baseUrl, 'channeli.nfirco.baseUrl is required')
-    requireValue(issues, nfirco.account, 'channeli.nfirco.account is required')
-    requireValue(issues, nfirco.password, 'channeli.nfirco.password is required')
-    requireValue(issues, nfirco.section, 'channeli.nfirco.section is required')
+  if (config.channeli.userver.enabled) {
+    requireValue(issues, config.channeli.userver.baseUrl, 'Userver URL is required')
+    requireValue(issues, config.channeli.userver.subscriptionUrl, 'Site thread subscription URL is required')
+    requireValue(issues, config.channeli.userver.mcpUrl, 'Site MCP URL is required')
+    requireValue(issues, config.channeli.userver.secret, 'Userver Agent secret is required')
   }
   if (config.channelo.email?.enabled) {
     const email = config.channelo.email
@@ -746,13 +665,7 @@ export function validateCodexioConfig(config: CodexioConfig): void {
     requireValue(issues, email.account.smtp.user, 'channelo.email.account.smtp.user is required')
     requireValue(issues, email.account.smtp.password, 'channelo.email.account.smtp.password is required')
   }
-  if (config.channelo.nfirco?.enabled) {
-    const nfirco = config.channelo.nfirco
-    requireValue(issues, nfirco.baseUrl, 'channelo.nfirco.baseUrl is required')
-    requireValue(issues, nfirco.account, 'channelo.nfirco.account is required')
-    requireValue(issues, nfirco.password, 'channelo.nfirco.password is required')
-    requireValue(issues, nfirco.section, 'channelo.nfirco.section is required')
-  }
+
   if (issues.length > 0) {
     throw new Error([
       'Codexio config invalid:',

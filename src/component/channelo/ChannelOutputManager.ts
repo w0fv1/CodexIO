@@ -11,7 +11,6 @@ import { MessageInbox } from '../MessageInbox.js'
 import { EmailChannelOutput } from './EmailChannelOutput.js'
 import { FeishuChannelOutput } from './FeishuChannelOutput.js'
 import { FeishuWebhookChannelOutput } from './FeishuWebhookChannelOutput.js'
-import { NfircoThreadOutput } from './NfircoThreadOutput.js'
 import { WebChannelOutput } from './WebChannelOutput.js'
 
 @injectable()
@@ -29,15 +28,13 @@ export class ChannelOutputManager {
     @inject(WebChannelOutput) web: ChannelOutput,
     @inject(FeishuChannelOutput) feishu: ChannelOutput,
     @inject(FeishuWebhookChannelOutput) feishuWebhook: ChannelOutput,
-    @inject(EmailChannelOutput) email: ChannelOutput,
-    @inject(NfircoThreadOutput) nfirco: ChannelOutput
+    @inject(EmailChannelOutput) email: ChannelOutput
   ) {
     this.availableOutputs = [
       web,
       feishu,
       feishuWebhook,
-      email,
-      nfirco
+      email
     ]
   }
 

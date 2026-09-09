@@ -10,6 +10,7 @@ export type CodexClientInput = {
   threadId?: string
   text: string
   files?: import('../../../value/Message.js').MessageFile[]
+  mcpServers?: Record<string, { url: string; http_headers: Record<string, string>; required: boolean }>
   threadResolved?: (threadId: string) => void | Promise<void>
 }
 
