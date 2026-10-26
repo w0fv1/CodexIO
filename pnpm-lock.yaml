@@ -11,15 +11,15 @@ importers:
       '@anthropic-ai/claude-code':
         specifier: ^2.1.178
         version: 2.1.179
+      '@laiqi/uclient-js':
+        specifier: file:../../uclient/uclient-js
+        version: file:../../uclient/uclient-js
       '@larksuiteoapi/node-sdk':
         specifier: ^1.67.0
         version: 1.67.0
       '@openai/codex':
         specifier: ^0.153.4
         version: 0.153.4
-      '@w0fv1/uclient-js':
-        specifier: file:../../uclient/uclient-js
-        version: file:../../uclient/uclient-js
       cors:
         specifier: ^2.8.5
         version: 2.8.6
@@ -576,6 +576,9 @@ packages:
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
 
+  '@laiqi/uclient-js@file:../../uclient/uclient-js':
+    resolution: {directory: ../../uclient/uclient-js, type: directory}
+
   '@larksuiteoapi/node-sdk@1.67.0':
     resolution: {integrity: sha512-pr3iZbK+CkwgwIhUzt86mZGP/wLCzBDRmCy+Vt+/UAWx/KjwxwrRpfAKm4eOmd0uUd8AcG2mWC/ZSUMu7lZIqg==}
 
@@ -1064,9 +1067,6 @@ packages:
 
   '@vitest/utils@4.1.9':
     resolution: {integrity: sha512-A51o8ymO5PpqlWNnBP9ZHPXDIpuMtTLlGSjN7la4US+LJzoUMyhwjA5QXlm39JexgwHKW4Xjs8Z2d3dLCXOeuA==}
-
-  '@w0fv1/uclient-js@file:../../uclient/uclient-js':
-    resolution: {directory: ../../uclient/uclient-js, type: directory}
 
   '@xmldom/xmldom@0.8.13':
     resolution: {integrity: sha512-KRYzxepc14G/CEpEGc3Yn+JKaAeT63smlDr+vjB8jRfgTBBI9wRj/nkQEO+ucV8p8I9bfKLWp37uHgFrbntPvw==}
@@ -3308,6 +3308,12 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
 
+  '@laiqi/uclient-js@file:../../uclient/uclient-js':
+    dependencies:
+      '@fingerprintjs/fingerprintjs': 5.2.0
+      core-js-pure: 3.50.0
+      js-base64: 3.9.3
+
   '@larksuiteoapi/node-sdk@1.67.0':
     dependencies:
       axios: 1.13.6
@@ -3719,12 +3725,6 @@ snapshots:
       '@vitest/pretty-format': 4.1.9
       convert-source-map: 2.0.0
       tinyrainbow: 3.1.0
-
-  '@w0fv1/uclient-js@file:../../uclient/uclient-js':
-    dependencies:
-      '@fingerprintjs/fingerprintjs': 5.2.0
-      core-js-pure: 3.50.0
-      js-base64: 3.9.3
 
   '@xmldom/xmldom@0.8.13': {}
 

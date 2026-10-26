@@ -1,6 +1,6 @@
 import { inject, injectable } from 'inversify'
-import { UserverAgentClient } from '@w0fv1/uclient-js/agent'
-import { UserverThreadClient } from '@w0fv1/uclient-js/thread'
+import { UserverAgentClient } from '@laiqi/uclient-js/agent'
+import { UserverThreadClient } from '@laiqi/uclient-js/thread'
 import { Configer } from '../../component/Configer.js'
 import { Logger } from '../../component/Logger.js'
 import { FileStore } from '../../component/FileStore.js'
