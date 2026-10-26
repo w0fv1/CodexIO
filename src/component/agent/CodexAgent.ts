@@ -1,5 +1,5 @@
 import { inject, injectable } from 'inversify'
-import { UserverAgentClient } from '@w0fv1/uclient-js/agent'
+import { UserverAgentClient } from '@laiqi/uclient-js/agent'
 import { createMessage, deriveMessageId, Message } from '../../value/Message.js'
 import { Result } from '../../value/Result.js'
 import { Configer } from '../Configer.js'

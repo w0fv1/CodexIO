@@ -65,7 +65,7 @@
     "@anthropic-ai/claude-code": "^2.1.178",
     "@larksuiteoapi/node-sdk": "^1.67.0",
     "@openai/codex": "^0.153.4",
-    "@w0fv1/uclient-js": "file:../../uclient/uclient-js",
+    "@laiqi/uclient-js": "file:../../uclient/uclient-js",
     "cors": "^2.8.5",
     "electron-updater": "^6.8.9",
     "eventemitter3": "^5.0.4",
